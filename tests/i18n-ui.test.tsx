@@ -26,7 +26,7 @@ it('changes mounted settings, composer and wallet labels without a reload', asyn
   vi.spyOn(navigator, 'language', 'get').mockReturnValue('da-DK');
   setLanguagePref('system');
   await open();
-  expect(find('textarea').getAttribute('aria-label')).toBe('Besked til Maya');
+  expect(find('textarea').getAttribute('aria-label')).toBe('Besked til Robin');
   const unnamed = `[data-track="peer:${'c'.repeat(64)}"] .name`;
   expect(find(unnamed).textContent).toContain('Ny kontakt');
   find('[data-profile]').click(); find('[data-open-settings]').click();
@@ -39,7 +39,7 @@ it('changes mounted settings, composer and wallet labels without a reload', asyn
   expect(find('[data-theme-option="light"]').textContent).toBe('Light');
   expect(find(unnamed).textContent).toContain('New contact');
   expect(find('[data-track="ai"] .name').textContent).toBe('Ask your box');
-  expect(find('textarea').getAttribute('aria-label')).toBe('Message Maya');
+  expect(find('textarea').getAttribute('aria-label')).toBe('Message Robin');
   find('[data-settings-close]').click();
   find('[data-profile]').click(); find('[data-open-wallet]').click();
   setLanguagePref('da');
@@ -63,7 +63,7 @@ it.each(['en', 'da'] as const)('preserves pay review values, recipient and one e
   expect(find('[data-review-fee]').textContent).toBe(locale === 'da' ? 'højst 10 sats' : 'up to 10 sats');
   expect(find('[data-review-total]').textContent).toBe('1\u202f260 sats');
   expect(find('[data-payee]').getAttribute('title')).toBe(payee);
-  expect(find('[data-payee]').textContent).toContain(locale === 'da' ? 'ikke bekræftet som Maya' : 'not verified as Maya');
+  expect(find('[data-payee]').textContent).toContain(locale === 'da' ? 'ikke bekræftet som Robin' : 'not verified as Robin');
   expect(find('[data-pay-confirm]').textContent?.trim()).toBe(locale === 'da' ? 'Bekræft og betal' : 'Confirm and pay');
   expect(source.keysend).not.toHaveBeenCalled();
   find('[data-pay-confirm]').click();
@@ -74,7 +74,7 @@ it.each(['en', 'da'] as const)('preserves pay review values, recipient and one e
 it.each(['en', 'da'] as const)('uses bare contact names and localized amount guidance in %s', async locale => {
   setLanguagePref(locale);
   await open();
-  expect(find('[data-cost]').textContent).toContain(locale === 'da' ? 'Mayas pris' : 'Maya’s price');
+  expect(find('[data-cost]').textContent).toContain(locale === 'da' ? 'Robins pris' : 'Robin’s price');
   find('[data-composer-mode="pay"]').click();
   const tabs = [...mount.querySelectorAll<HTMLButtonElement>('[data-composer-panel="pay"] [role="tab"]')];
   tabs[1].click();
@@ -87,5 +87,5 @@ it.each(['en', 'da'] as const)('uses bare contact names and localized amount gui
   type('[data-pay-amount]', '1 250');
   expect(find<HTMLInputElement>('[data-pay-amount]').getAttribute('aria-invalid')).toBe('false');
   find('[data-composer-mode="request"]').click();
-  expect(find('[data-composer]').textContent).toContain(locale === 'da' ? 'Anmod Maya om betaling' : 'Request from Maya');
+  expect(find('[data-composer]').textContent).toContain(locale === 'da' ? 'Anmod Robin om betaling' : 'Request from Robin');
 });

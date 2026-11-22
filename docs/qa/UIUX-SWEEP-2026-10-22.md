@@ -24,7 +24,7 @@ Eight findings from 2026-10-20 are still open. They are listed again at the end 
 - **Screen:** Chat composer, every width; worst at 360px
 - **Severity:** High
 - **Screenshot:** `docs/qa/screenshots/2026-10-22-cost-leak-360.png` (before), `docs/qa/screenshots/2026-10-22-cost-closed-360.png` and `docs/qa/screenshots/2026-10-22-cost-open-360.png` (after)
-- **What:** `.price-breakdown { display: grid }` overrides the user-agent rule that hides closed `<details>` children. With the ⓘ shut, “Maya’s price / 2 sats”, the routing line, and “You pay at most / 7 sats” still laid out in a 44px-wide box and ran 34px off the right edge of a 360px screen.
+- **What:** `.price-breakdown { display: grid }` overrides the user-agent rule that hides closed `<details>` children. With the ⓘ shut, “Robin’s price / 2 sats”, the routing line, and “You pay at most / 7 sats” still laid out in a 44px-wide box and ran 34px off the right edge of a 360px screen.
 - **Fix:** `.composer-info:not([open]) > :not(summary) { display: none; }`. Opened, the same breakdown sits inside the composer (measured right edge 331 of 360).
 
 ### 2. A short chat title is under a 44px tap target
@@ -32,7 +32,7 @@ Eight findings from 2026-10-20 are still open. They are listed again at the end 
 - **Screen:** Chat header under 480px
 - **Severity:** Medium
 - **Screenshot:** `docs/qa/screenshots/2026-10-22-chat-360.png`
-- **What:** The phone rule set `.track-title-btn { min-width: 44px }`, but `.track-head > .track-title-btn { min-width: 0 }` wins on specificity. Measured “Maya” at 40×44 and “Josh” at 36×44. The name opens the contact sheet.
+- **What:** The phone rule set `.track-title-btn { min-width: 44px }`, but `.track-head > .track-title-btn { min-width: 0 }` wins on specificity. Measured “Robin” at 40×44 and “Kim” at 36×44. The name opens the contact sheet.
 - **Fix:** The 480px rule now uses `.track-head > .track-title-btn { min-width: 44px }`. A long name can still shrink to that floor and ellipsize. Measured 44×44 after the change.
 
 ### 3. Call actions with a price can overflow a phone card
@@ -41,7 +41,7 @@ Eight findings from 2026-10-20 are still open. They are listed again at the end 
 - **Severity:** Medium
 - **Screenshot:** `docs/qa/screenshots/2026-10-22-call-actions-360.png` (a fixture card on the sample shell, not a live call)
 - **What:** `.call-actions button { flex: 1; white-space: nowrap }` will not shrink below the label. “Accept · 12,345 sats” beside “Decline · 12,345 sats” is wider than the call card (`min(340px, 100vw - 32px)`, 328px at 360). The new repair label “Repair and end / acknowledge” is in the same row.
-- **Fix:** Under 480px those rows stack, the buttons are full width, and the label may wrap. The fixture measured each button at 294×44, inside the card. Live call confirm (“Ring Maya?”) already fitted at 360 and 800 and was left as a popover.
+- **Fix:** Under 480px those rows stack, the buttons are full width, and the label may wrap. The fixture measured each button at 294×44, inside the card. Live call confirm (“Ring Robin?”) already fitted at 360 and 800 and was left as a popover.
 
 ### 4. The call card ignores the safe area
 
@@ -133,7 +133,7 @@ Eight findings from 2026-10-20 are still open. They are listed again at the end 
 
 ### 15. Price unavailable is one line and one Retry
 
-- **Screen:** Josh
+- **Screen:** Kim
 - **Severity:** Low
 - **Screenshot:** `docs/qa/screenshots/2026-10-22-price-unavailable-360.png`
 - **What:** “Their price is not available yet.” plus Retry. Send stays disabled. This matches the one-line preference. Retry is a text link (39×26) with the existing 44px hit slop, not a second full button. Recorded so the state is not mistaken for a gap.
@@ -152,7 +152,7 @@ Eight findings from 2026-10-20 are still open. They are listed again at the end 
 | Screen | Loading | Empty | Error | Offline / unreachable | Success |
 | --- | --- | --- | --- | --- | --- |
 | Chat thread | Spinner while the read is pending | “Nothing here yet” | Contact load uses SoftError and Reconnect | “Waiting for the connection…” when money is not live | Paid line under the send |
-| Price | “price loading…” | — | Josh: one line and Retry; Send disabled | Same money notice | Orange price line |
+| Price | “price loading…” | — | Kim: one line and Retry; Send disabled | Same money notice | Orange price line |
 | Call card | “Connecting” / “Ringing” titles | — | `data-call-error`, close refusal | “You are offline…” while the call is up | “This call paid up to …” / “This call paid nothing.” |
 | Call repair | Button says “Checking…” | Hidden when there is no row | Result line on a thrown repair; a failed list read is silent (9) | — | “The repaired call is ended. You can call again.” or the acknowledge line |
 | Add / join device | “Checking…” (6) | Unsupported paragraph, no button | `role="alert"` and Try again | — | “Device added…” / “Stopped. Nothing was added.” |

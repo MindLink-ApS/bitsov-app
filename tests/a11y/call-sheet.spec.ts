@@ -74,7 +74,7 @@ for (const lang of ['en', 'da'] as const) for (const [form, width, height] of SI
     const c = COPY[lang];
     await open(page, lang, width, height);
     await page.evaluate('window.__incoming()');
-    const sheet = page.getByRole('dialog', { name: 'Maya' });
+    const sheet = page.getByRole('dialog', { name: 'Robin' });
     await expect(sheet).toBeVisible();
     await expect(sheet).toHaveAttribute('data-call-panel', 'incoming');
     await expect(sheet.locator('[data-call-title]')).toHaveText(c.incoming);
@@ -127,7 +127,7 @@ for (const lang of ['en', 'da'] as const) for (const [form, width, height] of SI
     const ring = page.locator('[data-call-confirm="audio"]');
     await expect(ring).toBeEnabled();
     await ring.click();
-    const sheet = page.getByRole('dialog', { name: 'Maya' });
+    const sheet = page.getByRole('dialog', { name: 'Robin' });
     await expect(sheet).toHaveAttribute('data-call-panel', 'calling');
     await expect(sheet.locator('[data-call-title]')).toHaveText(c.calling);
     const cancel = sheet.getByRole('button', { name: c.cancel, exact: true });
@@ -143,7 +143,7 @@ for (const [form, width, height] of SIZES) {
   test(`doubled text: the incoming sheet scrolls rather than clipping, ${form}`, async ({ page }) => {
     await open(page, 'da', width, height, 32);
     await page.evaluate('window.__incoming()');
-    const sheet = page.getByRole('dialog', { name: 'Maya' });
+    const sheet = page.getByRole('dialog', { name: 'Robin' });
     await expect(sheet).toHaveAttribute('data-call-panel', 'incoming');
     const g = await sheet.evaluate((el) => ({
       across: el.scrollWidth <= el.clientWidth + 1,

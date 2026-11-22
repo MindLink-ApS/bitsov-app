@@ -1330,7 +1330,7 @@ type Reply = (args?: Record<string, unknown>) => unknown;
 function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: NodeGrantSummary; offer?: Reply; block?: Reply; hold?: Reply; spendRequest?: Reply; ownerCanGrant?: boolean; minutes?: number; retireOnEnd?: boolean; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply; reconcile?: Reply; dismiss?: Reply; budget?: Reply; cancel?: Reply; replies?: Record<string, Reply> } = {}) {
   let retired = false;
   resetContactsForTests();
-  setPetname(A, 'Maya');
+  setPetname(A, 'Robin');
   const calls: { cmd: string; args?: unknown }[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   let mediaIndex = 0;
@@ -1343,7 +1343,7 @@ function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: N
     pairing_status: opts.pairing ?? (() => paired),
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }),
-    peers_list: () => (opts.peers ?? [A]).map((node_id) => ({ node_id, addr: null, label: node_id === A ? 'Maya' : 'Other contact', connected: true, fingerprint: null, meetings: true })),
+    peers_list: () => (opts.peers ?? [A]).map((node_id) => ({ node_id, addr: null, label: node_id === A ? 'Robin' : 'Other contact', connected: true, fingerprint: null, meetings: true })),
     rooms_list: () => [],
     messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
@@ -2586,7 +2586,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     const hold = 10 * (BLOCK + FEE) + QUOTE.offer_msat! + QUOTE.offer_max_routing_fee_msat + QUOTE.signal_msat + QUOTE.signal_max_routing_fee_msat;
     expect($('[data-call-contact-budget-short]')?.textContent).toBe(
-      `Your box has only ${amount(left, 'up')} left for Maya right now. A call holds up to ${amount(hold, 'up')}, so your box will likely turn it down. A bigger budget for this contact usually has to be approved on the box’s own computer.`);
+      `Your box has only ${amount(left, 'up')} left for Robin right now. A call holds up to ${amount(hold, 'up')}, so your box will likely turn it down. A bigger budget for this contact usually has to be approved on the box’s own computer.`);
     // Display only: Ring stays enabled; the box remains the authority.
     expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(false);
     expect(host.used('call_block')).toHaveLength(0);
@@ -3131,12 +3131,12 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await ringAndAnswer(host);
     await vi.waitFor(() => expect($('[data-call-end-stuck]')).not.toBeNull());
     expect(latest?.minutes?.stop?.limit).toEqual({ code, message });
-    expect($('[data-call-ended]')?.textContent).toBe('A call to Maya is still closing at your node. Nothing was paid for this one. End it to call again.');
+    expect($('[data-call-ended]')?.textContent).toBe('A call to Robin is still closing at your node. Nothing was paid for this one. End it to call again.');
     expect($('[data-call-budget-limit]')).toBeNull();
     expect($('[data-call-again]')).toBeNull();
     expect($('[data-call-end-stuck]')?.textContent).toBe('End that call');
     setLanguagePref('da');
-    expect($('[data-call-ended]')?.textContent).toBe('Et opkald til Maya lukkes stadig på din node. Intet blev betalt for dette. Afslut det for at ringe igen.');
+    expect($('[data-call-ended]')?.textContent).toBe('Et opkald til Robin lukkes stadig på din node. Intet blev betalt for dette. Afslut det for at ringe igen.');
     expect($('[data-call-budget-limit]')).toBeNull();
     expect($('[data-call-again]')).toBeNull();
     expect($('[data-call-end-stuck]')?.textContent).toBe('Afslut det opkald');

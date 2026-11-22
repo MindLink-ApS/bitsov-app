@@ -10,15 +10,15 @@ it.each(['en', 'da'] as const)('puts possessives in %s copy and leaves the estim
   setLanguagePref(locale);
   const quote = { kind: 0, own_msat: 1000, peer_msat: 2000, peer_stale: false, peer_age_secs: 0, max_routing_fee_msat: 0 };
   const cost = (name?: string) => costToSend({ kind: 'peer', id: 'a' }, quote, { name, nowMs: 1 })!;
-  expect(cost('Maya').basis).toContain(locale === 'da' ? 'Mayas pris' : 'Maya’s price');
+  expect(cost('Robin').basis).toContain(locale === 'da' ? 'Robins pris' : 'Robin’s price');
   expect(cost().basis).toContain(locale === 'da' ? 'Deres pris' : 'Their price');
-  expect(costToSend({ kind: 'peer', id: 'a' }, { ...quote, peer_msat: null }, { name: 'Maya' })!.basis).toContain(locale === 'da' ? 'Maya har ikke delt sin endnu' : 'Maya has not shared theirs yet');
+  expect(costToSend({ kind: 'peer', id: 'a' }, { ...quote, peer_msat: null }, { name: 'Robin' })!.basis).toContain(locale === 'da' ? 'Robin har ikke delt sin endnu' : 'Robin has not shared theirs yet');
 });
 it('retains the payment, on-chain and fee meanings in Danish copy', () => {
   setLanguagePref('da');
   expect(t('extraSpendingApprovedMinLeft', 4)).toBe('Betalinger godkendt, 4 min tilbage');
-  expect(t('uiAmountToPay', 'Maya')).toBe('Beløb at betale til Maya');
-  expect(t('uiRequestFrom', 'Maya')).toBe('Anmod Maya om betaling');
+  expect(t('uiAmountToPay', 'Robin')).toBe('Beløb at betale til Robin');
+  expect(t('uiRequestFrom', 'Robin')).toBe('Anmod Robin om betaling');
   expect(t('uiTheseCategoriesOverlapAndDoNotAddUp')).toContain('i totalen på kæden');
   expect(t('uiTheseCategoriesOverlapAndDoNotAddUp')).toContain('fra det disponible beløb på kæden');
   expect(t('uiOnChainFundsHeldForAnchorChannelClosing')).toContain('tilbageholdt til gebyrer ved lukning');
@@ -56,7 +56,7 @@ it('localizes the provider channel confirmation as well as its cards', () => {
   expect(mount.textContent).toContain('Indstillinger → Node');
 });
 
-it.each([['Jens', 'Jens’'], ['Lars', 'Lars’'], ['Alex', 'Alex’'], ['Luz', 'Luz’'], ['MAX', 'MAX’'], ['Maya', 'Mayas']])('uses the Danish possessive for %s', (name, possessive) => {
+it.each([['Jens', 'Jens’'], ['Lars', 'Lars’'], ['Alex', 'Alex’'], ['Luz', 'Luz’'], ['MAX', 'MAX’'], ['Robin', 'Robins']])('uses the Danish possessive for %s', (name, possessive) => {
   setLanguagePref('da');
   const quote = { kind: 0, own_msat: 1000, peer_msat: 2000, peer_stale: false, peer_age_secs: 0, max_routing_fee_msat: 0 };
   expect(costToSend({ kind: 'peer', id: 'a' }, quote, { name, nowMs: 1 })!.basis).toContain(`${possessive} pris`);
@@ -64,7 +64,7 @@ it.each([['Jens', 'Jens’'], ['Lars', 'Lars’'], ['Alex', 'Alex’'], ['Luz', 
 
 it.each(['en', 'da'] as const)('inflects names in the peer-not-ready message in %s', locale => {
   setLanguagePref(locale);
-  for (const [name, da] of [['Jens', 'Jens’'], ['Maya', 'Mayas']]) {
+  for (const [name, da] of [['Jens', 'Jens’'], ['Robin', 'Robins']]) {
     expect(t('uiSNodeDoesNotTakeCallsYet', possessive(name)))
       .toBe(locale === 'da' ? `${da} boks oplyste ingen opkaldspris. De er måske offline, eller boksen tager måske ikke imod opkald endnu` : `${name}’s box gave no call price. They may be offline, or it may not take calls yet`);
     expect(peerNotReadyMessage({ code: 'peer_not_ready', reason: 'chain_unavailable' }, name))
@@ -80,7 +80,7 @@ it.each(['en', 'da'] as const)('uses typographic apostrophes for %s possessives 
     ['Alex', 'Alex’s', 'Alex’'],
     ['Luz', 'Luz’s', 'Luz’'],
     ['MAX', 'MAX’s', 'MAX’'],
-    ['Maya', 'Maya’s', 'Mayas'],
+    ['Robin', 'Robin’s', 'Robins'],
     ["O'Connor", "O'Connor’s", "O'Connors"],
   ]) {
     expect(possessive(name)).toBe(locale === 'en' ? english : danish);

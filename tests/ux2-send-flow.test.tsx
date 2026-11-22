@@ -106,7 +106,7 @@ it('recovers delivery by operation ID when the remote event stream is down', asy
 });
 it('Details is an accessible full-row disclosure with an expanded state', () => {
   mount = document.createElement('div'); document.body.appendChild(mount);
-  dispose = render(() => <TouchApproval peer={A} name="Maya" priceMsat={6000} actions={{} as never} />, mount);
+  dispose = render(() => <TouchApproval peer={A} name="Robin" priceMsat={6000} actions={{} as never} />, mount);
   const toggle = $<HTMLButtonElement>('[data-touch-detail] button');
   expect(toggle).not.toBeNull();
   expect(toggle.textContent).toContain('Details');

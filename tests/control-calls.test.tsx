@@ -1400,9 +1400,9 @@ describe('call engine', () => {
   });
 
   it('a refused offer ends the call with the node’s words and releases the mic', async () => {
-    const { e, last } = engine({ signal: async () => ({ ok: false, error: { code: 'budget_exhausted', message: 'Maya’s budget is used up.' } }) });
+    const { e, last } = engine({ signal: async () => ({ ok: false, error: { code: 'budget_exhausted', message: 'Robin’s budget is used up.' } }) });
     await e.place(A, 'audio', QUOTE);
-    expect(last()).toMatchObject({ phase: 'ended', error: 'Maya’s budget is used up.', paidMsat: 0 });
+    expect(last()).toMatchObject({ phase: 'ended', error: 'Robin’s budget is used up.', paidMsat: 0 });
     expect(FakePc.made[0].closed).toBe(true);
   });
 
@@ -1551,12 +1551,12 @@ describe('H2: every end of our call asks the host to end its admission (op_end_c
 
   it('a refused offer is still ended at the host once (it answers "unpaid": nothing owed, nothing paid)', async () => {
     const { e, endCall, last } = withEnd(
-      { signal: async () => ({ ok: false, error: { code: 'budget_exhausted', message: 'Maya’s budget is used up.' } }) },
+      { signal: async () => ({ ok: false, error: { code: 'budget_exhausted', message: 'Robin’s budget is used up.' } }) },
       (id) => ({ ok: true, value: ended(id, { kind: 'call_offer', state: 'unpaid', paid_msat: null }) }));
     await e.place(A, 'audio', QUOTE);
     await vi.waitFor(() => expect(last().close?.status).toBe('closed'));
     expect(endCall.mock.calls).toEqual([[ID]]);
-    expect(last()).toMatchObject({ error: 'Maya’s budget is used up.', paidMsat: 0 });
+    expect(last()).toMatchObject({ error: 'Robin’s budget is used up.', paidMsat: 0 });
   });
 
   it('as the callee nothing is ours to end: decline and hang-up pay their hangup as before', async () => {
@@ -2144,7 +2144,7 @@ const openBudget = (): BudgetView => ({
 type Reply = (args?: Record<string, unknown>) => unknown;
 function stubHost(overrides: Record<string, Reply> = {}) {
   resetContactsForTests();
-  setPetname(A, 'Maya');
+  setPetname(A, 'Robin');
   const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   const spend: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 };
@@ -2154,7 +2154,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     pairing_status: () => paired,
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now() }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null }],
     rooms_list: () => [],
     messages_list: (args) => (args!.peer === A
       ? [
@@ -2237,7 +2237,7 @@ describe('calls in the shell', () => {
   const LN = '02' + 'b'.repeat(64);
   const spending = (): SpendView => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 });
   const payHost = (over: Record<string, Reply> = {}) => stubHost({
-    peers_list: () => [{ node_id: A, ln_pubkey: LN, addr: null, label: 'Maya', connected: true, fingerprint: null }],
+    peers_list: () => [{ node_id: A, ln_pubkey: LN, addr: null, label: 'Robin', connected: true, fingerprint: null }],
     spend_status: spending,
     payment_keysend: () => ({ method: 'keysend', amount_msat: 5000, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() }),
     ...over,
@@ -2294,7 +2294,7 @@ describe('calls in the shell', () => {
     const pc = FakePc.made[0];
     const media = $('[data-call-media="remote"]');
     enterCallAmount();
-    expect(text('[data-in-call-pay]')).toContain('Maya');
+    expect(text('[data-in-call-pay]')).toContain('Robin');
     expect(text('[data-call-pay-total]')).toContain('10');
     expect(text('[data-call-pay-fee]')).toContain('5');
     expect(host.used('payment_keysend')).toHaveLength(0);
@@ -2335,7 +2335,7 @@ describe('calls in the shell', () => {
   });
 
   it.each([null, A, '04' + 'b'.repeat(64)])('in-call Pay refuses an absent or invalid Lightning mapping: %s', async (ln) => {
-    const host = payHost({ peers_list: () => [{ node_id: A, ln_pubkey: ln, label: 'Maya', connected: true }] });
+    const host = payHost({ peers_list: () => [{ node_id: A, ln_pubkey: ln, label: 'Robin', connected: true }] });
     await liveCall();
     expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(true);
     expect(text('[data-in-call-pay]')).toMatch(/Lightning.*unavailable/i);
@@ -2639,7 +2639,7 @@ describe('calls in the shell', () => {
         pending: { op_id: 'ab01', expires_at_ms: Date.now() + 600_000, owner_action: 'konsensus grant --op ab01', owner_can_grant: true } }),
     });
     await openShell();
-    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toMatch(/^Call Maya/));
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toMatch(/^Call Robin/));
     ring('audio');
     await vi.waitFor(() => expect($('[data-call-approval] [data-touch-id-first]')).not.toBeNull());
     const stays = $('[data-call-approval] [data-touch-id-stays-text="spend"]')!;
@@ -3016,7 +3016,7 @@ describe('calls in the shell', () => {
     setDenom(denomination);
     stubHost({ call_quote: () => ({ ...QUOTE, call_total_msat: 21_381 }) });
     await openShell();
-    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe(`Call Maya, up to ${shown}`));
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe(`Call Robin, up to ${shown}`));
     expect($('[data-call="video"]')!.getAttribute('title')).toContain(`Up to ${shown}:`);
   });
 
@@ -3024,7 +3024,7 @@ describe('calls in the shell', () => {
     const host = stubHost();
     await openShell();
     // Icon buttons: no price text on the button; the price rides in the label and title.
-    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Robin, up to 42 sats'));
     expect(text('[data-call="audio"]')).toBe('');
     expect($('[data-call="audio"]')!.getAttribute('title')).toMatch(/Media goes directly between you/);
     // Call signals from history are not chat bubbles.
@@ -3069,7 +3069,7 @@ describe('calls in the shell', () => {
     const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.loop) as HTMLAudioElement;
     expect(audio).toBeDefined();
     expect(audio.src).toMatch(/incoming-ring\.wav/);
-    expect($('[data-incoming-announcement]')?.textContent).toContain('Maya');
+    expect($('[data-incoming-announcement]')?.textContent).toContain('Robin');
     if (outcome === 'answer' || outcome === 'decline') await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
     if (outcome === 'answer') $<HTMLButtonElement>('[data-call-accept]')!.click();
     if (outcome === 'decline') $<HTMLButtonElement>('[data-call-decline]')!.click();
@@ -3901,11 +3901,11 @@ describe('calls in the shell', () => {
   it('an offline contact is offline, not a node that does not take calls, and back online their price is read again', async () => {
     let connected = false;
     const host = stubHost({
-      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected, fingerprint: null }],
+      peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected, fingerprint: null }],
       call_quote: () => connected ? QUOTE : ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null }),
     });
     await openShell();
-    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('title')).toBe('Maya is offline, so you can’t call them right now.'));
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('title')).toBe('Robin is offline, so you can’t call them right now.'));
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
     connected = true;
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false), { timeout: 20_000 });
@@ -3917,14 +3917,14 @@ describe('calls in the shell', () => {
     let connected = false;
     const host = stubHost({
       messages_list: () => [],
-      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected, fingerprint: null }],
+      peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected, fingerprint: null }],
       call_quote: () => connected ? QUOTE : ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null }),
     });
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'offer' }) });
     host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
     await vi.waitFor(() => expect($('[data-missed-call] [data-call-back]')).not.toBeNull());
-    await vi.waitFor(() => expect($('[data-call-back]')!.getAttribute('title')).toBe('Maya is offline, so you can’t call them right now.'));
+    await vi.waitFor(() => expect($('[data-call-back]')!.getAttribute('title')).toBe('Robin is offline, so you can’t call them right now.'));
     expect($<HTMLButtonElement>('[data-call-back]')!.disabled).toBe(true);
     connected = true;
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-back]')!.disabled).toBe(false), { timeout: 20_000 });
@@ -3937,7 +3937,7 @@ describe('calls in the shell', () => {
     let connected = false;
     let answerOffline: () => void = () => {};
     const host = stubHost({
-      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected, fingerprint: null }],
+      peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected, fingerprint: null }],
       call_quote: () => {
         if (connected) return QUOTE;
         return new Promise((resolve, reject) => {
@@ -3960,20 +3960,20 @@ describe('calls in the shell', () => {
 
   it('says an offline contact in Danish too', async () => {
     stubHost({
-      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: false, fingerprint: null }],
+      peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: false, fingerprint: null }],
       call_quote: () => ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null }),
     });
     setLanguagePref('da');
     await openShell();
-    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('title')).toBe('Maya er offline, så du kan ikke ringe til dem lige nu.'));
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('title')).toBe('Robin er offline, så du kan ikke ringe til dem lige nu.'));
   });
 
   it('puts the cost in the accessible names and lets the caller cancel before paying', async () => {
     const host = stubHost();
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: () => new Promise<MediaStream>(() => {}) } });
     await openShell();
-    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
-    expect($('[data-call="video"]')!.getAttribute('aria-label')).toBe('Video call Maya, up to 42 sats');
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Robin, up to 42 sats'));
+    expect($('[data-call="video"]')!.getAttribute('aria-label')).toBe('Video call Robin, up to 42 sats');
     expect($('[data-call="audio"]')!.getAttribute('title')).toMatch(/No STUN server is set/);
     ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="calling"]')).not.toBeNull());
@@ -4155,7 +4155,7 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')).toHaveLength(2); // merely offering another call never pays
   });
 
-  it('H2: "a call to Maya is still closing", never a silent block; End that call ends the one the host holds', async () => {
+  it('"a call to Robin is still closing", never a silent block; End that call ends the one the host holds', async () => {
     const earlier = 'c'.repeat(32);
     const host = stubHost({
       call_signal: () => { throw { code: 'call_admission_open', message: 'End the existing call before starting another admission. Nothing was paid.', operation_id: 'op-old' }; },
@@ -4167,7 +4167,7 @@ describe('calls in the shell', () => {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     ring('audio');
-    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('A call to Maya is still closing at your node. Nothing was paid for this one. End it to call again.'));
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('A call to Robin is still closing at your node. Nothing was paid for this one. End it to call again.'));
     expect(host.used('op_end_call')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-end-stuck]')!.click();
     await vi.waitFor(() => expect(text('[data-call-close]')).toBe('The earlier call is ended. You can call them again.'));
@@ -4469,8 +4469,8 @@ describe('calls in the shell', () => {
   });
 
   it.each([
-    ['en', 'The connection to Maya was lost.', /The direct connection closed\./],
-    ['da', 'Forbindelsen til Maya blev afbrudt.', /Den direkte forbindelse blev lukket\./],
+    ['en', 'The connection to Robin was lost.', /The direct connection closed\./],
+    ['da', 'Forbindelsen til Robin blev afbrudt.', /Den direkte forbindelse blev lukket\./],
   ] as const)('a lost connection ends with one plain cause that never blames money; the technical words only under a closed Details (%s)', async (lang, said, technical) => {
     stubHost();
     await liveCall();
@@ -4485,8 +4485,8 @@ describe('calls in the shell', () => {
   });
 
   it.each([
-    ['en', 'da', 'Forbindelsen til Maya blev afbrudt.', /The direct connection closed\./],
-    ['da', 'en', 'The connection to Maya was lost.', /Den direkte forbindelse blev lukket\./],
+    ['en', 'da', 'Forbindelsen til Robin blev afbrudt.', /The direct connection closed\./],
+    ['da', 'en', 'The connection to Robin was lost.', /Den direkte forbindelse blev lukket\./],
   ] as const)('changing the language on a lost-connection ended card (%s to %s) re-words the cause; the technical words stay under Details', async (from, to, said, technical) => {
     stubHost();
     await liveCall();
@@ -4556,7 +4556,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     FakePc.made[0].state('closed');
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect(text('[data-call-ended]')).toBe('The connection to Maya was lost.');
+    expect(text('[data-call-ended]')).toBe('The connection to Robin was lost.');
     expect($('[data-call-again]')).not.toBeNull();
   });
 
