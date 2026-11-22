@@ -68,7 +68,7 @@ exit 0
 STUB
   chmod +x "$T/root/node_modules/.bin/tauri"
 }
-tauri_stub 2.12.0
+tauri_stub 2.12.6
 
 run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 run 0 "overlay ok: tech.mindlink.bitsov.beta" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
@@ -346,15 +346,15 @@ CASE=""; CRTV=14.40
 # The NSIS check is written for one Tauri CLI version.
 CASE="other Tauri CLI in the lockfile"; cp "$T/root/package-lock.json" "$T/lock.keep"
 node -e 'const fs=require("fs");const l=JSON.parse(fs.readFileSync(process.argv[1]));l.packages["node_modules/@tauri-apps/cli"].version="2.13.0";fs.writeFileSync(process.argv[1],JSON.stringify(l));' "$T/root/package-lock.json"
-run 2 "NSIS cache check is written for 2.12.0" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+run 2 "NSIS cache check is written for 2.12.6" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 mv "$T/lock.keep" "$T/root/package-lock.json"; CASE=""
 # The lockfile is right but node_modules holds another Tauri CLI: refused before any build.
 CASE="installed Tauri CLI 2.9.0"; tauri_stub 2.9.0
-run 2 "a Tauri CLI other than 2.12.0" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
-run 2 "a Tauri CLI other than 2.12.0" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads
+run 2 "a Tauri CLI other than 2.12.6" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+run 2 "a Tauri CLI other than 2.12.6" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads
 CASE="installed Tauri CLI with no version"; printf '#!/bin/sh\nexit 0\n' > "$T/root/node_modules/.bin/tauri"; chmod +x "$T/root/node_modules/.bin/tauri"
-run 2 "a Tauri CLI other than 2.12.0" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
-CASE=""; tauri_stub 2.12.0
+run 2 "a Tauri CLI other than 2.12.6" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE=""; tauri_stub 2.12.6
 rm "$T/root/node_modules/.bin/tauri"
 run 5 "npm ci would download" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 run 0 "allowed download: npm ci" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads

@@ -197,9 +197,10 @@ xwin_cache_complete() {
   # (A line-based tool would mis-read NUL or other bytes that Rust keeps inside a token.)
   [ -r "$1/xwin/DONE" ] && node "$ROOT/scripts/xwin-marker-lists.mjs" "$1/xwin/DONE" "$XWIN_ARCH_PINNED"
 }
-# Tauri 2.12.0 (the CLI pinned in package-lock.json) reuses <cache>/tauri/NSIS only when its required
+# Tauri 2.12.6 (the CLI pinned in package-lock.json) reuses <cache>/tauri/NSIS only when its required
 # files exist and the plugin matches this SHA-1 (tauri-bundler, bundle/windows/nsis/mod.rs); otherwise it downloads.
-TAURI_CLI_VERSION=2.12.0
+# The SHA-1 and the required files are the same in 2.12.0 and 2.12.6.
+TAURI_CLI_VERSION=2.12.6
 NSIS_TAURI_UTILS_SHA1=75197fee3c6a814fe035788d1c34ead39349b860
 nsis_cache_complete() {
   local dir="$1" file
