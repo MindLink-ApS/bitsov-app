@@ -36,9 +36,9 @@ it('every chat-header button has an accessible name and a tooltip', async () => 
   const buttons = [...head.querySelectorAll('button')];
   expect(buttons.length).toBeGreaterThanOrEqual(5);
   for (const b of buttons) expect(nameOf(b), b.outerHTML.slice(0, 80)).not.toBe('');
-  expect(nameOf($('[data-call="audio"]')!)).toMatch(/^Call Maya, up to \d/);
-  expect(nameOf($('[data-call="video"]')!)).toMatch(/^Video call Maya, up to \d/);
-  expect(nameOf($('[data-call="meeting"]')!)).toBe('Start a meeting with Maya');
+  expect(nameOf($('[data-call="audio"]')!)).toMatch(/^Call Robin, up to \d/);
+  expect(nameOf($('[data-call="video"]')!)).toMatch(/^Video call Robin, up to \d/);
+  expect(nameOf($('[data-call="meeting"]')!)).toBe('Start a meeting with Robin');
   for (const sel of ['[data-call="audio"]', '[data-call="video"]', '[data-call="meeting"]', '.track-head .context-toggle']) {
     expect($<HTMLButtonElement>(sel)!.title, sel).not.toBe('');
   }
@@ -54,7 +54,7 @@ it('a tap on Call or Video call only asks; nothing rings or pays until Ring', as
   const box = $('[data-call-confirm-box="video"]')!;
   expect(box).not.toBeNull();
   expect(box.getAttribute('role')).toBe('dialog');
-  expect(box.textContent).toMatch(/Video call Maya\?/);
+  expect(box.textContent).toMatch(/Video call Robin\?/);
   expect(box.textContent).toMatch(/Up to \d+ sats?\. Nothing is paid until you press Ring\./);
   expect($('[data-call="video"]')!.getAttribute('aria-expanded')).toBe('true');
   expect($('[data-call-panel]')).toBeNull();

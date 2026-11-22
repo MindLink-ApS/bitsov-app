@@ -87,7 +87,7 @@ try {
       const page = await browser.newPage({ viewport: { width: w, height: h } });
       await page.goto(`${base}/?sample`);
       await page.waitForSelector('[data-contact-open]', { timeout: 15_000 });
-      // Give Maya a 64-character petname through the contact sheet.
+      // Give Robin a 64-character petname through the contact sheet.
       await page.click('[data-contact-open]');
       await page.fill('[data-contact-petname]', LONG);
       await page.press('[data-contact-petname]', 'Tab');

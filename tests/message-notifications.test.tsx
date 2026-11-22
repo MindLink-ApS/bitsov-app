@@ -18,32 +18,32 @@ const message = { id: 'm', kind: 0, sender: 'peer', recipient: 'me', timestamp: 
 it.each(['en', 'da'] as const)('notifies once in %s with name only and the system sound', async lang => {
   setLanguagePref(lang);
   const n = createMessageNotifications();
-  n.message(message, 'me', 'Maya'); n.message(message, 'me', 'Maya');
+  n.message(message, 'me', 'Robin'); n.message(message, 'me', 'Robin');
   await flush();
-  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: lang === 'en' ? 'Maya sent you a message' : 'Maya har sendt dig en besked', sound: 'NSUserNotificationDefaultSoundName' });
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: lang === 'en' ? 'Robin sent you a message' : 'Robin har sendt dig en besked', sound: 'NSUserNotificationDefaultSoundName' });
   expect(JSON.stringify(native.sendNotification.mock.calls)).not.toContain('SECRET');
   n.dispose();
 });
 it('notifies an incoming call once, independently of messages', async () => {
-  const n = createMessageNotifications(); n.call('call-1', 'Maya'); n.call('call-1', 'Maya'); await flush();
-  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'Maya is calling', sound: 'NSUserNotificationDefaultSoundName' }); n.dispose();
+  const n = createMessageNotifications(); n.call('call-1', 'Robin'); n.call('call-1', 'Robin'); await flush();
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'Robin is calling', sound: 'NSUserNotificationDefaultSoundName' }); n.dispose();
 });
 it('suppresses outgoing, unpaid and call-signal messages, focused arrivals, muted arrivals and replays', async () => {
   const n = createMessageNotifications();
   n.message({ ...message, sender: 'me' }, 'me', 'Me');
-  n.message({ ...message, payment_amount_msat: 0 }, 'me', 'Maya');
-  n.message({ ...message, kind: 400 }, 'me', 'Maya');
-  native.isFocused.mockResolvedValue(true); n.message(message, 'me', 'Maya'); await flush();
-  native.isFocused.mockResolvedValue(false); n.message(message, 'me', 'Maya');
-  n.setMuted(true); n.call('c', 'Maya'); await flush();
+  n.message({ ...message, payment_amount_msat: 0 }, 'me', 'Robin');
+  n.message({ ...message, kind: 400 }, 'me', 'Robin');
+  native.isFocused.mockResolvedValue(true); n.message(message, 'me', 'Robin'); await flush();
+  native.isFocused.mockResolvedValue(false); n.message(message, 'me', 'Robin');
+  n.setMuted(true); n.call('c', 'Robin'); await flush();
   expect(native.sendNotification).not.toHaveBeenCalled();
   const next = createMessageNotifications(); expect(next.muted()).toBe(true); next.dispose(); n.dispose();
 });
 it('rechecks focus and mute after native awaits and suppresses work after disposal', async () => {
   const n = createMessageNotifications();
-  native.isFocused.mockResolvedValueOnce(false).mockResolvedValue(true); n.call('a', 'Maya'); await flush();
+  native.isFocused.mockResolvedValueOnce(false).mockResolvedValue(true); n.call('a', 'Robin'); await flush();
   expect(native.sendNotification).not.toHaveBeenCalled();
-  native.isFocused.mockResolvedValue(false); n.call('b', 'Maya'); n.dispose(); await flush();
+  native.isFocused.mockResolvedValue(false); n.call('b', 'Robin'); n.dispose(); await flush();
   expect(native.sendNotification).not.toHaveBeenCalled();
 });
 it.each(['en', 'da'] as const)('explains permission in %s and requests it only on a tap, once across remounts', async lang => {
@@ -53,7 +53,7 @@ it.each(['en', 'da'] as const)('explains permission in %s and requests it only o
   dispose = render(() => <NotificationSettings notifications={n} />, mount);
   await n.checkPermission();
   expect(mount.textContent).toContain(lang === 'en' ? 'without showing message content' : 'uden at vise beskedens indhold');
-  n.message(message, 'me', 'Maya'); await flush(); expect(native.requestPermission).not.toHaveBeenCalled();
+  n.message(message, 'me', 'Robin'); await flush(); expect(native.requestPermission).not.toHaveBeenCalled();
   mount.querySelector<HTMLButtonElement>('[data-notification-enable]')!.click(); await flush();
   expect(native.requestPermission).toHaveBeenCalledOnce();
   expect(mount.textContent).toContain(lang === 'en' ? 'System Settings' : 'Systemindstillinger');
@@ -92,7 +92,7 @@ it.each(['mute', 'dispose', 'hangup'] as const)('suppresses a call when %s happe
   let finish!: (focused: boolean) => void;
   let incoming = true;
   native.isFocused.mockResolvedValueOnce(false).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
-  const n = createMessageNotifications(); n.call('c', 'Maya', () => incoming); await flush();
+  const n = createMessageNotifications(); n.call('c', 'Robin', () => incoming); await flush();
   if (action === 'mute') n.setMuted(true);
   if (action === 'dispose') n.dispose();
   if (action === 'hangup') incoming = false;
@@ -100,14 +100,14 @@ it.each(['mute', 'dispose', 'hangup'] as const)('suppresses a call when %s happe
 });
 it('shows the explanation even when the desktop plugin reports permission granted before opt-in', async () => {
   localStorage.clear(); const n = createMessageNotifications(); await n.checkPermission();
-  expect(n.permission()).toBe('prompt'); n.message(message, 'me', 'Maya'); await flush();
+  expect(n.permission()).toBe('prompt'); n.message(message, 'me', 'Robin'); await flush();
   expect(native.sendNotification).not.toHaveBeenCalled(); await n.request();
   expect(native.requestPermission).toHaveBeenCalledOnce(); expect(n.permission()).toBe('granted'); n.dispose();
 });
 
 it('reports a native notification delivery error instead of losing a rejected promise', async () => {
   native.sendNotification.mockRejectedValue(new Error('native failed'));
-  const n = createMessageNotifications(); n.message(message, 'me', 'Maya'); await flush();
+  const n = createMessageNotifications(); n.message(message, 'me', 'Robin'); await flush();
   expect(n.permission()).toBe('error');
   mount = document.createElement('div'); document.body.append(mount);
   dispose = render(() => <NotificationSettings notifications={n} offer />, mount);
@@ -141,7 +141,7 @@ it.each(['denied', 'error'] as const)('recovers a %s permission request through 
   await n.request(); expect(n.permission()).toBe(outcome === 'error' ? 'error' : 'denied');
   native.isPermissionGranted.mockResolvedValue(true); await n.checkPermission();
   expect(n.permission()).toBe('granted');
-  n.message(message, 'me', 'Maya'); await flush();
+  n.message(message, 'me', 'Robin'); await flush();
   expect(native.sendNotification).toHaveBeenCalledOnce(); expect(native.requestPermission).toHaveBeenCalledOnce(); n.dispose();
 });
 
@@ -149,9 +149,9 @@ it.each(['en', 'da'] as const)('opens the incoming card from a background call b
   setLanguagePref(lang);
   const open = vi.fn();
   const n = createMessageNotifications();
-  n.call('incoming', 'Maya', () => true, open); await flush();
+  n.call('incoming', 'Robin', () => true, open); await flush();
   const payload = native.sendNotification.mock.calls[0][0];
-  expect(payload.body).toBe(lang === 'da' ? 'Maya ringer' : 'Maya is calling');
+  expect(payload.body).toBe(lang === 'da' ? 'Robin ringer' : 'Robin is calling');
   expect(payload.actionTypeId).toBe('bitsov-incoming-call');
   const action = native.onAction.mock.calls[0][0];
   action({ actionId: 'tap', notification: { id: payload.id } }); await flush();
@@ -162,9 +162,9 @@ it.each(['en', 'da'] as const)('opens the incoming card from a background call b
 it('never opens a stale call banner and does not alert a focused call', async () => {
   const open = vi.fn(); let incoming = true;
   const n = createMessageNotifications();
-  native.isFocused.mockResolvedValue(true); n.call('focused', 'Maya', () => incoming, open); await flush();
+  native.isFocused.mockResolvedValue(true); n.call('focused', 'Robin', () => incoming, open); await flush();
   expect(native.sendNotification).not.toHaveBeenCalled();
-  native.isFocused.mockResolvedValue(false); n.call('background', 'Maya', () => incoming, open); await flush();
+  native.isFocused.mockResolvedValue(false); n.call('background', 'Robin', () => incoming, open); await flush();
   incoming = false;
   native.onAction.mock.calls[0][0]({ actionId: 'tap', notification: { id: native.sendNotification.mock.calls[0][0].id } }); await flush();
   expect(open).not.toHaveBeenCalled(); expect(native.show).not.toHaveBeenCalled(); n.dispose();
@@ -192,4 +192,51 @@ it('offers notification permission with a call, never on first launch or without
   mount.querySelector<HTMLButtonElement>('[data-notification-enable]')!.click(); await flush();
   expect(native.requestPermission).toHaveBeenCalledOnce();
   expect(native.sendNotification).not.toHaveBeenCalled();
+});
+
+const windowsUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0';
+const linuxUa = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko)';
+const generic = { en: 'You have a new message', da: 'Du har en ny besked' } as const;
+const osLang = ([['Windows', windowsUa, 'Default'], ['Linux', linuxUa, 'message-new-instant']] as const).flatMap(([os, ua, sound]) => (['en', 'da'] as const).map(lang => [os, lang, ua, sound] as const));
+it.each(osLang)('notifies ordinary messages on %s with a generic %s line and its default sound, never calls or actions', async (_os, lang, ua, sound) => {
+  setLanguagePref(lang);
+  vi.stubGlobal('__TAURI_INTERNALS__', {});
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ua);
+  const n = createMessageNotifications();
+  expect(n.calls).toBe(false);
+  n.message(message, 'me', 'Robin'); n.message(message, 'me', 'Robin');
+  n.call('call-1', 'Robin'); n.call('call-2', 'Robin', () => true, vi.fn()); await flush();
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: generic[lang], sound });
+  expect(native.registerActionTypes).not.toHaveBeenCalled(); expect(native.onAction).not.toHaveBeenCalled();
+  // Neither the sender's name nor any part of the message reaches the title or body.
+  const shown = native.sendNotification.mock.calls.map(([o]) => `${o.title}\n${o.body}`).join('\n');
+  for (const leak of ['Robin', 'SECRET', 'content', message.sender]) expect(shown).not.toContain(leak);
+  n.setMuted(true); n.message({ ...message, id: 'm2' }, 'me', 'Robin'); await flush();
+  expect(native.sendNotification).toHaveBeenCalledOnce(); n.dispose();
+});
+
+it.each([['Windows', windowsUa], ['Linux', linuxUa]] as const)('wires live paid messages through the real shell on %s without call alerts or a call-time offer', async (_os, ua) => {
+  localStorage.removeItem('bitsov.notifications.muted');
+  const { ControlCenter } = await import('../src/control/Shell');
+  const { sampleSource, SAMPLE_OWN_ID } = await import('../src/control/sample');
+  vi.stubGlobal('__TAURI_INTERNALS__', {}); vi.stubGlobal('isTauri', true);
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ua);
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  let live!: Parameters<typeof source.onLive>[0];
+  source.onLive = async callback => { live = callback; return () => {}; };
+  mount = document.createElement('div'); document.body.append(mount);
+  dispose = render(() => <ControlCenter source={source} remote active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, mount);
+  await vi.waitFor(() => expect(live).toBeTypeOf('function'));
+  const incoming = { ...message, sender: 'a'.repeat(64), recipient: SAMPLE_OWN_ID, timestamp: Date.now() };
+  live({ type: 'message', message: incoming, room_id: null }); await flush();
+  expect(native.sendNotification).toHaveBeenCalledOnce();
+  expect(native.sendNotification.mock.calls[0][0]).toEqual({ title: 'BitSov', body: 'You have a new message', sound: expect.any(String) });
+  expect(JSON.stringify(native.sendNotification.mock.calls)).not.toContain(incoming.plaintext);
+  localStorage.removeItem('bitsov.notifications.asked'); localStorage.removeItem('bitsov.notifications.enabled');
+  live({ type: 'message', message: { ...incoming, id: 'offer', kind: 400, plaintext: JSON.stringify({ v: 1, call_id: 'a'.repeat(32), media: 'audio', sdp: 'private-sdp' }) }, room_id: null });
+  await flush();
+  expect(native.sendNotification).toHaveBeenCalledOnce();
+  expect(mount.querySelector('[data-notification-enable]')).toBeNull();
+  expect(native.registerActionTypes).not.toHaveBeenCalled(); expect(native.onAction).not.toHaveBeenCalled();
+  expect(native.requestPermission).not.toHaveBeenCalled();
 });

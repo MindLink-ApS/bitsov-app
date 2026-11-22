@@ -78,6 +78,8 @@ it('keeps paid amounts on the bubble, never in an empty composer', async () => {
   await vi.waitFor(() => expect($('[data-message="message-a"]')).not.toBeNull());
   expect($<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('');
   expect($('[data-send-price]').textContent).not.toMatch(/paid|betalt/);
+  const cost = $<HTMLButtonElement>('[data-message="message-a"] .sats-meta');
+  cost.click();
   expect($('[data-message="message-a"]').textContent).toContain('1 sat');
 });
 it('moves sending → sent → delivered on a delivery event', async () => {
@@ -104,7 +106,7 @@ it('recovers delivery by operation ID when the remote event stream is down', asy
 });
 it('Details is an accessible full-row disclosure with an expanded state', () => {
   mount = document.createElement('div'); document.body.appendChild(mount);
-  dispose = render(() => <TouchApproval peer={A} name="Maya" priceMsat={6000} actions={{} as never} />, mount);
+  dispose = render(() => <TouchApproval peer={A} name="Robin" priceMsat={6000} actions={{} as never} />, mount);
   const toggle = $<HTMLButtonElement>('[data-touch-detail] button');
   expect(toggle).not.toBeNull();
   expect(toggle.textContent).toContain('Details');

@@ -5,6 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-destroy",
     "allow-node-status",
     "allow-node-unlock",
     "allow-node-unlock-password",
@@ -107,6 +108,7 @@
     "allow-call-audio-session",
     "allow-call-quote",
     "allow-call-signal",
+    "allow-call-free-reply",
     "allow-call-status",
     "allow-call-block",
     "allow-call-hold",

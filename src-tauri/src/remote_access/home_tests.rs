@@ -64,7 +64,7 @@ async fn responder(
     let secret = [secret; 32];
     let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap())
         .local_private_key(&secret)
-        .build_responder()
+        .and_then(|b| b.build_responder())
         .unwrap();
     let mut out = vec![0; MAX_HANDSHAKE_FRAME];
     let msg = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
@@ -280,7 +280,7 @@ async fn bootstrap_sas_preserves_one_completed_session_across_requests_and_fallb
     let server = tokio::spawn(async move {
         let (mut stream, _) = live.accept().await.unwrap();
         let secret = [9;32];
-        let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).build_responder().unwrap();
+        let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut out = vec![0;MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await.unwrap(); hs.read_message(&message, &mut out).unwrap();
         let n = hs.write_message(&[], &mut out).unwrap(); write_frame(&mut stream, &out[..n]).await.unwrap();
@@ -501,7 +501,7 @@ async fn joining_sas_uses_one_authenticated_transcript_and_never_replays_ticket(
     let server = tokio::spawn(async move {
         let (mut stream, _) = live.accept().await.unwrap();
         let secret = [12;32];
-        let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).build_responder().unwrap();
+        let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut out = vec![0;MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await.unwrap(); hs.read_message(&message, &mut out).unwrap();
         let n = hs.write_message(&[], &mut out).unwrap(); write_frame(&mut stream, &out[..n]).await.unwrap();
@@ -563,7 +563,7 @@ async fn second_device_lost_pairing_reply_recovers_without_replaying_ticket() {
     let server = tokio::spawn(async move {
         // Consume the signed proof but lose the authenticated response.
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&[12;32]).build_responder().unwrap();
+        let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&[12;32]).and_then(|b| b.build_responder()).unwrap();
         let mut out = vec![0;MAX_HANDSHAKE_FRAME];
         let msg = read_frame(&mut stream,MAX_HANDSHAKE_FRAME).await.unwrap(); hs.read_message(&msg,&mut out).unwrap();
         let n = hs.write_message(&[],&mut out).unwrap(); write_frame(&mut stream,&out[..n]).await.unwrap();

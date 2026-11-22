@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import ts from 'typescript';
+import ts from 'typescript-api';
 import { expect, it } from 'vitest';
 
 // Exact literals only: remaining legacy consent prompts are unchanged in this round.

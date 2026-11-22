@@ -193,6 +193,15 @@ export function petnameOf(nodeId: string): string | null {
   return n || null;
 }
 
+/** True when a different contact already carries this name as its petname (case-insensitive). */
+export function petnameTakenByOther(nodeId: string, name: string): boolean {
+  contactRevision();
+  const key = normId(nodeId);
+  const want = name.trim().toLocaleLowerCase();
+  if (!want) return false;
+  return Object.values(store().byId).some((c) => c.nodeKey !== key && c.petname?.trim().toLocaleLowerCase() === want);
+}
+
 /**
  * Set or clear the local petname for the contact at this node key.
  * Empty / whitespace clears it. Never syncs to the node or the peer.

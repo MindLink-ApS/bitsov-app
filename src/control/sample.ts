@@ -116,16 +116,16 @@ function sampleFrontDoor(
   };
 }
 
-/** The sample porch: Maya's node answers reads (`porch_read_v1`). */
+/** The sample porch: Robin's node answers reads (`porch_read_v1`). */
 const PORCH_READ_MSAT = 1000;
 const SAMPLE_PORCH_PAGES: Record<string, string> = {
-  get '/index.md'() { return tr('caMayaBuildingASovereignMeshOnePaidHopAt'); },
+  get '/index.md'() { return tr('caRobinBuildingASovereignMeshOnePaidHopAt'); },
   get '/notes.txt'() { return tr('caPlainNotesLineTwo'); },
 };
 function samplePorchCard(nodeId: string): FrontDoor {
   return {
-    ...sampleFrontDoor(nodeId, '34.90.12.8:9735', 'public', 'Maya'),
-    site: { index_path: 'index.md', page_count: 2, titles: ['Maya', tr('caNotes')] },
+    ...sampleFrontDoor(nodeId, '34.90.12.8:9735', 'public', 'Robin'),
+    site: { index_path: 'index.md', page_count: 2, titles: ['Robin', tr('caNotes')] },
     cv: { path: 'cv.md', hash: 'ab'.repeat(32), size: 120 },
   };
 }
@@ -148,8 +148,8 @@ export function invoiceFromNode(http: number, body: Record<string, unknown>): In
 }
 
 export const SAMPLE_PEERS: Peer[] = [
-  { node_id: hex('a'), addr: '34.90.12.8:9735', label: 'Maya', connected: true, fingerprint: 'aaaaaaaa', porch: true },
-  { node_id: hex('b'), addr: '35.204.77.3:9735', label: 'Josh', connected: true, fingerprint: 'bbbbbbbb' },
+  { node_id: hex('a'), addr: '34.90.12.8:9735', label: 'Robin', connected: true, fingerprint: 'aaaaaaaa', porch: true },
+  { node_id: hex('b'), addr: '35.204.77.3:9735', label: 'Kim', connected: true, fingerprint: 'bbbbbbbb' },
   { node_id: hex('c'), addr: '34.141.2.19:9735', label: null, connected: false, fingerprint: 'cccccccc' },
   // Connected, but its cached price table is stale: a send underpays and its node rejects it.
   { node_id: hex('d'), addr: '34.32.90.40:9735', label: 'Gamma VM', connected: true, fingerprint: 'dddddddd' },
@@ -190,7 +190,7 @@ const THREADS: Record<string, Message[]> = {
   ],
   [SAMPLE_ROOM_ID]: [
     msg(hex('a'), SAMPLE_ROOM_ID, 30, () => tr('caRoomIsSetForTheMexicoDemoTwoNodes'), 2000),
-    msg(hex('b'), SAMPLE_ROOM_ID, 34, () => tr('caJoshHereMyVMIsOnRc7AsWell')),
+    msg(hex('b'), SAMPLE_ROOM_ID, 34, () => tr('caKimHereMyVMIsOnRc7AsWell')),
     msg(SAMPLE_OWN_ID, SAMPLE_ROOM_ID, 41, () => tr('caGreatEveryMessageInHerePaysEachOfYou')),
   ],
 };
@@ -608,7 +608,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
   // v1 (default) models a historical rc7 node: no energy read, no membrane events.
   const v2 = opts.organism === 'v2';
   let knocks = v2 ? sampleKnocks() : [];
-  // v2 sample: Maya raises her price just before your first send to her, so the
+  // v2 sample: Robin raises her price just before your first send to her, so the
   // send is refused at her door before any payment (a door card in her track).
   const raised: Record<string, number> = {};
   const liveEvery = opts.liveEveryMs ?? 30_000;
@@ -769,18 +769,18 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     const who = room ? tr('uiThisRoom') : tr('caThisContact');
     const limit = book.limits.get(key(target, room));
     if (limit !== undefined && spentOn(target, room) + max > limit) {
-      return refuse('budget_exhausted', tr('caYouHaveUsedOfForInTheLast24', fmtAmount(spentOn(target, room)), fmtAmount(limit), who, fmtAmount(max)));
+      return refuse('budget_exhausted', tr('caYouHaveUsedOfForInTheLast24', fmtAmount(spentOn(target, room), 'up'), fmtAmount(limit, 'down'), who, fmtAmount(max, 'up')));
     }
     const ceiling = Math.min(!manual && autopay ? autopay.ceiling : book.ceiling, book.ceiling);
     if (spentAll() + max > ceiling) {
-      return refuse('ceiling_exhausted', tr('caYouHaveUsedOfYourAppAllInPayment', fmtAmount(spentAll()), fmtAmount(ceiling), fmtAmount(max)));
+      return refuse('ceiling_exhausted', tr('caYouHaveUsedOfYourAppAllInPayment', fmtAmount(spentAll(), 'up'), fmtAmount(ceiling, 'down'), fmtAmount(max, 'up')));
     }
     if (autopay && !manual) {
       let confirm: number | null = null;
       if (limit === undefined) {
         if (first === undefined) return refuse('first_contact', tr('caYourFirstPaidMessageToNeedsYourOKOnce', who));
         confirm = Math.min(first, book.ceiling);
-        if (confirm < max) return refuse('invalid', tr('caABudgetOfDoesNotCoverThisMessage', fmtAmount(confirm)));
+        if (confirm < max) return refuse('invalid', tr('caABudgetOfDoesNotCoverThisMessage', fmtAmount(confirm, 'up')));
       }
       return Promise.resolve(confirm);
     }
@@ -1132,7 +1132,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     budgetSet: (target, room, limitMsat) => {
       const k = key(target.toLowerCase(), room);
       if (limitMsat === 0) book.limits.delete(k);
-      else if (limitMsat > book.ceiling) return refuse('invalid', tr('caThatIsAboveYourApprovedDailyTotalOfRaise', fmtAmount(book.ceiling)));
+      else if (limitMsat > book.ceiling) return refuse('invalid', tr('caThatIsAboveYourApprovedDailyTotalOfRaise', fmtAmount(book.ceiling, 'down')));
       else book.limits.set(k, limitMsat);
       return ok(budgetView());
     },
@@ -1180,7 +1180,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       }
       if (v2 && !isRoom && to === hex('a') && raised[to] === undefined) {
         raised[to] = 3000;
-        return refuse('price_changed', tr('caMayaSPriceRoseTo3SatsAboveYour', fmtAmount(maxMsat)));
+        return refuse('price_changed', tr('caRobinSPriceRoseTo3SatsAboveYour', fmtAmount(maxMsat, 'up')));
       }
       if (amount + fee > maxMsat) return refuse('price_changed', tr('caPriceAboveConfirmedCeilingNothingDispatched'));
       if (confirm !== null) book.limits.set(key(to, isRoom), confirm);
@@ -1270,6 +1270,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     callQuote: () => ok({ offer_msat: 10_000, offer_max_routing_fee_msat: 5000, signal_msat: 1000, signal_max_routing_fee_msat: 5000, call_total_msat: 21_000 }),
     closeCallAdmission: async () => {},
     callSignal: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
+    callFreeReply: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     callStatus: async () => null,
     callBlock: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     callHold: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),

@@ -28,7 +28,7 @@ type Call = { cmd: string; args: Record<string, unknown> | undefined };
 
 function stubHost(overrides: Record<string, (args?: Record<string, unknown>) => unknown> = {}) {
   resetContactsForTests();
-  setPetname(A, 'Maya');
+  setPetname(A, 'Robin');
   const calls: Call[] = [];
   let trustedNode: string | null = null;
   const callbacks = new Map<number, (e: unknown) => void>();
@@ -45,14 +45,14 @@ function stubHost(overrides: Record<string, (args?: Record<string, unknown>) => 
       lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
     }),
     peers_list: () => [
-      { node_id: A, addr: '127.0.0.1:9735', label: 'Maya', connected: true, fingerprint: 'aaaaaaaa' },
+      { node_id: A, addr: '127.0.0.1:9735', label: 'Robin', connected: true, fingerprint: 'aaaaaaaa' },
       { node_id: B, addr: '127.0.0.1:9736', label: null, connected: false, fingerprint: 'bbbbbbbb' },
     ],
     rooms_list: () => [{ id: ROOM, name: 'Mexico build', created_by: OWN, created_at: null }],
     room_members: () => [OWN, A, B],
     messages_list: (args) =>
       args?.peer === A
-        ? [{ id: 'm1', kind: 0, sender: A, recipient: OWN, timestamp: 1_725_000_000_000, plaintext: 'hello from Maya', payment_amount_msat: 2000 }]
+        ? [{ id: 'm1', kind: 0, sender: A, recipient: OWN, timestamp: 1_725_000_000_000, plaintext: 'hello from Robin', payment_amount_msat: 2000 }]
         : [],
     price_quote: (args) =>
       args?.peer === A
@@ -394,7 +394,7 @@ describe('control center shell', () => {
     const { calls } = stubHost({
       device_key_status: () => ({ available: true, state: 'registered', fingerprint: '3F9A-12C4', owner_action: null, expires_at_ms: null }),
       relation_approve: () => open,
-      // The node's label for A is a self-claim that differs from the local petname (Maya).
+      // The node's label for A is a self-claim that differs from the local petname (Robin).
       peers_list: () => [
         { node_id: A, addr: '127.0.0.1:9735', label: 'Bank Support', connected: true, fingerprint: 'aaaaaaaa' },
         { node_id: B, addr: '127.0.0.1:9736', label: null, connected: false, fingerprint: 'bbbbbbbb' },
@@ -411,7 +411,7 @@ describe('control center shell', () => {
     expect(box).toContain('at most 2 sats per message');
     expect(mount.querySelector('[data-touch-peer]')?.textContent).toBe(`${A.slice(0, 8)}…${A.slice(-8)}`);
     // Petname plus the short key, visible on the line; never the node's claimed label.
-    expect(box).toContain(`Approve Maya (node ${A.slice(0, 8)}…${A.slice(-8)}) with Touch ID.`);
+    expect(box).toContain(`Approve Robin (node ${A.slice(0, 8)}…${A.slice(-8)}) with Touch ID.`);
     expect(box).not.toContain('Bank Support');
     // Above the capsule, so the terms read before Send.
     const line = mount.querySelector('[data-touch-approval]')!;
@@ -430,7 +430,7 @@ describe('control center shell', () => {
     expect(args).toMatchObject({ peer: A, budget_msat: null, per_act_max_msat: 2000 });
     // No name of any kind goes to the host: the petname stays on this Mac.
     expect(Object.keys(args).sort()).toEqual(['budget_msat', 'peer', 'per_act_max_msat']);
-    expect(JSON.stringify(calls.map((c) => c.args ?? {}))).not.toContain('Maya');
+    expect(JSON.stringify(calls.map((c) => c.args ?? {}))).not.toContain('Robin');
     expect(calls.some((c) => c.cmd === 'spend_request')).toBe(false);
   });
 
@@ -491,7 +491,7 @@ describe('control center shell', () => {
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
     await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
-    area.value = 'hello Maya';
+    area.value = 'hello Robin';
     area.dispatchEvent(new Event('input', { bubbles: true }));
     // The label promises only the approval.
     await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
@@ -499,7 +499,7 @@ describe('control center shell', () => {
     await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     await waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
     expect(mount.querySelector('[data-sending]')).toBeNull();
-    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
+    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Robin');
     await vi.advanceTimersByTimeAsync(300);
     expect(calls.some((c) => c.cmd === 'message_send')).toBe(false);
   });
@@ -525,7 +525,7 @@ describe('control center shell', () => {
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
     await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
-    area.value = 'hello Maya';
+    area.value = 'hello Robin';
     area.dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     click('[data-send]');
@@ -597,7 +597,7 @@ describe('control center shell', () => {
     return { ...host, sent };
   }
   const DAY = 86_400_000;
-  async function pressTouch(text = 'hello Maya') {
+  async function pressTouch(text = 'hello Robin') {
     start();
     await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
@@ -617,10 +617,10 @@ describe('control center shell', () => {
     const host = touchHost(st);
     await pressTouch();
     await waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
-    await waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    await waitFor(() => expect(host.sent).toEqual(['hello Robin']));
     expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
     await vi.advanceTimersByTimeAsync(3500);
-    expect(host.sent).toEqual(['hello Maya']);
+    expect(host.sent).toEqual(['hello Robin']);
     expect(mount.querySelector('[data-sending]')).toBeNull();
     expect(mount.querySelector('[data-delivery="sent"]')?.textContent).toBe('Sent');
   }, 15_000);
@@ -632,11 +632,11 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    await waitFor(() => expect(host.sent).toEqual(['hello Robin']));
     setLanguagePref(lang);
     expect(mount.querySelector('[data-sending]')).not.toBeNull();
     host.emitLive({ type: 'message', room_id: null, message: { id: 'sent-1', kind: 0, sender: OWN, recipient: A,
-      timestamp: Date.now(), plaintext: 'hello Maya', payment_amount_msat: 2000 } });
+      timestamp: Date.now(), plaintext: 'hello Robin', payment_amount_msat: 2000 } });
     host.emitLive({ type: 'delivery', message_id: 'sent-1', status: 'delivered', reason: null });
     // Same-text echoes can belong to another device. The receipt establishes ownership.
     expect(mount.querySelector('[data-sending]')).not.toBeNull();
@@ -657,7 +657,7 @@ describe('control center shell', () => {
     await pressTouch();
     await waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
     expect(mount.querySelector('[data-sending]')).toBeNull();
-    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
+    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Robin');
     await vi.advanceTimersByTimeAsync(300);
     expect(host.sent).toEqual([]);
   });
@@ -668,7 +668,7 @@ describe('control center shell', () => {
     const host = touchHost(st);
     await pressTouch();
     await waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
-    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
+    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Robin');
     expect(mount.querySelector('[data-sending]')).toBeNull();
     await vi.advanceTimersByTimeAsync(300);
     expect(host.sent).toEqual([]);
@@ -696,7 +696,7 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    await waitFor(() => expect(host.sent).toEqual(['hello Robin']));
     expect(unsentReason()).toBe('');
   });
 
@@ -711,7 +711,7 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    if (sends) await waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    if (sends) await waitFor(() => expect(host.sent).toEqual(['hello Robin']));
     else {
       await waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
       await vi.advanceTimersByTimeAsync(300);
@@ -972,13 +972,13 @@ describe('control center shell', () => {
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
     await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
-    area.value = 'hello Maya';
+    area.value = 'hello Robin';
     area.dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     click('[data-send]');
     await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     await vi.advanceTimersByTimeAsync(100);
-    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
+    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Robin');
     expect(mount.querySelector('[data-unsent]')).toBeNull();
     expect(mount.querySelector('[data-sending]')).toBeNull();
     expect(calls.some((c) => c.cmd === 'message_send')).toBe(false);
@@ -1314,11 +1314,11 @@ describe('control center shell', () => {
     // Rail lists the node's peers and rooms; the first connected peer opens.
     await waitFor(() => expect(mount.querySelector(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     expect(mount.querySelector(`[data-track="room:${ROOM}"]`)?.textContent).toContain('Mexico build');
-    await waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('hello from Maya'));
+    await waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('hello from Robin'));
 
-    // The composer shows Maya's advertised price before anything can be sent.
+    // The composer shows Robin's advertised price before anything can be sent.
     await waitFor(() => expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
-    expect(mount.querySelector('[data-cost]')?.textContent).toContain('Maya’s price');
+    expect(mount.querySelector('[data-cost]')?.textContent).toContain('Robin’s price');
     // Until the owner approves, the one action on screen is the approval itself.
     await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Send'));
     expect(mount.querySelector('[data-spend="locked"]')?.textContent).toContain('never saved');

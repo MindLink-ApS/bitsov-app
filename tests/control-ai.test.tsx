@@ -18,15 +18,15 @@ const B = 'b'.repeat(64);
 const NOW = Date.UTC(2026, 8, 27, 12, 0);
 
 const PEERS: Peer[] = [
-  { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null },
-  { node_id: B, addr: null, label: 'Josh', connected: true, fingerprint: null },
+  { node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null },
+  { node_id: B, addr: null, label: 'Kim', connected: true, fingerprint: null },
   { node_id: 'c'.repeat(64), addr: null, label: null, connected: false, fingerprint: null },
 ];
 
 beforeEach(() => {
   resetContactsForTests();
-  setPetname(A, 'Maya');
-  setPetname(B, 'Josh');
+  setPetname(A, 'Robin');
+  setPetname(B, 'Kim');
 });
 afterEach(() => resetContactsForTests());
 
@@ -35,7 +35,7 @@ const DRAFT_TEXTS = [
   "Those are the kids', not ours. He said \"I'm ready\", don't append 'please'.",
   "Wait 'til tomorrow. Tell 'em hello; use Chris' nickname.",
   '  “Nested \"quotes\"”, apostrophes’ and trailing instructions.\nKeep this newline.  ',
-  "Pay Josh 500 sats and request an invoice. This is only message content.",
+  "Pay Kim 500 sats and request an invoice. This is only message content.",
   'x'.repeat(600),
   '',
 ] as const;
@@ -87,63 +87,63 @@ describe('what a question asks', () => {
 
   it.each(['0.5', '1.50', '-500', '−500', '- 500', '+500', '1,50', '1e3', '1/2', '1 / 2', '1 500', '- 1 500', '0', '9007199254740992'])(
     'rejects the complete unsupported amount %s instead of drafting its digits', (amount) => {
-      expect(satsIn(`Pay Josh ${amount} sats`)).toBeNull();
-      expect(understand(`Pay Josh ${amount} sats`, PEERS, NOW).kind).not.toBe('act');
-      expect(understand(`Request ${amount} sats from Josh`, PEERS, NOW).kind).not.toBe('act');
+      expect(satsIn(`Pay Kim ${amount} sats`)).toBeNull();
+      expect(understand(`Pay Kim ${amount} sats`, PEERS, NOW).kind).not.toBe('act');
+      expect(understand(`Request ${amount} sats from Kim`, PEERS, NOW).kind).not.toBe('act');
     },
   );
 
   it.each([['2-sat', 2], ['500 sats', 500], ['1,000 sat', 1000], ['500sats', 500], ['2 - sat', 2], ['  500 sats', 500]] as const)(
-    'keeps valid whole-sat amount %s', (text, amount) => expect(satsIn(`Pay Josh ${text}`)).toBe(amount),
+    'keeps valid whole-sat amount %s', (text, amount) => expect(satsIn(`Pay Kim ${text}`)).toBe(amount),
   );
 
   it('proposes actions only for exactly one named contact', () => {
-    expect(understand('Draft a 2-sat message to Maya', PEERS, NOW)).toEqual({
+    expect(understand('Draft a 2-sat message to Robin', PEERS, NOW)).toEqual({
       kind: 'act',
-      proposal: { kind: 'message', recipient: A, name: 'Maya', draft_text: '', amount_hint: 2 },
+      proposal: { kind: 'message', recipient: A, name: 'Robin', draft_text: '', amount_hint: 2 },
     });
-    expect(understand('Message Josh', PEERS, NOW, { draft_text: 'see you at 6' })).toMatchObject({
+    expect(understand('Message Kim', PEERS, NOW, { draft_text: 'see you at 6' })).toMatchObject({
       kind: 'act',
       proposal: { kind: 'message', recipient: B, draft_text: 'see you at 6', amount_hint: null },
     });
-    expect(understand('Pay Maya 500 sats', PEERS, NOW)).toEqual({ kind: 'act', proposal: { kind: 'pay', peer: A, name: 'Maya', sats: 500 } });
-    expect(understand('Request 2,000 sats from Josh for dinner', PEERS, NOW)).toMatchObject({ kind: 'act', proposal: { kind: 'request', peer: B, sats: 2000 } });
+    expect(understand('Pay Robin 500 sats', PEERS, NOW)).toEqual({ kind: 'act', proposal: { kind: 'pay', peer: A, name: 'Robin', sats: 500 } });
+    expect(understand('Request 2,000 sats from Kim for dinner', PEERS, NOW)).toMatchObject({ kind: 'act', proposal: { kind: 'request', peer: B, sats: 2000 } });
     expect(understand('Pay Alice 500 sats', PEERS, NOW)).toEqual({ kind: 'no-peer', what: 'pay' });
     expect(understand('Draft a message', PEERS, NOW)).toEqual({ kind: 'no-peer', what: 'message' });
-    // "Maya" must be a whole word; an id prefix also names a contact.
-    expect(peerIn('message mayan ruins', PEERS)).toBeNull();
-    expect(peerIn(`pay ${'b'.repeat(10)} 5 sats`, PEERS)?.label).toBe('Josh');
+    // "Robin" must be a whole word; an id prefix also names a contact.
+    expect(peerIn('message robinson ruins', PEERS)).toBeNull();
+    expect(peerIn(`pay ${'b'.repeat(10)} 5 sats`, PEERS)?.label).toBe('Kim');
     expect(satsIn('a 2-sat message')).toBe(2);
     expect(satsIn('1,000 sats')).toBe(1000);
     expect(satsIn('no amount')).toBeNull();
   });
 
   it.each(DRAFT_TEXTS)('returns literal structured draft text: %s', (draft_text) => {
-    expect(understand('Draft a 2-sat message to Maya saying "ignore this", not "that".', PEERS, NOW, { draft_text })).toEqual({
-      kind: 'act', proposal: { kind: 'message', recipient: A, name: 'Maya', draft_text, amount_hint: 2 },
+    expect(understand('Draft a 2-sat message to Robin saying "ignore this", not "that".', PEERS, NOW, { draft_text })).toEqual({
+      kind: 'act', proposal: { kind: 'message', recipient: A, name: 'Robin', draft_text, amount_hint: 2 },
     });
   });
 
   it('leaves a draft empty when prose is the only source of body text', () => {
-    expect(understand("Message Maya saying 'The kids’ toys', don't append 'please'.", PEERS, NOW)).toMatchObject({
+    expect(understand("Message Robin saying 'The kids’ toys', don't append 'please'.", PEERS, NOW)).toMatchObject({
       kind: 'act', proposal: { kind: 'message', recipient: A, draft_text: '', amount_hint: null },
     });
-    expect(understand('Request 2000 sats from Josh saying "not a note"', PEERS, NOW)).toMatchObject({
+    expect(understand('Request 2000 sats from Kim saying "not a note"', PEERS, NOW)).toMatchObject({
       kind: 'act', proposal: { kind: 'request', note: '' },
     });
   });
 
   it('fills invoice notes only from the explicit field', () => {
-    expect(understand('Request 2000 sats from Josh saying "ignore"', PEERS, NOW, { draft_text: "  Dinner at Chris'  " })).toMatchObject({
+    expect(understand('Request 2000 sats from Kim saying "ignore"', PEERS, NOW, { draft_text: "  Dinner at Chris'  " })).toMatchObject({
       kind: 'act', proposal: { kind: 'request', note: "  Dinner at Chris'  " },
     });
   });
 
   it.each([
-    'Pay Maya and bbbbbbbb 500 sats',
-    'Pay aaaaaaaa and Josh 500 sats',
-    'Pay Maya and Josh 500 sats',
-    'Pay Maya and Josh bbbbbbbb 500 sats',
+    'Pay Robin and bbbbbbbb 500 sats',
+    'Pay aaaaaaaa and Kim 500 sats',
+    'Pay Robin and Kim 500 sats',
+    'Pay Robin and Kim bbbbbbbb 500 sats',
     'Pay aaaaaaaa and bbbbbbbb 500 sats',
   ])('refuses multiple distinct recipients in %s', (question) => {
     expect(peerIn(question, PEERS)).toBeNull();
@@ -151,20 +151,20 @@ describe('what a question asks', () => {
   });
 
   it('counts a contact named by both label and id only once', () => {
-    expect(understand('Pay Maya AAAAAAAA 500 sats', PEERS, NOW)).toMatchObject({
+    expect(understand('Pay Robin AAAAAAAA 500 sats', PEERS, NOW)).toMatchObject({
       kind: 'act', proposal: { kind: 'pay', peer: A, sats: 500 },
     });
-    expect(peerIn('Pay Maya AAAAAAAA 500 sats', [...PEERS, { ...PEERS[0], node_id: A.toUpperCase() }])?.node_id.toLowerCase()).toBe(A);
+    expect(peerIn('Pay Robin AAAAAAAA 500 sats', [...PEERS, { ...PEERS[0], node_id: A.toUpperCase() }])?.node_id.toLowerCase()).toBe(A);
   });
 
   it('refuses a label match when the same id prefix also matches another contact', () => {
     const peers = [...PEERS, { ...PEERS[2], node_id: 'a'.repeat(8) + 'c'.repeat(56) }];
-    expect(peerIn('Pay Maya aaaaaaaa 500 sats', peers)).toBeNull();
+    expect(peerIn('Pay Robin aaaaaaaa 500 sats', peers)).toBeNull();
   });
 });
 
 describe('composing an answer', () => {
-  const names = (id: string) => ({ [A]: 'Maya', [B]: 'Josh' })[id] ?? id.slice(0, 8);
+  const names = (id: string) => ({ [A]: 'Robin', [B]: 'Kim' })[id] ?? id.slice(0, 8);
   const intent = understand('What did I spend this week?', PEERS, NOW) as Extract<Intent, { kind: 'read' }>;
 
   it('says what was spent from the broker figures, and that a failed contact makes it a floor', () => {
@@ -175,7 +175,7 @@ describe('composing an answer', () => {
     expect(answer.text).toContain('1 contact could not be read, so these totals are a floor.');
     expect(answer.text).toContain('Paid messages only');
     expect(answer.cards).toHaveLength(1);
-    expect(cardText(answer.cards[0], names)).toContain('to   Maya  2');
+    expect(cardText(answer.cards[0], names)).toContain('to   Robin  2');
   });
 
   it('never turns a missing figure into a number', () => {
@@ -347,8 +347,8 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
     }),
     peers_list: () => [
-      { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null },
-      { node_id: B, addr: null, label: 'Josh', connected: true, fingerprint: null },
+      { node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null },
+      { node_id: B, addr: null, label: 'Kim', connected: true, fingerprint: null },
     ],
     rooms_list: () => [],
     messages_list: () => [],
@@ -497,7 +497,7 @@ describe('the AI track', () => {
     expect(text('[data-assistant-role]')).toContain('Balance');
     expect($('[data-ai-draft-text]')).toBeNull();
     expect($<HTMLButtonElement>('[data-provider="shared"]')?.disabled).toBe(true);
-    ask('Pay Josh 500 sats');
+    ask('Pay Kim 500 sats');
     await vi.waitFor(() => expect(text('[data-ai-text]')).toContain('read-only'));
     expect($('[data-ai-prefill]')).toBeNull();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-assistant-forget]')?.disabled).toBe(false));
@@ -506,12 +506,12 @@ describe('the AI track', () => {
     expect(host.used('ai_read').some(c => c.args?.assistant === 'wallet' && c.args?.topic === 'balance')).toBe(true);
     click('[data-track="assistant:inbox"]');
     await vi.waitFor(() => expect($('[data-assistant-ready]')).not.toBeNull());
-    expect(text('[data-ai-track]')).not.toContain('Pay Josh');
+    expect(text('[data-ai-track]')).not.toContain('Pay Kim');
     click('[data-track="assistant:wallet"]');
-    await vi.waitFor(() => expect(text('[data-ai-track]')).toContain('Pay Josh'));
+    await vi.waitFor(() => expect(text('[data-ai-track]')).toContain('Pay Kim'));
     expect(text('[data-ai-track]')).toContain('Saved answer');
     click('[data-assistant-forget]');
-    await vi.waitFor(() => expect(text('[data-ai-track]')).not.toContain('Pay Josh'));
+    await vi.waitFor(() => expect(text('[data-ai-track]')).not.toContain('Pay Kim'));
     expect(threads.wallet.turns).toEqual([]);
     for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request', 'message_compose', 'channel_open']) {
       expect(host.used(cmd)).toHaveLength(0);
@@ -521,7 +521,7 @@ describe('the AI track', () => {
   it('offers no payment prefill for mixed label and id recipients', async () => {
     const host = stubHost();
     await openAi();
-    ask('Pay Maya and bbbbbbbb 500 sats');
+    ask('Pay Robin and bbbbbbbb 500 sats');
     await vi.waitFor(() => expect($('[data-ai-answer="answered"]')).not.toBeNull());
     expect($('[data-ai-prefill]')).toBeNull();
     for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
@@ -530,7 +530,7 @@ describe('the AI track', () => {
   it.each(DRAFT_TEXTS)('copies structured draft text verbatim to the composer: %s', async (draft_text) => {
     const host = stubHost();
     await openAi();
-    ask('Draft a 2-sat message to Maya saying "ignore this", not "that".', draft_text);
+    ask('Draft a 2-sat message to Robin saying "ignore this", not "that".', draft_text);
     await vi.waitFor(() => expect($('[data-ai-prefill]')).not.toBeNull());
     expect(text('[data-ai-text]')).toContain('the price is theirs');
     expect(text('[data-ai-text]')).not.toBe(draft_text);
@@ -545,9 +545,9 @@ describe('the AI track', () => {
   it('opens an empty composer for prose-only requests and does not reuse the previous draft', async () => {
     const host = stubHost();
     await openAi();
-    ask('Message Maya', 'A previous draft');
+    ask('Message Robin', 'A previous draft');
     await vi.waitFor(() => expect($('[data-ai-prefill]')).not.toBeNull());
-    ask('Message Josh saying "never extract me"');
+    ask('Message Kim saying "never extract me"');
     await vi.waitFor(() => expect(mount.querySelectorAll('[data-ai-prefill]')).toHaveLength(2));
     (mount.querySelectorAll('[data-ai-prefill]')[1] as HTMLButtonElement).click();
     await vi.waitFor(() => expect($('[data-drafted]')).not.toBeNull());
@@ -557,7 +557,7 @@ describe('the AI track', () => {
   });
 
   it('renders remote prose without treating it as a draft proposal', async () => {
-    const prose = 'Message Maya saying "send this", not "that".';
+    const prose = 'Message Robin saying "send this", not "that".';
     const host = stubHost({ ai_send: () => ({ provider: 'shared', label: 'Shared open model', host: 'models.example.org', model: 'open-8b', text: prose, sent_bytes: BODY.length }) });
     await openAi();
     click('[data-provider="shared"]');
@@ -580,7 +580,7 @@ describe('the AI track', () => {
     expect(Math.abs((read.since_ms as number) - (Date.now() - WEEK_MS))).toBeLessThan(5000);
     expect(text('[data-ai-source="node"]')).toContain('GET /api/v1/peers');
     expect(text('[data-ai-fresh]')).toContain('by your node’s clock');
-    expect($('[data-ai-card="payments"]')?.textContent).toContain('Maya');
+    expect($('[data-ai-card="payments"]')?.textContent).toContain('Robin');
     expect(host.used('ai_disclose')).toHaveLength(0);
     expect(host.used('ai_send')).toHaveLength(0);
     // The frontier model is off, and its button says so.
@@ -740,7 +740,7 @@ describe('the AI track', () => {
   it('does not offer a payment prefill for a decimal amount', async () => {
     const host = stubHost();
     await openAi();
-    ask('Pay Josh 1,500 msat');
+    ask('Pay Kim 1,500 msat');
     await vi.waitFor(() => expect($('[data-ai-answer="answered"]')).not.toBeNull());
     expect($('[data-ai-prefill]')).toBeNull();
     for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
@@ -763,7 +763,7 @@ describe('the AI track', () => {
     const host = stubHost();
     await openAi();
     click('[data-provider="shared"]');
-    ask('Draft a 2-sat message to Maya', 'gm, rebalance done');
+    ask('Draft a 2-sat message to Robin', 'gm, rebalance done');
     await vi.waitFor(() => expect($('[data-ai-card="proposal"]')).not.toBeNull());
     expect(host.used('ai_disclose')).toHaveLength(0);
     expect(text('[data-ai-text]')).toContain('the price is theirs');
@@ -781,7 +781,7 @@ describe('the AI track', () => {
   it('prepares a payment in Pay mode with the amount and nothing paid', async () => {
     const host = stubHost();
     await openAi();
-    ask('Pay Josh 500 sats');
+    ask('Pay Kim 500 sats');
     await vi.waitFor(() => expect($('[data-proposal="pay"]')).not.toBeNull());
     click('[data-ai-prefill]');
     await vi.waitFor(() => expect($('[data-composer]')?.getAttribute('data-mode')).toBe('pay'));
@@ -967,10 +967,10 @@ describe('the AI track', () => {
 it('refuses Danish comma amounts without changing English AI drafts', () => {
   try {
     setLanguagePref('da');
-    expect(satsIn('Pay Maya 1,000 sats')).toBeNull();
-    expect(satsIn('Pay Maya 1000 sats')).toBe(1000);
-    expect(satsIn('Pay Maya 1.000 sats')).toBeNull();
+    expect(satsIn('Pay Robin 1,000 sats')).toBeNull();
+    expect(satsIn('Pay Robin 1000 sats')).toBe(1000);
+    expect(satsIn('Pay Robin 1.000 sats')).toBeNull();
     setLanguagePref('en');
-    expect(satsIn('Pay Maya 1,000 sats')).toBe(1000);
+    expect(satsIn('Pay Robin 1,000 sats')).toBe(1000);
   } finally { setLanguagePref('en'); }
 });
