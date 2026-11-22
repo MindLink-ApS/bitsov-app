@@ -770,15 +770,18 @@ fn absent(path: &Path) -> bool {
 }
 
 /// Folders from the journal folder `root` down to `path`'s own folder, in that
-/// order. `None` when `path` is not inside `root`, or a step is not a plain
-/// name: nothing may be read through it. The journal folder is the one the
-/// caller already holds, never a name guessed from `path`.
+/// order. `None` when `root` is empty, `path` is not inside `root`, or a step
+/// (the last one included) is not a plain name: nothing may be read through
+/// it. The journal folder is the one the caller already holds, never a name
+/// guessed from `path`.
 #[cfg(any(windows, test))]
 fn folders_from_root(root: &Path, path: &Path) -> Option<Vec<PathBuf>> {
-    let relative = path.parent()?.strip_prefix(root).ok()?;
+    if root.components().next().is_none() { return None; }
+    let mut steps = path.strip_prefix(root).ok()?.components();
+    let Some(std::path::Component::Normal(_)) = steps.next_back() else { return None; };
     let mut folder = root.to_path_buf();
     let mut folders = vec![folder.clone()];
-    for component in relative.components() {
+    for component in steps {
         let std::path::Component::Normal(name) = component else { return None; };
         folder.push(name);
         folders.push(folder.clone());
@@ -2057,6 +2060,20 @@ mod journal_folder_tests {
         assert_eq!(folders(root, Path::new("/data/ops/app-spend-extra/spend-pending.json")), None);
         assert_eq!(folders(root, Path::new("ops")), None);
         assert_eq!(folders(root, &root.join("ops").join("..").join("spend-pending.json")), None);
+    }
+
+    /// The last step names the record, so it must be a plain name too: a
+    /// trailing `..` is refused, not silently popped by `parent()`. An empty
+    /// journal folder would start the chain at a folder that reads as missing,
+    /// so it is refused as well.
+    #[test]
+    fn a_trailing_parent_step_or_an_empty_journal_folder_is_refused() {
+        let root = Path::new("/data/ops/app-spend");
+        assert_eq!(folders(root, &root.join("..")), None);
+        assert_eq!(folders(root, &root.join("ops").join("..")), None);
+        assert_eq!(folders(root, root), None);
+        assert_eq!(folders(Path::new(""), Path::new("ops/a.json")), None);
+        assert_eq!(folders(Path::new(""), Path::new("spend-pending.json")), None);
     }
 
     /// A file under a journal subdirectory can share a top-level journal name.
