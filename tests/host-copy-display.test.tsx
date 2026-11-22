@@ -32,7 +32,7 @@ it('a failed trust acknowledgement shows the host refusal in Danish', async () =
   vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
   dispose = render(() => <App />, document.body);
   await vi.waitFor(() => expect(document.querySelector('[data-gate="g6-remote-trust"]')).not.toBeNull());
-  [...document.querySelectorAll('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+  document.querySelector<HTMLButtonElement>('[data-trust-continue]')!.click();
   await vi.waitFor(() => expect(document.body.textContent).toContain('Kunne ikke gemme din accept af tillid.'));
   expect(document.body.textContent).not.toContain('Could not save trust acknowledgement.');
 });
