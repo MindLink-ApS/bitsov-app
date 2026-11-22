@@ -37,7 +37,7 @@ async fn noise_auth_reply(listener: tokio::net::TcpListener, accept: bool) -> re
 async fn noise_auth_reply_stream(mut stream: tokio::net::TcpStream, accept: bool) -> remote_access::RemoteAuthRequest {
     let secret = [43; 32];
     let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
-        .local_private_key(&secret).build_responder().unwrap();
+        .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
     let mut output = [0; 1024];
     for step in 0..2 {
         let length = stream.read_u32().await.unwrap();
@@ -294,7 +294,7 @@ async fn connected_node_session(mut stream: tokio::net::TcpStream, node_id: Stri
         write(stream, &out[..len + 2]).await
     }
     let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
-        .local_private_key(&[43; 32]).build_responder().unwrap();
+        .local_private_key(&[43; 32]).and_then(|b| b.build_responder()).unwrap();
     let mut plain = vec![0; 65536];
     noise.read_message(&frame(&mut stream).await?, &mut plain).unwrap();
     let len = noise.write_message(&[], &mut plain).unwrap();
@@ -584,7 +584,7 @@ async fn controlled_box_session(mut stream: tokio::net::TcpStream, node_id: Stri
     let locked = control.locked.load(Ordering::SeqCst);
     let secret = if locked { BOX_STATIC_SECRET } else { [43; 32] };
     let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
-        .local_private_key(&secret).build_responder().unwrap();
+        .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
     let mut plain = vec![0; 65536];
     noise.read_message(&frame(&mut stream).await?, &mut plain).unwrap();
     let len = noise.write_message(&[], &mut plain).unwrap();
