@@ -39,7 +39,10 @@ public repository. Use neutral examples; omit personal paths, infrastructure
 addresses, private repository references and assistant session links. Report
 security concerns through [SECURITY.md](SECURITY.md).
 
-The Fossil Check workflow scans added lines and changed paths.
+The Fossil Check workflow scans added lines, changed paths, and the commit
+messages and author and committer identities of the change. Commits must use a
+public email address: machine-local hosts (such as `.local`) and IP-literal
+addresses are rejected.
 
 Maintainers keep the private repository names in the repository secret
 `FOSSIL_PRIVATE_NAMES`, one slug per line. Only the checking step receives the
