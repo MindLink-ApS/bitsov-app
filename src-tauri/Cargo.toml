@@ -60,7 +60,7 @@ libc = "0.2"
 bitsov-ffi = { path = "ffi" }
 shared_child = "1.1"
 tauri-plugin-shell = "2"
-rfd = "0.15"
+rfd = "0.18"
 
 # Local notifications (official Tauri 2 plugin): owner approvals and calls on the
 # Mac, ordinary message notifications on the Mac, Windows and Linux.
