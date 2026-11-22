@@ -60,7 +60,7 @@ const modPow = (b: bigint, e: bigint, m: bigint) => {
 const be32 = (n: bigint) => Uint8Array.from(n.toString(16).padStart(64, '0').match(/../g)!.map((h) => parseInt(h, 16)));
 
 /** Robin's own Lightning key and a stranger's, as private scalars. */
-const ROBIN_KEY = 0x4d617961n;
+const ROBIN_KEY = 0x526f62696en;
 const STRANGER_KEY = 0x5374726e676572n;
 const pubOf = (key: bigint) => compress(pointMul(G, key)!);
 
