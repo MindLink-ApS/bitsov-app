@@ -125,3 +125,4 @@ it is not an encrypted app-to-node connection.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to build, test and propose changes.
 Report security concerns privately as described in [SECURITY.md](SECURITY.md).
+Taking part in this project means following the [Code of Conduct](CODE_OF_CONDUCT.md).
