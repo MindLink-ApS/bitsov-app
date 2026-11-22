@@ -10,6 +10,16 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 cases=0
 
+# Supply macOS file output for the text fixtures on both test hosts.
+mkdir -p "$TMP/tools"
+cat > "$TMP/tools/file" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 2 ] && [ "$1" = -b ] && [ -f "$2" ] || exit 1
+printf 'Mach-O 64-bit executable arm64\n'
+SH
+chmod 0755 "$TMP/tools/file"
+export PATH="$TMP/tools:$PATH"
+
 plist() {
   local min="$1"
   cat <<EOF
@@ -49,7 +59,8 @@ good_tree() {
 
 run_check() {
   local d="$1"
-  bash "$CHECK" --app "$d/BitSov.app" --sidecar "$d/bin/konsensus-aarch64-apple-darwin" \
+  shift
+  bash "$CHECK" "$@" --app "$d/BitSov.app" --sidecar "$d/bin/konsensus-aarch64-apple-darwin" \
     --dist "$d/dist" > "$d/result.log" 2>&1
 }
 
@@ -61,7 +72,7 @@ expect() {
   d="$TMP/case$cases"
   good_tree "$d"
   (cd "$d" && "$@")
-  run_check "$d" || rc=$?
+  run_check "$d" --arch arm64 || rc=$?
   if [ "$want" = pass ] && { [ "$rc" -ne 0 ] || ! grep -q '^MAC BUNDLE CHECK: PASS$' "$d/result.log"; }; then
     cat "$d/result.log"; echo "FAIL: $label (exit $rc, expected PASS)" >&2; exit 1
   fi
@@ -78,7 +89,7 @@ noop() { :; }
 append() { printf '%s' "$2" >> "$1"; }
 default_min_plist() { plist 10.13 > BitSov.app/Contents/Info.plist; }
 
-expect pass 'good bundle tree with rc23 expectation' '(node v0.3.0-rc23)' noop
+expect pass 'good bundle tree with rc24 expectation' '(node v0.3.0-rc24)' noop
 expect fail 'bundled sidecar missing' 'FAIL  bundled sidecar is executable' \
   rm BitSov.app/Contents/MacOS/konsensus
 expect fail 'bundled sidecar differs from the verified one' 'FAIL  bundled sidecar matches the verified sidecar' \
@@ -115,5 +126,18 @@ expect fail 'assistant page CSP in the app binary' 'assistant.html CSP' \
   append BitSov.app/Contents/MacOS/bitsov-app "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'none'"
 expect fail 'bundle path does not exist' 'FAIL  app executable is executable' \
   rm -rf BitSov.app
+
+cases=$((cases + 1))
+d="$TMP/case$cases"
+good_tree "$d"
+rc=0
+run_check "$d" || rc=$?
+if [ "$rc" -ne 2 ] || ! grep -qF -- '--arch is required' "$d/result.log" \
+    || grep -q '^== mac bundle:' "$d/result.log"; then
+  cat "$d/result.log"
+  echo "FAIL: missing architecture must stop before bundle checks (exit $rc)" >&2
+  exit 1
+fi
+echo 'PASS: missing architecture stops before bundle checks even with explicit paths'
 
 echo "MAC BUNDLE CHECK TESTS: PASS ($cases cases)"

@@ -33,7 +33,7 @@ it('reports click → bubble visible and click → paid for a 1.2 s send', async
   await vi.waitFor(() => {
     const now = performance.now();
     if (bubbleAt === null && visible()) bubbleAt = now - t0;
-    if (paidAt === null && /^paid /.test($('[data-message="m-latency"] .sats-meta')?.textContent ?? '')) paidAt = now - t0;
+    if (paidAt === null && /^paid /.test($('[data-message="m-latency"] .sats-meta')?.getAttribute('title') ?? '')) paidAt = now - t0;
     expect(paidAt).not.toBeNull();
   }, { timeout: SEND_MS + 2000, interval: 10 });
   // eslint-disable-next-line no-console

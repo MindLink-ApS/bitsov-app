@@ -29,7 +29,7 @@
   --warn: #E0B04A;
   --err: #D9603F;
 
-  /* type — calmer, closer to Claude desktop */
+  /* type — calm desktop typography */
   --font-serif: 'New York', 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
   --font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
@@ -203,7 +203,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .empty-track { margin: auto; max-width: 420px; text-align: center; display: flex; flex-direction: column; gap: var(--s-3); align-items: center; }
 .empty-track h2 { font-size: var(--t-2xl); }
 
-/* composer: Claude-like single bar */
+/* message input: single bar */
 .composer { border-top: 1px solid var(--line); padding: var(--s-3) var(--s-4) var(--s-5); display: flex; flex-direction: column; align-items: center; gap: var(--s-2); background: var(--bg); width: 100%; flex: none; position: sticky; bottom: 0; z-index: 2; }
 .composer textarea { resize: none; min-height: 40px; max-height: 160px; border-radius: 18px; }
 .composer-actions { display: flex; gap: var(--s-1); align-self: center; width: min(var(--chat-max), 100%); }
@@ -582,7 +582,7 @@ body{margin:0;font-family:system-ui,sans-serif}
 <div class="demo" data-theme-shot="dark">
   <aside class="demo-rail">
     <div class="mark" style="font-family:Georgia,serif;font-size:18px;font-weight:650">Bit<span style="color:var(--accent)">Sov</span></div>
-    <div style="font-size:12px;color:var(--muted)">Maya</div>
+    <div style="font-size:12px;color:var(--muted)">Robin</div>
     <div style="font-size:12px;color:var(--muted)">Mexico build</div>
     <div class="profile"><span class="avatar">11</span><span style="font-size:12.5px;color:var(--muted)">You · settings</span></div>
   </aside>
@@ -592,7 +592,7 @@ body{margin:0;font-family:system-ui,sans-serif}
       <div class="bubble" style="align-self:flex-end;background:var(--raised)">Sending the brief.</div>
       <div class="composer-main">
         <button class="attach">+</button>
-        <span style="flex:1;color:var(--muted);font-size:13.5px;padding:0 6px">Message Maya</span>
+        <span style="flex:1;color:var(--muted);font-size:13.5px;padding:0 6px">Message Robin</span>
         <button class="primary soft">Send · 2 sats</button>
       </div>
       <p style="font-size:12px;color:var(--faint);margin:0">MOCK theme shot (dark) — palette only, not a live app render. Profile settings hold Body, Node, Wallet, Budget, and BTC/sats.</p>

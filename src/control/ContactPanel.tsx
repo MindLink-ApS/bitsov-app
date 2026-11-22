@@ -23,7 +23,17 @@ import {
 } from './petnames';
 import { claimedName } from './state';
 import { onEscape } from './escapeStack';
+import { inertOutside } from './modalInert';
 import type { Peer } from './types';
+
+/**
+ * Stays fully usable behind the panel. A call can start or ring while the contact
+ * sheet is open, and answering, hanging up or approving a call payment must never
+ * wait for the sheet to close, so call panels and the waiting-calls stack are not
+ * made inert. The scrim is the panel's own click-to-close layer. Live regions are
+ * handled by inertOutside: they keep announcing, their controls go inert.
+ */
+const STAYS_USABLE = '.call-panel, [data-waiting-calls], .settings-scrim';
 
 export function ContactPanel(props: {
   open: boolean;
@@ -104,6 +114,8 @@ export function ContactPanel(props: {
     onCleanup(() => {
       if (opener && opener.isConnected && panel?.contains(document.activeElement)) opener.focus();
     });
+    // Registered last so it runs first on close: the opener is usable again before focus returns.
+    if (panel) onCleanup(inertOutside(panel, STAYS_USABLE));
   });
   return (
     <>
@@ -262,6 +274,14 @@ export function ContactPanel(props: {
               {tr('caLinkAsThisContact')}</button>
           </div>
         </div>
+
+        <details class="panel" data-contact-technical>
+          <summary>{tr('contactTechnical')}</summary>
+          <dl class="facts">
+            <dt>{tr('contactNodeId')}</dt>
+            <dd class="mono" style={{ 'overflow-wrap': 'anywhere' }} data-contact-node-id data-contact-node-key>{contactKey()}</dd>
+          </dl>
+        </details>
       </aside>
     </>
   );

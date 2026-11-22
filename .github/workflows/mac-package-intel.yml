@@ -1,0 +1,87 @@
+name: Mac Package Intel
+
+# Native Intel artifacts are opt-in while additional runner usage is evaluated.
+# Keep this workflow manual-only; the existing ARM package schedule is separate.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mac-package-intel:
+    name: Native x86_64 Mac package
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+      CARGO_BUILD_JOBS: 2
+      BITSOV_MAC_SIGNING_IDENTITY: '-'
+      BITSOV_MAC_NOTARY_PROFILE: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Require a native Intel host
+        run: |
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = x86_64
+
+      - name: GnuPG for the sidecar signature check
+        run: command -v gpg || brew install gnupg
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri
+          shared-key: tauri-release-macos-x86_64
+          cache-all-crates: 'true'
+          cache-workspace-crates: 'true'
+
+      # The native host selects bitsov-darwin-x86_64 from the signed manifest.
+      # Every sidecar is authenticated again before bundling.
+      - name: Package and verify the native Intel app
+        run: bash scripts/package-mac.sh --arch x86_64 --dmg
+
+      - name: Archive the verified app and record build inputs
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          bundle="$CARGO_TARGET_DIR/x86_64-apple-darwin/release/bundle"
+          app="$bundle/macos/BitSov.app"
+          test -s "$app/Contents/_CodeSignature/CodeResources"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          mkdir -p "$RUNNER_TEMP/out"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/out/BitSov-unsigned-macos-x86_64.app.zip"
+          cp "$bundle"/dmg/*_x86_64.dmg "$RUNNER_TEMP/out/"
+          source scripts/fetch-node-sidecar.sh
+          {
+            printf 'source_sha=%s\ntarget=x86_64-apple-darwin\nnode_release=%s\n' "$SOURCE_SHA" "$TAG"
+            printf 'node_asset=bitsov-darwin-x86_64\n'
+            shasum -a 256 src-tauri/bin/konsensus-x86_64-apple-darwin
+            rustc --version
+            node --version
+          } > "$RUNNER_TEMP/out/build-info.txt"
+          cd "$RUNNER_TEMP/out"
+          shasum -a 256 ./*.app.zip ./*.dmg build-info.txt > SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bitsov-unsigned-macos-x86_64-${{ github.sha }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          retention-days: 7
