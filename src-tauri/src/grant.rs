@@ -361,7 +361,7 @@ impl Refusal {
             // M6 N3: the call-sized reservation made when an offer goes out.
             "call_liquidity_insufficient" => ActionError::new(
                 "call_liquidity_insufficient",
-                "Your node's channel cannot hold this call's reservation right now. Nothing was paid. Add outbound capacity, then call again.",
+                "Your node's channel cannot hold this call's reservation right now. Nothing was paid. If your node just restarted, wait a minute and call again. If this keeps happening, add outbound capacity.",
             ),
             "call_price_changed" => ActionError::new(
                 "call_price_changed",
@@ -741,6 +741,10 @@ mod tests {
     fn call_reservation_refusals_are_named() {
         let r = |reason: &str| refusal(409, &serde_json::json!({"code": "budget_exceeded", "reason": reason, "remaining_msat": null}).to_string()).unwrap();
         assert_eq!(r("call_liquidity_insufficient").error(None).code, "call_liquidity_insufficient");
+        // Also what a node says while its Lightning link comes back after a restart.
+        let advice = r("call_liquidity_insufficient").error(None).message;
+        assert!(advice.contains("just restarted"), "{advice}");
+        assert!(!advice.contains("Add outbound capacity, then"), "{advice}");
         assert_eq!(r("call_price_changed").error(None).code, "call_price_changed");
     }
 

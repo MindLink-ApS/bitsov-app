@@ -16,9 +16,15 @@
 //! `src/control/mediaFrame.ts`). Both directions go through bounded queues
 //! that drop the OLDEST frame under backpressure: for live audio a stale
 //! frame is worth less than a fresh one.
+//!
+//! A session opened with a [`VideoPath`] also carries video on the same
+//! socket, with its own queues, its own `seq` counter and a pacer: audio goes
+//! first both ways, audio's `seq` stays gapless for its jitter buffer, and a
+//! key frame cannot burst past the node's budget. Without a video path nothing
+//! here differs from an audio-only session, byte for byte.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -80,6 +86,45 @@ pub const WS_PROTOCOL: &str = "bitsov.v1";
 pub const WS_JWT_PROTOCOL_PREFIX: &str = "bitsov.jwt.";
 /// Frames held per direction before the oldest is dropped: one second at 20 ms.
 pub const QUEUE_FRAMES: usize = 50;
+/// Video fragments held per direction before the oldest is dropped. The
+/// renderer stops encoding well before this fills.
+pub const VIDEO_QUEUE_FRAMES: usize = 32;
+/// Video control packets (key frame requests, reports) held before the oldest is dropped.
+pub const VIDEO_CONTROL_FRAMES: usize = 16;
+
+/// The node's media limits when an operator raised them. Absent means the
+/// defaults below; the value is `<messages> <bytes>` per second, per direction.
+pub const MEDIA_LIMITS_HEADER: &str = "x-bitsov-media-limits";
+/// What every node allows unless its operator raised it.
+pub const DEFAULT_NODE_MESSAGES: u32 = 100;
+pub const DEFAULT_NODE_BYTES: u32 = 64 * 1024;
+/// What the node keeps per second for packets of audio size; video gets the rest.
+const NODE_RESERVED_MESSAGES: u32 = 60;
+const NODE_RESERVED_BYTES: u32 = 12 * 1024;
+/// Share of what the reservation leaves that the pacer uses: the node closes the
+/// socket past its budget, and a stall can bunch packets into one of its windows.
+const PACER_PERCENT: u64 = 85;
+
+/// The pacer's rates for a node's limits, with the bytes and messages audio needs kept free.
+pub fn pacer_rates(node_messages: u32, node_bytes: u32) -> (u32, u32) {
+    let share = |cap: u32, reserved: u32| (u64::from(cap.saturating_sub(reserved)) * PACER_PERCENT / 100) as u32;
+    (share(node_bytes, NODE_RESERVED_BYTES), share(node_messages, NODE_RESERVED_MESSAGES))
+}
+
+/// A node's limits from its handshake answer; anything else means the defaults.
+pub fn parse_node_limits(value: Option<&str>) -> Option<(u32, u32)> {
+    let mut parts = value?.split_ascii_whitespace();
+    let messages: u32 = parts.next()?.parse().ok()?;
+    let bytes: u32 = parts.next()?.parse().ok()?;
+    (parts.next().is_none() && messages >= DEFAULT_NODE_MESSAGES && bytes >= DEFAULT_NODE_BYTES).then_some((messages, bytes))
+}
+
+/// Whether a payload belongs to the video path: type bytes `0x20` to `0x2F`
+/// (video) and `0x38` to `0x3F` (its control packets). Audio, HELLO and the
+/// reserved sealed types are not in these ranges.
+pub fn is_video_payload(payload: &[u8]) -> bool {
+    matches!(payload.first(), Some(0x20..=0x2F | 0x38..=0x3F))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaFrame {
@@ -222,6 +267,11 @@ impl FrameQueue {
         self.frames.lock().unwrap().pop_front()
     }
 
+    /// Size of the oldest queued frame.
+    fn front_len(&self) -> Option<usize> {
+        self.frames.lock().unwrap().front().map(Vec::len)
+    }
+
     /// The oldest queued frame, waiting for one if the queue is empty.
     pub async fn pop(&self) -> Vec<u8> {
         loop {
@@ -250,6 +300,364 @@ impl FrameQueue {
     }
 }
 
+/// The request header that carries the renderer's running count of uplink
+/// sends: the order in which it handed frames over.
+pub const SEND_ORDER_HEADER: &str = "x-bitsov-media-order";
+/// Later frames held while an earlier one has not arrived. Past this many
+/// (80 ms of audio) the missing frame is given up on and the rest go on.
+pub const SEND_ORDER_HOLD: usize = 4;
+
+/// A renderer's send count from its request header; anything else is none.
+pub fn send_order(value: Option<&str>) -> Option<u64> {
+    value?.trim().parse().ok()
+}
+
+/// Puts uplink frames back in the order the renderer sent them before they
+/// enter the uplink queue. Each send runs as its own task off the main thread,
+/// and two of them can reach this point in either order. Nothing here assigns
+/// `seq` or waits: `seq` is still assigned when a frame is written to the
+/// socket, and the queue keeps its own drop-oldest rule.
+///
+/// A frame counted below the next expected one is dropped, never queued: one
+/// that turns up after its gap was skipped, or one from an earlier session
+/// (the renderer's count never resets, and the session starts at the count it
+/// had at open). The receiver conceals a missing frame as one lost on the way;
+/// a frame sent out of place would be heard.
+#[derive(Default)]
+pub struct SendOrder {
+    state: Mutex<SendOrderState>,
+}
+
+#[derive(Default)]
+struct SendOrderState {
+    /// The count expected next: the session's base, or else the first frame
+    /// that arrives.
+    next: Option<u64>,
+    /// Frames that came early. `None`: a send that failed its checks, which
+    /// only frees its place.
+    held: std::collections::BTreeMap<u64, Option<Vec<u8>>>,
+    /// The frame counted `u64::MAX` has been released: no count comes after it,
+    /// so every later counted frame is dropped.
+    finished: bool,
+}
+
+impl SendOrder {
+    /// A send order whose first expected count is `base`, the renderer's count
+    /// when it opened this session; none keeps the first frame that arrives.
+    pub fn starting_at(base: Option<u64>) -> Self {
+        Self { state: Mutex::new(SendOrderState { next: base, ..SendOrderState::default() }) }
+    }
+
+    /// Take one send: `order` is its count (none from a renderer that does not
+    /// send one, which goes straight on), `payload` the frame, or none when the
+    /// send failed its checks. Every frame now in order goes onto `queue`.
+    pub fn admit(&self, order: Option<u64>, payload: Option<Vec<u8>>, queue: &FrameQueue) {
+        // Held across the pushes, so frames enter the queue in the order released.
+        let mut state = self.state.lock().unwrap();
+        let Some(order) = order else {
+            if let Some(payload) = payload {
+                queue.push(payload);
+            }
+            return;
+        };
+        let next = *state.next.get_or_insert(order);
+        if order < next || state.finished {
+            // Its place was given up, or it belongs to an earlier session:
+            // dropped, so nothing leaves out of capture order.
+            return;
+        }
+        state.held.insert(order, payload);
+        if order > next && state.held.len() <= SEND_ORDER_HOLD {
+            return;
+        }
+        let mut next = if order == next { next } else { *state.held.keys().next().expect("a frame is held") };
+        while let Some(payload) = state.held.remove(&next) {
+            if let Some(payload) = payload {
+                queue.push(payload);
+            }
+            // The order comes from the renderer, so it may sit at the top of
+            // the range: nothing counts past it.
+            let Some(after) = next.checked_add(1) else {
+                state.finished = true;
+                break;
+            };
+            next = after;
+            // Too many waited behind a gap: skip it.
+            if !state.held.contains_key(&next) && state.held.len() > SEND_ORDER_HOLD {
+                next = *state.held.keys().next().expect("a frame is held");
+            }
+        }
+        state.next = Some(next);
+    }
+
+    /// Frames waiting for an earlier one.
+    pub fn held(&self) -> usize {
+        self.state.lock().unwrap().held.len()
+    }
+}
+
+/// What the video path may send per second: a token bucket, so in any one
+/// second it sends at most its rate plus one burst. The node counts in fixed
+/// one-second windows and closes the socket past its budget, so video must
+/// arrive spread out, however it was produced.
+#[derive(Clone, Debug)]
+pub struct VideoPacer {
+    bytes_per_second: f64,
+    messages_per_second: f64,
+    byte_tokens: f64,
+    message_tokens: f64,
+    last: tokio::time::Instant,
+}
+
+impl VideoPacer {
+    /// One full frame on the wire.
+    const BURST_BYTES: f64 = (SEQ_BYTES + MAX_PAYLOAD) as f64;
+    const BURST_MESSAGES: f64 = 2.0;
+
+    pub fn new(bytes_per_second: u32, messages_per_second: u32, now: tokio::time::Instant) -> Self {
+        Self {
+            bytes_per_second: f64::from(bytes_per_second.clamp(8 * 1024, 1024 * 1024)),
+            messages_per_second: f64::from(messages_per_second.clamp(10, 1000)),
+            byte_tokens: Self::BURST_BYTES,
+            message_tokens: Self::BURST_MESSAGES,
+            last: now,
+        }
+    }
+
+    fn refill(&mut self, now: tokio::time::Instant) {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.byte_tokens = (self.byte_tokens + elapsed * self.bytes_per_second).min(Self::BURST_BYTES);
+        self.message_tokens = (self.message_tokens + elapsed * self.messages_per_second).min(Self::BURST_MESSAGES);
+    }
+
+    /// How long until a message of `size` wire bytes may go; zero means now.
+    pub fn wait_for(&mut self, size: usize, now: tokio::time::Instant) -> Duration {
+        self.refill(now);
+        let bytes = (size as f64 - self.byte_tokens).max(0.0) / self.bytes_per_second;
+        let messages = (1.0 - self.message_tokens).max(0.0) / self.messages_per_second;
+        Duration::from_secs_f64(bytes.max(messages))
+    }
+
+    /// Spend for a message of `size` wire bytes.
+    pub fn take(&mut self, size: usize) {
+        self.byte_tokens -= size as f64;
+        self.message_tokens -= 1.0;
+    }
+}
+
+/// The video half of one media session: queues in both directions, the pacer
+/// and video's own `seq` counter. Absent on an audio-only session.
+pub struct VideoPath {
+    control: FrameQueue,
+    fragments: FrameQueue,
+    downlink: FrameQueue,
+    pacer: Mutex<VideoPacer>,
+    next_seq: AtomicU32,
+    wake: tokio::sync::Notify,
+    window: Mutex<SentWindow>,
+    held_until: Mutex<Option<tokio::time::Instant>>,
+}
+
+/// Audio frames a second: what the next second will add to a window at the node.
+const AUDIO_FRAMES_PER_SECOND: usize = 50;
+/// How long video stays off the socket once audio is catching up: long enough
+/// for the node's one-second window to hold the backlog and the next second's audio.
+const AUDIO_CATCH_UP: Duration = Duration::from_millis(1200);
+
+/// Everything sent on this socket in the last second, audio included. The node
+/// closes the socket past its budget, so when audio is catching up after a stall,
+/// video waits rather than push the second over.
+struct SentWindow {
+    sent: VecDeque<(tokio::time::Instant, usize, bool)>,
+    bytes: usize,
+    video: usize,
+    max_messages: usize,
+    max_bytes: usize,
+}
+
+impl SentWindow {
+    fn new(node_messages: u32, node_bytes: u32) -> Self {
+        let share = |cap: u32| (u64::from(cap) * PACER_PERCENT / 100) as usize;
+        Self { sent: VecDeque::new(), bytes: 0, video: 0, max_messages: share(node_messages), max_bytes: share(node_bytes) }
+    }
+
+    fn forget_old(&mut self, now: tokio::time::Instant) {
+        while let Some(&(at, size, is_video)) = self.sent.front() {
+            if now.saturating_duration_since(at) < Duration::from_secs(1) {
+                break;
+            }
+            self.sent.pop_front();
+            self.bytes -= size;
+            self.video -= usize::from(is_video);
+        }
+    }
+
+    fn note(&mut self, size: usize, is_video: bool, now: tokio::time::Instant) {
+        self.forget_old(now);
+        self.sent.push_back((now, size, is_video));
+        self.bytes += size;
+        self.video += usize::from(is_video);
+    }
+
+    /// Whether this much audio waiting, the next second's audio and the video
+    /// just sent could land in one window at the node and pass the margin.
+    fn audio_backlog_is_too_much(&mut self, backlog: usize, now: tokio::time::Instant) -> bool {
+        self.forget_old(now);
+        backlog + AUDIO_FRAMES_PER_SECOND + self.video >= self.max_messages
+    }
+
+    /// Whether one more full frame would stay inside the margin.
+    fn has_room(&mut self, now: tokio::time::Instant) -> bool {
+        self.forget_old(now);
+        self.sent.len() < self.max_messages && self.bytes + SEQ_BYTES + MAX_PAYLOAD <= self.max_bytes
+    }
+}
+
+impl Default for VideoPath {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VideoPath {
+    /// A path paced for a node at the default limits, until the node says otherwise.
+    pub fn new() -> Self {
+        let (bytes, messages) = pacer_rates(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
+        Self::with_rates(bytes, messages)
+    }
+
+    pub fn with_rates(bytes_per_second: u32, messages_per_second: u32) -> Self {
+        Self {
+            control: FrameQueue::new(VIDEO_CONTROL_FRAMES),
+            fragments: FrameQueue::new(VIDEO_QUEUE_FRAMES),
+            downlink: FrameQueue::new(VIDEO_QUEUE_FRAMES),
+            pacer: Mutex::new(VideoPacer::new(bytes_per_second, messages_per_second, tokio::time::Instant::now())),
+            next_seq: AtomicU32::new(0),
+            wake: tokio::sync::Notify::new(),
+            window: Mutex::new(SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES)),
+            held_until: Mutex::new(None),
+        }
+    }
+
+    /// The node said what it allows: pace for that.
+    fn set_node_limits(&self, node_messages: u32, node_bytes: u32) {
+        let (bytes, messages) = pacer_rates(node_messages, node_bytes);
+        *self.pacer.lock().unwrap() = VideoPacer::new(bytes, messages, tokio::time::Instant::now());
+        *self.window.lock().unwrap() = SentWindow::new(node_messages, node_bytes);
+    }
+
+    /// Queue one uplink video payload; returns the fragments waiting to leave,
+    /// which the renderer reads as backpressure. Control packets go ahead of
+    /// fragments. A payload outside the video range is refused.
+    pub fn push(&self, payload: Vec<u8>) -> Result<usize, String> {
+        match payload.first() {
+            Some(0x20..=0x2F) => {
+                self.fragments.push(payload);
+            }
+            Some(0x38..=0x3F) => {
+                self.control.push(payload);
+            }
+            _ => return Err("not a video payload".into()),
+        }
+        self.wake.notify_one();
+        Ok(self.fragments.len())
+    }
+
+    /// Fragments waiting to leave.
+    pub fn depth(&self) -> usize {
+        self.fragments.len()
+    }
+
+    /// Fragments dropped as the oldest so far.
+    pub fn dropped(&self) -> u64 {
+        self.fragments.dropped()
+    }
+
+    pub fn clear(&self) {
+        self.control.clear();
+        self.fragments.clear();
+        self.downlink.clear();
+    }
+
+    /// The next uplink payload the pacer allows, waiting for one. Safe to
+    /// cancel: a payload leaves its queue only when this returns.
+    pub async fn next_uplink(&self) -> Vec<u8> {
+        loop {
+            let notified = self.wake.notified();
+            let queue = if self.control.is_empty() { &self.fragments } else { &self.control };
+            let Some(len) = queue.front_len() else {
+                notified.await;
+                continue;
+            };
+            let size = SEQ_BYTES + len;
+            let wait = self.pacer.lock().unwrap().wait_for(size, tokio::time::Instant::now());
+            if wait.is_zero() {
+                if let Some(payload) = queue.try_pop() {
+                    self.pacer.lock().unwrap().take(size);
+                    return payload;
+                }
+                continue;
+            }
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    fn note_sent(&self, size: usize, is_video: bool) {
+        self.window.lock().unwrap().note(size, is_video, tokio::time::Instant::now());
+    }
+
+    fn has_room(&self) -> bool {
+        let now = tokio::time::Instant::now();
+        {
+            let mut held = self.held_until.lock().unwrap();
+            match *held {
+                Some(until) if now < until => return false,
+                Some(_) => {
+                    // What queued meanwhile is too old to show. The far side asks for a key frame.
+                    *held = None;
+                    self.fragments.clear();
+                }
+                None => {}
+            }
+        }
+        self.window.lock().unwrap().has_room(now)
+    }
+
+    /// Audio is catching up: what it sends now and in the next second counts in the
+    /// same window at the node, so video stays off until that window has passed.
+    fn audio_waiting(&self, backlog: usize) {
+        let now = tokio::time::Instant::now();
+        if self.window.lock().unwrap().audio_backlog_is_too_much(backlog, now) {
+            *self.held_until.lock().unwrap() = Some(now + AUDIO_CATCH_UP);
+        }
+    }
+
+    /// Video's own `seq`, so audio's never has a gap.
+    fn take_seq(&self) -> u32 {
+        self.next_seq.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// The next frame for the renderer: all queued audio before any video.
+pub async fn next_downlink(downlink: &FrameQueue, video: Option<&VideoPath>) -> Vec<u8> {
+    match video {
+        None => downlink.pop().await,
+        Some(video) => tokio::select! {
+            biased;
+            frame = downlink.pop() => frame,
+            frame = video.downlink.pop() => frame,
+        },
+    }
+}
+
+async fn next_video_uplink(video: Option<&VideoPath>) -> Vec<u8> {
+    match video {
+        Some(video) => video.next_uplink().await,
+        None => std::future::pending().await,
+    }
+}
+
 #[cfg(feature = "call-seal")]
 #[derive(Clone, PartialEq, Eq)]
 pub struct SealWords([&'static str; 4]);
@@ -266,6 +674,8 @@ impl std::fmt::Debug for SealWords {
 pub enum MediaLink {
     Connecting,
     Open,
+    /// Open, on a video session: what the node allows per direction, per second.
+    OpenWithLimits { messages: u32, bytes: u32 },
     /// The socket dropped; the host reconnects with backoff.
     Closed(Option<String>),
     /// The node refused the session (or the app is quitting): no reconnect.
@@ -280,6 +690,9 @@ pub enum MediaLink {
 impl MediaLink {
     pub fn to_json(&self) -> String {
         let (link, detail) = match self {
+            MediaLink::OpenWithLimits { messages, bytes } => {
+                return serde_json::json!({ "link": "open", "detail": null, "limits": { "messages": messages, "bytes": bytes } }).to_string();
+            }
             MediaLink::Connecting => ("connecting", None),
             MediaLink::Open => ("open", None),
             MediaLink::Closed(detail) => ("closed", detail.as_deref()),
@@ -315,6 +728,7 @@ pub enum SessionEnd {
 /// frames up (assigning `seq`) and validated frames down into `downlink`,
 /// until the socket closes, drops, or `stopping` says so. Errors never quote
 /// the URL (it holds the token).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_media_session(
     url: &str,
     token: &str,
@@ -325,7 +739,23 @@ pub async fn run_media_session(
     stopping: &(dyn Fn() -> bool + Send + Sync),
     on_open: &(dyn Fn() + Send + Sync),
 ) -> Result<(), SessionEnd> {
-    run_media_session_with_seal(url, token, local_proxy_auth, uplink, downlink, next_seq, None, stopping, on_open).await
+    run_media_session_full(url, token, local_proxy_auth, uplink, downlink, None, next_seq, None, stopping, &|_| on_open()).await
+}
+
+/// [`run_media_session`] with an optional [`VideoPath`] on the same socket.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_media_session_with_video(
+    url: &str,
+    token: &str,
+    local_proxy_auth: Option<&str>,
+    uplink: &FrameQueue,
+    downlink: &FrameQueue,
+    video: Option<&VideoPath>,
+    next_seq: &mut u32,
+    stopping: &(dyn Fn() -> bool + Send + Sync),
+    on_open: &(dyn Fn(MediaLink) + Send + Sync),
+) -> Result<(), SessionEnd> {
+    run_media_session_full(url, token, local_proxy_auth, uplink, downlink, video, next_seq, None, stopping, on_open).await
 }
 
 /// One sealed call's state for one socket session, and how to say that the
@@ -367,12 +797,32 @@ pub async fn run_media_session_with_seal(
     uplink: &FrameQueue,
     downlink: &FrameQueue,
     next_seq: &mut u32,
-    mut seal: Option<SealLink<'_>>,
+    seal: Option<SealLink<'_>>,
     stopping: &(dyn Fn() -> bool + Send + Sync),
     on_open: &(dyn Fn() + Send + Sync),
 ) -> Result<(), SessionEnd> {
+    run_media_session_full(url, token, local_proxy_auth, uplink, downlink, None, next_seq, seal, stopping, &|_| on_open()).await
+}
+
+/// One media socket session with an optional [`VideoPath`] and an optional
+/// seal. A seal wins: video is never sealed, so a sealed session carries no
+/// video and every byte stays as [`run_media_session_with_seal`] has it. With
+/// neither, every byte is the audio-only session's.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_media_session_full(
+    url: &str,
+    token: &str,
+    local_proxy_auth: Option<&str>,
+    uplink: &FrameQueue,
+    downlink: &FrameQueue,
+    video: Option<&VideoPath>,
+    next_seq: &mut u32,
+    mut seal: Option<SealLink<'_>>,
+    stopping: &(dyn Fn() -> bool + Send + Sync),
+    on_open: &(dyn Fn(MediaLink) + Send + Sync),
+) -> Result<(), SessionEnd> {
     let dropped = |why: &str| SessionEnd::Dropped(why.to_string());
-    let ws_protocols = |token: &str| ws_protocols(token).map_err(|why| SessionEnd::Dropped(why));
+    let ws_protocols = |token: &str| ws_protocols(token).map_err(SessionEnd::Dropped);
     let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
         .map_err(|_| dropped("the media request could not be built"))?;
     request.headers_mut().insert(
@@ -387,8 +837,9 @@ pub async fn run_media_session_with_seal(
                 .map_err(|_| dropped("the local proxy credential is invalid"))?,
         );
     }
+    let video = if seal.is_some() { None } else { video };
     let seal_deadline = seal.as_ref().and_then(|link| link.media.deadline());
-    let (mut socket, _) = wait_with_seal_deadline(seal_deadline,
+    let (mut socket, answer) = wait_with_seal_deadline(seal_deadline,
         tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(request)))
         .await
         .map_err(SessionEnd::SealEnded)?
@@ -405,7 +856,18 @@ pub async fn run_media_session_with_seal(
             }
             _ => dropped("the node's media socket is not reachable"),
         })?;
-    on_open();
+    // Fragments queued while the socket was down are stale: the far decoder
+    // asks for a key frame once it sees the gap.
+    match video {
+        Some(video) => {
+            video.fragments.clear();
+            let limits = parse_node_limits(answer.headers().get(MEDIA_LIMITS_HEADER).and_then(|v| v.to_str().ok()));
+            let (messages, bytes) = limits.unwrap_or((DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES));
+            video.set_node_limits(messages, bytes);
+            on_open(MediaLink::OpenWithLimits { messages, bytes });
+        }
+        None => on_open(MediaLink::Open),
+    }
     let heartbeat = Duration::from_secs(15);
     let mut deadline = tokio::time::Instant::now() + heartbeat;
     let mut awaiting_pong = false;
@@ -431,14 +893,19 @@ pub async fn run_media_session_with_seal(
             let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
             return Err(SessionEnd::Stopped);
         }
+        let audio_waiting = !uplink.is_empty();
+        let video_room = video.is_some_and(VideoPath::has_room);
         tokio::select! {
             frame = socket.next() => {
                 let Some(frame) = frame else { break };
                 match frame {
                     Ok(Frame::Binary(bytes)) => match seal.as_mut() {
                         None => {
-                            if MediaFrame::decode(bytes.as_ref()).is_ok() {
-                                downlink.push(bytes.to_vec());
+                            if let Ok(frame) = MediaFrame::decode(bytes.as_ref()) {
+                                match video {
+                                    Some(video) if is_video_payload(&frame.payload) => { video.downlink.push(bytes.to_vec()); }
+                                    _ => { downlink.push(bytes.to_vec()); }
+                                }
                             }
                         }
                         Some(seal) => {
@@ -480,6 +947,21 @@ pub async fn run_media_session_with_seal(
                 let frame = MediaFrame { seq: *next_seq, payload };
                 let Ok(bytes) = frame.encode() else { continue };
                 *next_seq = next_seq.wrapping_add(1);
+                if let Some(video) = video {
+                    video.note_sent(bytes.len(), false);
+                    video.audio_waiting(uplink.len());
+                }
+                tokio::time::timeout(Duration::from_secs(5), socket.send(Frame::Binary(bytes.into())))
+                    .await
+                    .map_err(|_| dropped("the media socket stalled"))?
+                    .map_err(|_| dropped("the media socket dropped"))?;
+            }
+            // Audio goes first: no video leaves while an audio frame waits.
+            payload = next_video_uplink(video), if video.is_some() && !audio_waiting && video_room => {
+                let Some(video) = video else { continue };
+                let frame = MediaFrame { seq: video.take_seq(), payload };
+                let Ok(bytes) = frame.encode() else { continue };
+                video.note_sent(bytes.len(), true);
                 tokio::time::timeout(Duration::from_secs(5), socket.send(Frame::Binary(bytes.into())))
                     .await
                     .map_err(|_| dropped("the media socket stalled"))?
@@ -535,16 +1017,48 @@ pub async fn run_media_link<F, Fut>(
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Option<(String, String, String)>, String>>,
 {
-    run_media_link_with_seal(prepare, uplink, downlink, None, emit, stopping).await
+    run_media_link_full(prepare, uplink, downlink, None, None, emit, stopping).await
+}
+
+/// [`run_media_link`] with an optional [`VideoPath`] on the same socket.
+pub async fn run_media_link_with_video<F, Fut>(
+    prepare: F,
+    uplink: &FrameQueue,
+    downlink: &FrameQueue,
+    video: Option<&VideoPath>,
+    emit: &(dyn Fn(MediaLink) + Send + Sync),
+    stopping: &(dyn Fn() -> bool + Send + Sync),
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<(String, String, String)>, String>>,
+{
+    run_media_link_full(prepare, uplink, downlink, video, None, emit, stopping).await
 }
 
 /// [`run_media_link`], for a call that may be sealed. The seal lives here, so
 /// its keys, counters and replay state survive a socket reconnect; it ends
 /// when this returns.
 pub async fn run_media_link_with_seal<F, Fut>(
+    prepare: F,
+    uplink: &FrameQueue,
+    downlink: &FrameQueue,
+    seal: Option<&mut SealedMedia>,
+    emit: &(dyn Fn(MediaLink) + Send + Sync),
+    stopping: &(dyn Fn() -> bool + Send + Sync),
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<(String, String, String)>, String>>,
+{
+    run_media_link_full(prepare, uplink, downlink, None, seal, emit, stopping).await
+}
+
+/// The media link with an optional [`VideoPath`] and an optional seal. A seal
+/// wins: a sealed call carries no video (see [`run_media_session_full`]).
+pub async fn run_media_link_full<F, Fut>(
     mut prepare: F,
     uplink: &FrameQueue,
     downlink: &FrameQueue,
+    video: Option<&VideoPath>,
     mut seal: Option<&mut SealedMedia>,
     emit: &(dyn Fn(MediaLink) + Send + Sync),
     stopping: &(dyn Fn() -> bool + Send + Sync),
@@ -589,10 +1103,10 @@ pub async fn run_media_link_with_seal<F, Fut>(
             Ok(Some((url, token, credential))) => {
                 emit(MediaLink::Connecting);
                 let opened = AtomicBool::new(false);
-                let link = seal.as_deref_mut().map(|media| SealLink { media, on_first_authentic: &on_first_authentic });
-                let result = run_media_session_with_seal(&url, &token, Some(&credential), uplink, downlink, &mut next_seq, link, stopping, &|| {
+                let seal_link = seal.as_deref_mut().map(|media| SealLink { media, on_first_authentic: &on_first_authentic });
+                let result = run_media_session_full(&url, &token, Some(&credential), uplink, downlink, video, &mut next_seq, seal_link, stopping, &|link| {
                     opened.store(true, Ordering::Relaxed);
-                    emit(MediaLink::Open);
+                    emit(link);
                 })
                 .await;
                 if opened.load(Ordering::Relaxed) {
@@ -684,6 +1198,234 @@ mod tests {
         assert_eq!(zero.try_pop(), Some(vec![2]));
     }
 
+    fn drain(queue: &FrameQueue) -> Vec<u8> {
+        std::iter::from_fn(|| queue.try_pop()).map(|frame| frame[0]).collect()
+    }
+
+    #[test]
+    fn send_order_reads_only_a_plain_count() {
+        assert_eq!(send_order(Some("17")), Some(17));
+        assert_eq!(send_order(Some(" 0 ")), Some(0));
+        assert_eq!(send_order(Some("-1")), None);
+        assert_eq!(send_order(Some("x")), None);
+        assert_eq!(send_order(None), None);
+    }
+
+    #[test]
+    fn sends_that_arrive_out_of_order_enter_the_queue_in_order() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        for (count, byte) in [(10, 10), (12, 12), (13, 13), (11, 11), (15, 15), (14, 14)] {
+            order.admit(Some(count), Some(vec![byte]), &queue);
+        }
+        assert_eq!(drain(&queue), [10, 11, 12, 13, 14, 15]);
+        assert_eq!(order.held(), 0);
+    }
+
+    #[test]
+    fn a_failed_send_frees_its_place() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(0), Some(vec![0]), &queue);
+        order.admit(Some(2), Some(vec![2]), &queue);
+        assert_eq!(drain(&queue), [0]);
+        order.admit(Some(1), None, &queue);
+        assert_eq!(drain(&queue), [2]);
+    }
+
+    #[test]
+    fn a_missing_send_is_given_up_after_the_hold() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(0), Some(vec![0]), &queue);
+        for count in 2..2 + SEND_ORDER_HOLD as u64 {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        assert_eq!(drain(&queue), [0], "the hold waits for 1");
+        order.admit(Some(6), Some(vec![6]), &queue);
+        assert_eq!(drain(&queue), [2, 3, 4, 5, 6]);
+        // The missing one turns up after all: too late, dropped rather than
+        // sent after 2..6, where it would be heard out of place.
+        order.admit(Some(1), Some(vec![1]), &queue);
+        order.admit(Some(7), Some(vec![7]), &queue);
+        assert_eq!(drain(&queue), [7]);
+    }
+
+    /// No frame ever leaves after one counted higher.
+    fn assert_capture_order(sent: &[u8]) {
+        assert!(sent.windows(2).all(|pair| pair[0] < pair[1]), "out of capture order: {sent:?}");
+    }
+
+    #[test]
+    fn with_a_base_a_first_frame_that_arrives_late_still_leaves_first() {
+        let order = SendOrder::starting_at(Some(0));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        for count in [1u64, 0, 2] {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        let sent = drain(&queue);
+        assert_eq!(sent, [0, 1, 2]);
+        assert_capture_order(&sent);
+    }
+
+    #[test]
+    fn without_a_base_a_frame_below_the_first_arrival_is_dropped_not_reordered() {
+        let order = SendOrder::starting_at(None);
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        for count in [1u64, 0, 2] {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        let sent = drain(&queue);
+        assert_eq!(sent, [1, 2]);
+        assert_capture_order(&sent);
+    }
+
+    #[test]
+    fn a_late_frame_after_a_skip_is_dropped_not_appended() {
+        let order = SendOrder::starting_at(Some(0));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(0), Some(vec![0]), &queue);
+        for count in 2..3 + SEND_ORDER_HOLD as u64 {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        order.admit(Some(1), Some(vec![1]), &queue);
+        order.admit(Some(7), Some(vec![7]), &queue);
+        let sent = drain(&queue);
+        assert_eq!(sent, [0, 2, 3, 4, 5, 6, 7]);
+        assert_capture_order(&sent);
+        assert_eq!(order.held(), 0);
+    }
+
+    #[test]
+    fn a_frame_counted_at_the_top_of_the_range_is_sent_once() {
+        let order = SendOrder::starting_at(Some(u64::MAX - 1));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(u64::MAX - 1), Some(vec![1]), &queue);
+        order.admit(Some(u64::MAX), Some(vec![2]), &queue);
+        assert_eq!(drain(&queue), [1, 2]);
+        // Nothing counts past it: a repeat or a lower count is dropped.
+        order.admit(Some(u64::MAX), Some(vec![3]), &queue);
+        order.admit(Some(u64::MAX - 1), Some(vec![4]), &queue);
+        assert!(drain(&queue).is_empty());
+        assert_eq!(order.held(), 0);
+        // Sends without a count still go straight on.
+        order.admit(None, Some(vec![5]), &queue);
+        assert_eq!(drain(&queue), [5]);
+    }
+
+    #[test]
+    fn a_first_frame_at_the_top_of_the_range_is_sent() {
+        let order = SendOrder::starting_at(None);
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(u64::MAX), Some(vec![9]), &queue);
+        assert_eq!(drain(&queue), [9]);
+        assert_eq!(order.held(), 0);
+    }
+
+    #[test]
+    fn a_skip_that_lands_at_the_top_of_the_range_is_sent() {
+        let top = u64::MAX;
+        let order = SendOrder::starting_at(Some(top - SEND_ORDER_HOLD as u64 - 1));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        // The expected frame never comes; the hold fills up to the top count.
+        for count in top - SEND_ORDER_HOLD as u64..top {
+            order.admit(Some(count), Some(vec![(top - count) as u8]), &queue);
+        }
+        assert!(drain(&queue).is_empty(), "the hold waits for the gap");
+        order.admit(Some(top), Some(vec![0]), &queue);
+        assert_eq!(drain(&queue), [4, 3, 2, 1, 0]);
+        assert_eq!(order.held(), 0);
+        order.admit(Some(top), Some(vec![7]), &queue);
+        assert!(drain(&queue).is_empty(), "nothing counts past the top");
+    }
+
+    #[test]
+    fn with_a_base_a_stale_frame_counted_lower_is_dropped() {
+        let order = SendOrder::starting_at(Some(40));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(39), Some(vec![39]), &queue);
+        order.admit(Some(12), Some(vec![12]), &queue);
+        assert!(drain(&queue).is_empty());
+        assert_eq!(order.held(), 0);
+        order.admit(Some(41), Some(vec![41]), &queue);
+        assert_eq!(drain(&queue), Vec::<u8>::new(), "41 waits for 40");
+        order.admit(Some(40), Some(vec![40]), &queue);
+        assert_eq!(drain(&queue), [40, 41]);
+    }
+
+    #[test]
+    fn sends_without_a_count_go_straight_on() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(None, Some(vec![2]), &queue);
+        order.admit(None, Some(vec![1]), &queue);
+        order.admit(None, None, &queue);
+        assert_eq!(drain(&queue), [2, 1]);
+    }
+
+    #[test]
+    fn the_queue_keeps_its_drop_oldest_rule_behind_the_order() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(3);
+        for count in [0u64, 2, 1, 3, 4] {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        assert_eq!(queue.dropped(), 2);
+        assert_eq!(drain(&queue), [2, 3, 4]);
+    }
+
+    /// Sends arriving scrambled while the socket side drains slowly: the
+    /// sender never waits on the consumer, and what leaves is in send order.
+    #[test]
+    fn order_holds_under_a_slow_consumer_and_the_sender_never_waits() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+        use std::time::Instant;
+        const FRAMES: u64 = 400;
+        let order = SendOrder::default();
+        let queue = Arc::new(FrameQueue::new(QUEUE_FRAMES));
+        let done = Arc::new(AtomicBool::new(false));
+        let popped = Arc::new(AtomicUsize::new(0));
+        let consumer = {
+            let (queue, done, popped) = (queue.clone(), done.clone(), popped.clone());
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                loop {
+                    match queue.try_pop() {
+                        Some(frame) => {
+                            seen.push(u64::from_be_bytes(frame.try_into().unwrap()));
+                            popped.fetch_add(1, Ordering::SeqCst);
+                            // A socket far slower than the sender.
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        None if done.load(Ordering::SeqCst) => return seen,
+                        None => std::thread::sleep(Duration::from_micros(200)),
+                    }
+                }
+            })
+        };
+        let mut slowest = Duration::ZERO;
+        // After the first, each block of four arrives in a different scrambled
+        // order, as sends in flight together can.
+        for block in (0..FRAMES).step_by(4) {
+            for (index, step) in [2, 0, 3, 1].into_iter().enumerate() {
+                let count = if block == 0 { index as u64 } else { block + (step + block / 4) % 4 };
+                let begun = Instant::now();
+                order.admit(Some(count), Some(count.to_be_bytes().to_vec()), &queue);
+                slowest = slowest.max(begun.elapsed());
+            }
+        }
+        let consumed_while_sending = popped.load(Ordering::SeqCst);
+        done.store(true, Ordering::SeqCst);
+        let seen = consumer.join().unwrap();
+        assert!(slowest < Duration::from_millis(50), "a send waited {slowest:?}");
+        assert!(consumed_while_sending < FRAMES as usize / 2, "the sender kept pace with the consumer ({consumed_while_sending} taken)");
+        assert_eq!(order.held(), 0);
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "out of order: {seen:?}");
+        assert!(queue.dropped() > 0, "the slow consumer let the queue fill");
+        assert_eq!(seen.len() as u64 + queue.dropped(), FRAMES, "only the queue's own rule drops");
+    }
+
     #[tokio::test]
     async fn pop_waits_for_a_push() {
         let queue = std::sync::Arc::new(FrameQueue::new(2));
@@ -694,6 +1436,358 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         queue.push(vec![9]);
         assert_eq!(tokio::time::timeout(Duration::from_secs(1), waiter).await.unwrap().unwrap(), vec![9]);
+    }
+
+    #[test]
+    fn only_video_types_take_the_video_path() {
+        for audio in [0x00u8, 0x01, 0x02, 0x03, 0x10, 0x11, 0x1F, 0x30, 0x31, 0x32, 0x37, 0x40, 0xFF] {
+            assert!(!is_video_payload(&[audio, 1, 2]), "{audio:#x} is not video");
+        }
+        for video in [0x20u8, 0x2F, 0x38, 0x3F] {
+            assert!(is_video_payload(&[video]), "{video:#x} is video");
+        }
+        assert!(!is_video_payload(&[]));
+        let path = VideoPath::new();
+        assert!(path.push(vec![0x02, 1]).is_err(), "an audio payload is refused on the video path");
+        assert!(path.push(vec![]).is_err());
+        assert_eq!(path.push(vec![0x20, 1]), Ok(1));
+        assert_eq!(path.push(vec![0x39, 1]), Ok(1), "control does not count as backpressure");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_pacer_never_exceeds_its_rate_plus_one_burst_in_any_second() {
+        // Video's share at today's node caps, as the renderer asks for it.
+        let (rate, messages) = pacer_rates(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
+        assert_eq!((rate, messages), (45_260, 34));
+        let path = VideoPath::new();
+        let started = tokio::time::Instant::now();
+        // A key frame of 8 full fragments on top of a steady stream.
+        let mut sent: Vec<(Duration, usize)> = Vec::new();
+        for _ in 0..600 {
+            path.fragments.push(vec![0x20; MAX_PAYLOAD]);
+            let payload = path.next_uplink().await;
+            sent.push((started.elapsed(), SEQ_BYTES + payload.len()));
+        }
+        let span = sent.last().unwrap().0;
+        assert!(span >= Duration::from_secs(50), "600 full frames cannot leave in {span:?}");
+        // Every one-second window, at every phase the node's window could have.
+        for (i, (start, _)) in sent.iter().enumerate() {
+            let window: Vec<_> = sent[i..].iter().take_while(|(t, _)| *t < *start + Duration::from_secs(1)).collect();
+            let bytes: usize = window.iter().map(|(_, n)| n).sum();
+            assert!(bytes as f64 <= f64::from(rate) + VideoPacer::BURST_BYTES + 1.0, "{bytes} bytes in a second");
+            assert!(window.len() as f64 <= f64::from(messages) + VideoPacer::BURST_MESSAGES + 1.0, "{} messages in a second", window.len());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn small_fragments_are_held_to_the_message_rate() {
+        let path = VideoPath::with_rates(1024 * 1024, 20);
+        let started = tokio::time::Instant::now();
+        for _ in 0..41 {
+            path.fragments.push(vec![0x20; 100]);
+            path.next_uplink().await;
+        }
+        assert!(started.elapsed() >= Duration::from_millis(1900), "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn control_goes_ahead_of_queued_fragments_and_a_cancelled_wait_loses_nothing() {
+        let path = VideoPath::with_rates(8 * 1024, 10);
+        for _ in 0..3 {
+            path.push(vec![0x20; MAX_PAYLOAD]).unwrap();
+        }
+        path.push(vec![0x39, 7]).unwrap();
+        assert_eq!(path.next_uplink().await, vec![0x39, 7]);
+        // The next fragment cannot leave yet; giving up the wait keeps it queued.
+        assert_eq!(path.next_uplink().await.len(), MAX_PAYLOAD);
+        assert!(tokio::time::timeout(Duration::from_millis(10), path.next_uplink()).await.is_err());
+        assert_eq!(path.depth(), 2);
+    }
+
+    #[tokio::test]
+    async fn downlink_hands_over_every_audio_frame_before_any_video() {
+        let path = VideoPath::new();
+        let audio = FrameQueue::new(QUEUE_FRAMES);
+        path.downlink.push(vec![0, 0, 0, 1, 0x20, 1]);
+        path.downlink.push(vec![0, 0, 0, 2, 0x20, 2]);
+        audio.push(vec![0, 0, 0, 9, 0x02, 3]);
+        assert_eq!(next_downlink(&audio, Some(&path)).await[4], 0x02);
+        assert_eq!(next_downlink(&audio, Some(&path)).await[3], 1);
+        audio.push(vec![0, 0, 0, 10, 0x02, 4]);
+        assert_eq!(next_downlink(&audio, Some(&path)).await[3], 10);
+        assert_eq!(next_downlink(&audio, Some(&path)).await[3], 2);
+        // A full video queue costs video frames only.
+        for _ in 0..(VIDEO_QUEUE_FRAMES + 10) {
+            path.downlink.push(vec![0, 0, 0, 3, 0x20, 5]);
+        }
+        assert_eq!(audio.dropped(), 0);
+        assert_eq!(path.downlink.len(), VIDEO_QUEUE_FRAMES);
+    }
+
+    /// Stands in for the node: records every uplink frame, then sends `down`.
+    async fn recording_video_server(listener: tokio::net::TcpListener, seen: std::sync::Arc<Mutex<Vec<MediaFrame>>>, down: Vec<Vec<u8>>) {
+        limited_server(listener, seen, down, None).await
+    }
+
+    async fn limited_server(listener: tokio::net::TcpListener, seen: std::sync::Arc<Mutex<Vec<MediaFrame>>>, down: Vec<Vec<u8>>, limits: Option<&'static str>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_hdr_async(stream, move |_: &Request, mut res: Response| {
+            res.headers_mut().insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().unwrap());
+            if let Some(limits) = limits {
+                res.headers_mut().insert(MEDIA_LIMITS_HEADER, limits.parse().unwrap());
+            }
+            Ok(res)
+        })
+        .await
+        .unwrap();
+        for frame in down {
+            ws.send(Frame::Binary(frame.into())).await.unwrap();
+        }
+        while let Some(Ok(frame)) = ws.next().await {
+            if let Frame::Binary(bytes) = frame {
+                seen.lock().unwrap().push(MediaFrame::decode(bytes.as_ref()).unwrap());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn video_on_the_socket_leaves_audio_seq_gapless_and_audio_first() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let down = vec![
+            MediaFrame { seq: 5, payload: vec![0x02, 1] }.encode().unwrap(),
+            MediaFrame { seq: 900, payload: vec![0x20, 2] }.encode().unwrap(),
+            MediaFrame { seq: 6, payload: vec![0x02, 3] }.encode().unwrap(),
+        ];
+        tokio::spawn(recording_video_server(listener, seen.clone(), down));
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let path = VideoPath::with_rates(1024 * 1024, 1000);
+        // Video queued before the socket even opens is stale and goes.
+        path.push(vec![0x20, 0xEE]).unwrap();
+        let stop = AtomicBool::new(false);
+        let stopping = || stop.load(Ordering::SeqCst);
+        let mut next_seq = 0;
+        let opened = AtomicBool::new(false);
+        let on_open = |_: MediaLink| opened.store(true, Ordering::SeqCst);
+        let session = run_media_session_with_video(&url, "tok.1", None, &uplink, &downlink, Some(&path), &mut next_seq, &stopping, &on_open);
+        let drive = async {
+            while !opened.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            for i in 0..5u8 {
+                path.push(vec![0x20, i]).unwrap();
+                uplink.push(vec![0x02, i]);
+                path.push(vec![0x39, i]).unwrap();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            for _ in 0..200 {
+                if seen.lock().unwrap().len() >= 15 && downlink.len() + path.downlink.len() >= 3 { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            stop.store(true, Ordering::SeqCst);
+        };
+        let (result, ()) = tokio::join!(session, drive);
+        assert_eq!(result, Err(SessionEnd::Stopped));
+        let frames = seen.lock().unwrap().clone();
+        let audio: Vec<u32> = frames.iter().filter(|f| !is_video_payload(&f.payload)).map(|f| f.seq).collect();
+        assert_eq!(audio, vec![0, 1, 2, 3, 4], "audio's seq is its own and has no gap");
+        let video: Vec<u32> = frames.iter().filter(|f| is_video_payload(&f.payload)).map(|f| f.seq).collect();
+        assert_eq!(video, (0..video.len() as u32).collect::<Vec<_>>(), "video counts on its own");
+        assert_eq!(video.len(), 10);
+        assert!(!frames.iter().any(|f| f.payload == vec![0x20, 0xEE]), "stale video did not go out");
+        // Down: audio to the audio queue, video to its own.
+        assert_eq!(downlink.len(), 2);
+        assert_eq!(path.downlink.len(), 1);
+    }
+
+    #[test]
+    fn node_limits_parse_strictly_and_fall_back_to_the_defaults() {
+        assert_eq!(parse_node_limits(Some("160 262144")), Some((160, 262_144)));
+        assert_eq!(parse_node_limits(None), None);
+        for bad in ["", "160", "160 262144 9", "x 262144", "99 262144", "160 65535", "-1 262144"] {
+            assert_eq!(parse_node_limits(Some(bad)), None, "{bad}");
+        }
+        assert_eq!(pacer_rates(100, 65_536), (45_260, 34));
+        assert_eq!(pacer_rates(160, 262_144), (212_377, 85));
+    }
+
+    async fn opened_link(limits: Option<&'static str>, video: bool) -> MediaLink {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        tokio::spawn(limited_server(listener, Default::default(), vec![], limits));
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let path = VideoPath::new();
+        let seen = Mutex::new(None);
+        let stop = AtomicBool::new(false);
+        let stopping = || stop.load(Ordering::SeqCst);
+        let on_open = |link: MediaLink| {
+            *seen.lock().unwrap() = Some(link);
+            stop.store(true, Ordering::SeqCst);
+        };
+        let mut next_seq = 0;
+        let _ = run_media_session_with_video(&url, "tok.1", None, &uplink, &downlink, video.then_some(&path), &mut next_seq, &stopping, &on_open).await;
+        let link = seen.lock().unwrap().clone().unwrap();
+        link
+    }
+
+    #[tokio::test]
+    async fn a_video_session_learns_the_nodes_limits_from_the_handshake() {
+        assert_eq!(opened_link(Some("160 262144"), true).await, MediaLink::OpenWithLimits { messages: 160, bytes: 262_144 });
+        assert_eq!(opened_link(None, true).await, MediaLink::OpenWithLimits { messages: 100, bytes: 65_536 });
+        assert_eq!(opened_link(Some("nonsense"), true).await, MediaLink::OpenWithLimits { messages: 100, bytes: 65_536 });
+        // An audio session says what it always said.
+        assert_eq!(opened_link(Some("160 262144"), false).await, MediaLink::Open);
+        assert_eq!(MediaLink::Open.to_json(), r#"{"detail":null,"link":"open"}"#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&MediaLink::OpenWithLimits { messages: 160, bytes: 262_144 }.to_json()).unwrap(),
+            serde_json::json!({ "link": "open", "detail": null, "limits": { "messages": 160, "bytes": 262_144 } })
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_catching_up_holds_video_back_from_the_nodes_budget() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        tokio::spawn(recording_video_server(listener, seen.clone(), vec![]));
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let path = VideoPath::new();
+        let stop = AtomicBool::new(false);
+        let stopping = || stop.load(Ordering::SeqCst);
+        let mut next_seq = 0;
+        let session = run_media_session_with_video(&url, "tok.1", None, &uplink, &downlink, Some(&path), &mut next_seq, &stopping, &|_| {});
+        let drive = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // A stalled second's worth of audio and more, then a video backlog.
+            for round in 0..2 {
+                for i in 0..40u8 {
+                    uplink.push(vec![0x02, round, i]);
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            for i in 0..30u8 {
+                path.push(vec![0x20, 0xEE, i]).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let at_400ms = seen.lock().unwrap().iter().filter(|f: &&MediaFrame| is_video_payload(&f.payload)).count();
+            assert_eq!(at_400ms, 0, "the next second's audio still has to fit this window");
+            // Once that window has passed, fresh video goes and what queued meanwhile does not.
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            for i in 0..5u8 {
+                path.push(vec![0x20, 0x01, i]).unwrap();
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            stop.store(true, Ordering::SeqCst);
+        };
+        let (result, ()) = tokio::join!(session, drive);
+        assert_eq!(result, Err(SessionEnd::Stopped));
+        let video: Vec<Vec<u8>> = seen.lock().unwrap().iter().filter(|f| is_video_payload(&f.payload)).map(|f| f.payload.clone()).collect();
+        assert!(!video.is_empty(), "fresh video went on");
+        assert!(video.iter().all(|p| p[1] == 0x01), "stale video stayed behind: {video:?}");
+    }
+
+    #[test]
+    fn a_small_audio_backlog_costs_video_nothing() {
+        let start = tokio::time::Instant::now();
+        let mut window = SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
+        for _ in 0..15 {
+            window.note(2000, true, start);
+        }
+        // Everyday jitter: a few frames.
+        assert!(!window.audio_backlog_is_too_much(5, start));
+        // 300 ms behind still fits, 400 ms doesn't, at 15 video frames a second.
+        assert!(!window.audio_backlog_is_too_much(15, start));
+        assert!(window.audio_backlog_is_too_much(20, start));
+        // At a higher node limit the same backlog is no danger.
+        let mut wide = SentWindow::new(160, 262_144);
+        for _ in 0..30 {
+            wide.note(4000, true, start);
+        }
+        assert!(!wide.audio_backlog_is_too_much(40, start));
+    }
+
+    #[tokio::test]
+    async fn the_second_of_sends_is_counted_even_without_a_backlog() {
+        // Audio spread out, as much as a backlog would be: only the count can hold video.
+        let mut window = SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
+        let start = tokio::time::Instant::now();
+        for i in 0..84u64 {
+            window.note(100, false, start + Duration::from_millis(i));
+        }
+        assert!(window.has_room(start + Duration::from_millis(84)));
+        window.note(100, false, start + Duration::from_millis(84));
+        assert!(!window.has_room(start + Duration::from_millis(85)), "85 of 100 is the margin");
+        assert!(window.has_room(start + Duration::from_millis(1002)), "a second on, the first ones are forgotten");
+        // Bytes count too.
+        let mut window = SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
+        for _ in 0..13 {
+            window.note(4100, true, start);
+        }
+        assert!(!window.has_room(start), "13 full frames leave no room for a 14th");
+    }
+
+    #[tokio::test]
+    async fn no_video_frame_leaves_while_an_audio_frame_waits() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        tokio::spawn(recording_video_server(listener, seen.clone(), vec![]));
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let path = VideoPath::with_rates(1024 * 1024, 1000);
+        let stop = AtomicBool::new(false);
+        let stopping = || stop.load(Ordering::SeqCst);
+        let mut next_seq = 0;
+        // Both queues are full before the session's loop first looks at them.
+        let on_open = |_: MediaLink| {
+            for i in 0..8u8 {
+                path.push(vec![0x20, i]).unwrap();
+                uplink.push(vec![0x02, i]);
+            }
+        };
+        let session = run_media_session_with_video(&url, "tok.1", None, &uplink, &downlink, Some(&path), &mut next_seq, &stopping, &on_open);
+        let drive = async {
+            for _ in 0..500 {
+                if seen.lock().unwrap().len() >= 16 { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            stop.store(true, Ordering::SeqCst);
+        };
+        let (result, ()) = tokio::join!(session, drive);
+        assert_eq!(result, Err(SessionEnd::Stopped));
+        let order: Vec<u8> = seen.lock().unwrap().iter().map(|f| f.payload[0]).collect();
+        assert_eq!(order.len(), 16);
+        assert!(order[..8].iter().all(|&t| t == 0x02), "audio first: {order:02x?}");
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_video_path_treats_every_frame_as_it_always_did() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let down = vec![
+            MediaFrame { seq: 1, payload: vec![0x20, 2] }.encode().unwrap(),
+            MediaFrame { seq: 2, payload: vec![0x02, 3] }.encode().unwrap(),
+        ];
+        tokio::spawn(recording_video_server(listener, seen.clone(), down));
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let stop = AtomicBool::new(false);
+        let stopping = || stop.load(Ordering::SeqCst);
+        let mut next_seq = 0;
+        let session = run_media_session(&url, "tok.1", None, &uplink, &downlink, &mut next_seq, &stopping, &|| {});
+        let drive = async {
+            uplink.push(vec![0x02, 9]);
+            for _ in 0..200 {
+                if seen.lock().unwrap().len() == 1 && downlink.len() == 2 { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            stop.store(true, Ordering::SeqCst);
+        };
+        let (result, ()) = tokio::join!(session, drive);
+        assert_eq!(result, Err(SessionEnd::Stopped));
+        assert_eq!(seen.lock().unwrap().as_slice(), &[MediaFrame { seq: 0, payload: vec![0x02, 9] }]);
+        assert_eq!(downlink.len(), 2, "no frame is sorted out when there is no video path");
     }
 
     #[test]

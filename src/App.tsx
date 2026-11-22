@@ -1,4 +1,5 @@
 import { t } from './i18n';
+import { hostText } from './control/hostCopy';
 import { invoke } from '@tauri-apps/api/core';
 import { PhoneTrust } from './onboarding/PhoneTrust';
 import { PhoneOnboarding } from './onboarding/PhoneOnboarding';
@@ -9,13 +10,13 @@ import { LockedNode, RememberUnlock } from './onboarding/LockedNode';
 import { RemoteOwnerCeremony } from './onboarding/RemoteOwnerCeremony';
 import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
 import { InitializationRepair } from './onboarding/InitializationRepair';
+import { restoreFailureKind } from './onboarding/restoreFailure';
 import { OfflineNode } from './control/OfflineNode';
-import { hostText } from './control/hostCopy';
 import { softenError } from './control/userFacing';
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
 import { isMoneyNotReady } from './control/readiness';
-import { createEffect, createMemo, createSignal, onCleanup, onMount, Show, type ParentProps } from 'solid-js';
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show, type ParentProps } from 'solid-js';
 import { qrSvg } from './qr';
 import { Onboarding, type NodeTarget } from './onboarding/Onboarding';
 import { FIRST_RUN_PHONE_MESSAGE, INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
@@ -122,9 +123,10 @@ function AppScreen() {
   const [pairing, setPairing] = createSignal<PairingView>(INITIAL_PAIRING);
   // A ready node can arrive before its pairing reply. Startup snapshots do not
   // establish the final mode, so wait for authentication before offering trust.
-  const showIdentityGate = () =>
+  const networkRefused = () => !!status().network_refusal && status().network_refusal !== 'none';
+  const showIdentityGate = () => !networkRefused() && (
     ((status().ready || pairing().bootstrap === 'bootstrap') && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
-    restoring() || restoreError() !== null;
+    restoring() || restoreError() !== null);
   createEffect(() => {
     if (source().mode === 'node' && trustAck() && trustKey()) setSessionTrust(trustKey());
   });
@@ -334,6 +336,7 @@ function AppScreen() {
             onTargetChange={setSelectedTarget}
             trustAck={trustAck}
             onRetry={() => void retryPairing()}
+            onSetupLocal={async () => { try { await source().nodeSetupLocal(true); } finally { await poll(); } }}
             device={device}
             joinDevice={input => source().joinDevice(input)}
             onForgetRemote={() => source().remoteAccessForget()}
@@ -353,7 +356,7 @@ function AppScreen() {
               <Show
                 when={status().error && pairing().state !== 'failed' && !offline()}
                 fallback={
-                  <Show when={starting()}>
+                  <Show when={starting() && !status().local_setup_needed && !networkRefused()}>
                     <div class="state">
                       <DelayedSpinner />
                       {pairing().remote ? t('obConnectingNode') : t('obStartingNode')}
@@ -419,6 +422,13 @@ function AppScreen() {
   // pairing_status, nothing else.
   return (
     <>
+    <Show when={networkRefused()}>
+      <div class="panel" role="alert" data-network-refusal>
+        <p>{t(status().network_refusal === 'local_unavailable' ? 'obBetaLocalUnavailable'
+          : status().network_refusal === 'mainnet' ? (pairing().remote ? 'obBetaMainnet' : 'obBetaLocalConfig')
+          : 'obBetaUnknown')}</p>
+      </div>
+    </Show>
     <div class="pairing-link-layer" classList={{ reviewing: pairingRequest() !== null }}>
     <Show when={queuedPairing() && !phoneFlow() && !phoneTrustFlow() && (!onPhone || phoneSetup() !== null)}>
       <aside class="panel pairing-link-banner" data-pairing-link-banner role="status">
@@ -451,7 +461,7 @@ function AppScreen() {
     </div>
     <div data-app-screen inert={pairingRequest() !== null} style={{ display: 'contents' }}>
     <Show when={status().local_owner && status().owner_warning}>
-      <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
+      <aside role="alert" class="panel" data-owner-warning>{hostText(status().owner_warning!)}</aside>
     </Show>
     <Show when={showRemember()}>
       <RememberUnlock mobile={onPhone} platform={platform} onChoose={async (remember) => {
@@ -575,11 +585,29 @@ function IdentityGate(props: {
   const [busy, setBusy] = createSignal(false);
   const [savingTrust, setSavingTrust] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // A failed save of the G6 acknowledgement: plain summary, raw text only in Details.
+  const [trustError, setTrustError] = createSignal<string | null>(null);
   const [restored, setRestored] = createSignal<string | null>(null);
   usePairingActivity(() => showRestore() || busy() || savingTrust());
+  // Only the latest Continue may report a failed save. A restore or a new trust
+  // boundary bumps this, so an acknowledgement still in flight cannot write later.
+  let trustAttempt = 0;
+  const dropTrustError = () => { trustAttempt++; setTrustError(null); };
+  // A failed save belongs to one trust boundary; a new mode or node id asks afresh.
+  // Polls hand over fresh status/pairing objects every tick, so compare the values:
+  // the memo only notifies on a real change. A briefly missing node id keeps the last one.
+  let lastNodeId: string | null = null;
+  const trustBoundary = createMemo(() => {
+    const id = props.nodeId()?.toLowerCase() ?? null;
+    if (id) lastNodeId = id;
+    return `${props.remote ? 'remote' : 'local'}.${lastNodeId ?? ''}`;
+  });
+  createEffect(on(trustBoundary, dropTrustError, { defer: true }));
 
   const submitRestore = async (event: Event) => {
     event.preventDefault();
+    // A restore replaces the identity the failed acknowledgement was for.
+    dropTrustError();
     // Read once, then clear immediately: the phrase lives in this component for the
     // duration of the call and nowhere else. The host forwards it to the node.
     const value = phrase();
@@ -610,6 +638,16 @@ function IdentityGate(props: {
   };
 
   const displayError = () => error() ?? props.restoreError();
+  // A failed restore gets a summary that names the next step; the raw error stays behind Details.
+  // A phrase the host already saved needs quit and reopen, not a second look at the phrase.
+  const restoreSummary = () => {
+    const raw = props.restoreError();
+    if (raw === null || displayError() !== raw) return undefined;
+    const kind = restoreFailureKind(raw);
+    if (kind === 'saved') return t('obRestoreSavedReopen');
+    if (kind === 'phrase') return t('obRestoreFailed');
+    return undefined;
+  };
 
   return (
     <div class="state ready">
@@ -632,42 +670,33 @@ function IdentityGate(props: {
         when={props.remote}
         fallback={
           <section class="panel disclosure" data-gate="g6-local-trust">
-            <h2>Local trust — read this before you deposit</h2>
-            <p>Your node is only reachable while this Mac is awake and BitSov is open.</p>
+            <h2>{t('obLocalTrustTitle')}</h2>
+            <p>{t('obLocalTrustAwake')}</p>
             <p>
-              This node trusts every program on this computer. Anything running under your user
-              account can ask it for full access over <code>127.0.0.1</code> — enough to spend what
-              you deposit and read your history. Only fund a node on a machine you control.
+              {t('obLocalTrustProgramsBefore')} <code>127.0.0.1</code> {t('obLocalTrustProgramsAfter')}
             </p>
-            <p>
-              Your keys stay in the node. BitSov never shows you your recovery phrase and never
-              copies it anywhere.
-            </p>
+            <p>{t('obTrustKeysStay')}</p>
           </section>
         }
       >
         <section class="panel disclosure" data-gate="g6-remote-trust">
-          <h2>Remote trust — read this before you deposit</h2>
-          <p>
-            This node’s keys live on the remote machine. Anyone with access —
-            whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.
-          </p>
-          <p>
-            Your keys stay in the node. BitSov never shows you your recovery phrase and never
-            copies it anywhere.
-          </p>
+          <h2>{t('obRemoteTrustTitle')}</h2>
+          <p>{t('obRemoteTrustBody')}</p>
+          <p>{t('obTrustKeysStay')}</p>
         </section>
       </Show>
 
       <Show when={!props.bootstrap}>
-      <button class="primary" disabled={busy() || savingTrust()} onClick={async () => {
+      <button class="primary" data-trust-continue disabled={busy() || savingTrust()} onClick={async () => {
         setSavingTrust(true);
         setError(null);
+        dropTrustError();
+        const attempt = trustAttempt;
         try { await props.onContinue(); }
-        catch (e) { setError(hostText(String(e))); }
+        catch (e) { if (attempt === trustAttempt) setTrustError(hostText(String(e))); }
         finally { setSavingTrust(false); }
       }}>
-        I understand — continue to funding
+        {t('obTrustContinue')}
       </button>
       </Show>
 
@@ -718,8 +747,11 @@ function IdentityGate(props: {
       </Show>
       </Show>
 
+      <Show when={trustError()}>
+        <SoftError message={trustError()!} summary={t('obTrustSaveRetry')} />
+      </Show>
       <Show when={displayError()}>
-        <SoftError message={displayError()!} />
+        <SoftError message={displayError()!} summary={restoreSummary()} />
       </Show>
     </div>
   );
@@ -737,60 +769,128 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   const [addressError, setAddressError] = createSignal<string | null>(null);
   const [amount, setAmount] = createSignal(String(DEFAULT_FUNDING_SATS));
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  // `summary` is the plain sentence for a host failure; the raw text stays behind Details.
+  const [error, setError] = createSignal<{ message: string; summary?: 'obFundStateFailed' } | null>(null);
+  // Kept apart from a status-read failure, which must not replace it.
+  const [startError, setStartError] = createSignal<{ message: string; summary: 'obFundStartFailed' } | null>(null);
 
-  const refresh = async () => {
-    if (!props.ready()) return;
+  // On a slow node a read can outlast the 3 s poll. Only the newest read may write,
+  // a poll tick is skipped while one is in flight, and nothing writes once the
+  // panel is gone.
+  let disposed = false;
+  let latest = 0;
+  let inFlight: Promise<void> | null = null;
+  // Set after a successful start. The next null status does not undo that deposit.
+  let holdStarted = false;
+  // The interval stops once funded. A null held after that start still needs the
+  // one confirming read, until a real status arrives or that next read is empty.
+  let confirmHeld = false;
+  const stale = (id: number) => disposed || id !== latest;
+
+  const read = async () => {
+    const id = ++latest;
     try {
       const state = await props.source.fundState();
+      if (stale(id)) return;
+      // Right after a successful start the node can still report "not started".
+      // Keep the deposit for that one null; a later null confirms it.
+      if (state === null && holdStarted && fund()) {
+        holdStarted = false;
+        setError(null);
+        confirmHeld = fund()!.funded;
+        return;
+      }
+      holdStarted = false;
+      confirmHeld = false;
       setFund(state);
+      // A failed start stays until the owner tries again or a deposit is observed.
+      // A status-read failure is separate, and any answer clears it.
+      if (state !== null) setStartError(null);
       setError(null);
       // The onboarding record carries the address once started; fall back to the
       // payments endpoint if the node did not include one.
       if (state && !state.funding_address && !address() && !props.moneyBlocked?.()) {
         try {
-          setAddress(await props.source.fundingAddress());
+          const fallback = await props.source.fundingAddress();
+          if (stale(id)) return;
+          setAddress(fallback);
           setAddressError(null);
         } catch (e) {
+          if (stale(id)) return;
           // The wallet backend may not expose one (only embedded LDK does); the
           // state address is primary, but say so instead of waiting forever.
           setAddressError(isMoneyNotReady(e) ? null : String(e));
         }
       }
     } catch (e) {
-      setError(String(e));
+      if (stale(id)) return;
+      setError({ message: String(e), summary: 'obFundStateFailed' });
     }
+  };
+
+  // A poll joins the read in flight. An explicit refresh reads afresh when the
+  // node is ready, and that reply is newer than a poll still in flight.
+  const refresh = (explicit = false): Promise<void> => {
+    if (disposed || !props.ready()) return Promise.resolve();
+    if (inFlight && !explicit) return inFlight;
+    const run: Promise<void> = read().finally(() => {
+      if (inFlight === run) inFlight = null;
+    });
+    inFlight = run;
+    return run;
   };
 
   let timer: number | undefined;
   onMount(() => {
     void refresh();
     timer = window.setInterval(() => {
-      if (!fund()?.funded) void refresh();
+      if (!fund()?.funded || confirmHeld) void refresh();
     }, 3000);
   });
   onCleanup(() => {
+    disposed = true;
     if (timer) window.clearInterval(timer);
   });
 
   const start = async (event: Event) => {
     event.preventDefault();
     if (props.moneyBlocked?.()) return;
+    // Trying again retires the previous start failure, including a bad amount.
+    setStartError(null);
     const value = Number(amount());
     if (!Number.isInteger(value) || value < 1 || value > 4_294_967_295) {
-      setError(t('obWholeSats'));
+      setError({ message: t('obWholeSats') });
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      setFund(await props.source.fundStart(value));
-      await refresh();
+      const started = await props.source.fundStart(value);
+      // The panel may have closed while the node was starting the deposit.
+      if (disposed) return;
+      // A status read that began before this start must not overwrite it. refresh()
+      // only bumps `latest` when it actually reads, and it does not read while the node is not ready.
+      latest++;
+      setFund(started);
+      holdStarted = true;
+      await refresh(true);
     } catch (e) {
-      setError(isMoneyNotReady(e) ? null : String(e));
+      // The read still in flight must not clear this failure.
+      latest++;
+      if (disposed) return;
+      if (!isMoneyNotReady(e)) setStartError({ message: String(e), summary: 'obFundStartFailed' });
     } finally {
-      setBusy(false);
+      if (!disposed) setBusy(false);
     }
+  };
+
+  // The interval above stops reading once the node reports funded, so a status
+  // failure in that state must not promise an automatic retry. A null still
+  // being confirmed after the start is the exception: that read does retry.
+  const errorSummary = () => {
+    const summary = error()?.summary;
+    if (!summary) return undefined;
+    return t(summary === 'obFundStateFailed' && fund()?.funded && !confirmHeld ? 'obFundStateStopped' : summary);
   };
 
   const depositAddress = () => fund()?.funding_address ?? address()?.address ?? null;
@@ -843,7 +943,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
               <div class="panel funded">
                 <h2>{t('obFundingSeen')}</h2>
                 <p class="hint">
-                  {t('obObservedAmount', fmtAmount(received() * 1000))}{t('obFundingNext')}</p>
+                  {t('obObservedAmount', fmtAmount(received() * 1000, 'down'))}{t('obFundingNext')}</p>
                 <Show when={fund()!.funding_evidence}>
                   <p class="evidence">{t('obEvidence')}{' '}{fund()!.funding_evidence}</p>
                 </Show>
@@ -885,7 +985,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                   <div class="fill" style={{ width: `${progress()}%` }} />
                 </div>
                 <div class="numbers">
-                  <strong>{fmtAmount(received() * 1000)}</strong>{t('obOfAmountSeen', fmtAmount(required() * 1000))}
+                  <strong>{fmtAmount(received() * 1000, 'down')}</strong>{t('obOfAmountSeen', fmtAmount(required() * 1000, 'up'))}
                 </div>
               </div>
               <p class="hint">
@@ -896,8 +996,11 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       </Show>
 
 
+      <Show when={startError()}>
+        <SoftError message={startError()!.message} summary={t('obFundStartFailed')} />
+      </Show>
       <Show when={error()}>
-        <SoftError message={error()!} />
+        <SoftError message={error()!.message} summary={errorSummary()} />
       </Show>
     </div>
   );

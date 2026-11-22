@@ -35,6 +35,18 @@ export const deviceWord = (platform: AppPlatform = appPlatform()) =>
 /** A phone or tablet build (Android or iOS): there is no "This Mac" to run a node on. */
 export const isMobilePlatform = (platform: AppPlatform = appPlatform()) => platform !== 'desktop';
 
+/** Native desktop capabilities; browser previews keep the reference desktop copy. */
+export function isMacOS(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+  maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints ?? 0,
+  tauri = '__TAURI_INTERNALS__' in globalThis,
+): boolean {
+  if (!tauri) return true;
+  return /\bMacintosh\b|\bMac OS X\b|\bDarwin\b/i.test(userAgent)
+    && !/\biPhone\b|\biPad\b|\biPod\b/i.test(userAgent)
+    && appPlatform(userAgent, maxTouchPoints, tauri) === 'desktop';
+}
+
 /**
  * The words for this device and its biometric, per platform: a Mac keeps
  * Touch ID and "this Mac"; phones use biometrics (the available sensor varies).

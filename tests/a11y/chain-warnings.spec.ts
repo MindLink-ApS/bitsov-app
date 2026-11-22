@@ -23,13 +23,27 @@ for (const language of ['en', 'da'] as const) {
         ` });
       });
       await page.goto('/?sample');
-      if (await page.locator('[data-phone-status]').isVisible()) {
-        await page.locator('[data-track]').first().click();
-      }
+      const phone = await page.locator('[data-phone-status]').isVisible();
+      if (phone) await page.locator('[data-track]').first().click();
+      // Never a banner over the chat: the chain source is a Settings → Node fact.
+      await expect(page.locator('[data-chain-notice]:visible')).toHaveCount(0);
+      await page.locator('[data-composer] textarea').fill('hello');
+      await page.locator('[data-send]').click();
+      await expect(page.locator('.track')).toContainText(language === 'en'
+        ? "Your box can't see the Bitcoin chain right now; nothing was paid; try again later."
+        : 'Din boks kan ikke se Bitcoin-kæden lige nu; intet blev betalt; prøv igen senere.');
+      await expect(page.locator('[data-composer] textarea')).toHaveValue('hello');
+      await expect(page.locator('[data-money-notice]')).toHaveCount(0);
+      await page.locator(phone ? '[data-phone-status] .node-pill' : '.rail .node-pill').click();
       const notice = page.locator('[data-chain-notice]:visible');
       await expect(notice).toHaveCount(1);
+      // Settled colours: the settings sheet slides in, and axe reads blended greys mid-transition.
+      await page.evaluate(() => Promise.all(document.getAnimations()
+        .filter(a => a.effect?.getComputedTiming().iterations !== Infinity)
+        .map(a => a.finished.catch(() => undefined))));
       await expect(notice.getByRole('status')).toHaveText(language === 'en'
-        ? 'Your box reads the chain from a public service.' : 'Din boks læser kæden fra en offentlig tjeneste.');
+        ? 'Your box follows the Bitcoin network through a public service. Nothing is needed from you.'
+        : 'Din boks følger Bitcoin-netværket via en offentlig tjeneste. Du behøver ikke gøre noget.');
       const summary = notice.locator('summary');
       await summary.focus();
       await page.keyboard.press('Enter');
@@ -38,14 +52,6 @@ for (const language of ['en', 'da'] as const) {
       expect(await notice.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       const checks = await new AxeBuilder({ page }).include('[data-chain-notice]').withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze();
       expect(checks.violations).toEqual([]);
-      await summary.press('Enter');
-      await page.locator('[data-composer] textarea').fill('hello');
-      await page.locator('[data-send]').click();
-      await expect(page.locator('.track')).toContainText(language === 'en'
-        ? "Your box can't see the Bitcoin chain right now; nothing was paid; try again later."
-        : 'Din boks kan ikke se Bitcoin-kæden lige nu; intet blev betalt; prøv igen senere.');
-      await expect(page.locator('[data-composer] textarea')).toHaveValue('hello');
-      await expect(page.locator('[data-money-notice]')).toHaveCount(0);
     });
   }
 }

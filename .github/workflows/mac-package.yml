@@ -8,7 +8,7 @@ name: Mac Package
 # Build workflow's `sidecar` job it depends on network and on the genome's
 # published release, not only on this repo's source.
 #
-# CI cost (app #131, private-repo minutes): macos-14 is billed at 10× Linux.
+# CI resource use (app #131):
 # This Tauri bundle does not run on pull-request pushes or on every push to
 # main. It runs on the nightly schedule (default branch), on `v*` tags, on
 # workflow_dispatch, and on a PR when `full-ci` is added or a full-ci PR gets a
@@ -38,7 +38,7 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   # A new commit on a full-ci PR cancels the previous bundle. Adding another
-  # label must not cancel an in-flight 10× run (cancel-in-progress stays false
+  # label must not cancel an in-flight bundle (cancel-in-progress stays false
   # for `labeled`). Pushes, tags and the nightly are not cancelled.
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
@@ -57,12 +57,12 @@ jobs:
       # scripts/fetch-node-sidecar.sh reads the pinned public release with gh.
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: GnuPG for the sidecar signature check
         run: command -v gpg || brew install gnupg
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -100,7 +100,7 @@ jobs:
             echo "::warning::sccache unavailable; compiling without a cache"
           fi
 
-      - name: Fetch and re-verify every sidecar against rc23 (G1)
+      - name: Fetch and re-verify every sidecar against rc24 (G1)
         run: |
           bash scripts/fetch-node-sidecar.sh
           bash scripts/fetch-node-sidecar.sh --verify-only
@@ -109,12 +109,12 @@ jobs:
       # beforeBundleCommand; this flag skips only the binary download.
       # The offline bundle-checker unit tests run on Linux in Authority Check.
       - name: Package, sign ad-hoc and verify
-        run: bash scripts/package-mac.sh --dmg --use-existing-sidecar
+        run: bash scripts/package-mac.sh --beta --dmg --use-existing-sidecar
 
       - name: Real Keychain smoke from the signed bundle (headless)
         run: |
           set -euo pipefail
-          app=src-tauri/target/release/bundle/macos/BitSov.app
+          app='src-tauri/target/release/bundle/macos/BitSov Beta.app'
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
           "$app/Contents/MacOS/$executable" --keychain-smoke-test
 
@@ -123,15 +123,16 @@ jobs:
           set -euo pipefail
           # The package script compares the authenticated sidecar BEFORE signing.
           # Re-signing changes its bytes; verify the sealed bundle before archiving.
-          test -s src-tauri/target/release/bundle/macos/BitSov.app/Contents/_CodeSignature/CodeResources
-          codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/BitSov.app
+          app='src-tauri/target/release/bundle/macos/BitSov Beta.app'
+          test -s "$app/Contents/_CodeSignature/CodeResources"
+          codesign --verify --deep --strict --verbose=2 "$app"
           mkdir -p "$RUNNER_TEMP/out"
-          ditto -c -k --keepParent src-tauri/target/release/bundle/macos/BitSov.app \
+          ditto -c -k --keepParent "$app" \
             "$RUNNER_TEMP/out/BitSov-unsigned-macos-arm64.app.zip"
           cp src-tauri/target/release/bundle/dmg/*.dmg "$RUNNER_TEMP/out/"
           ls -l "$RUNNER_TEMP/out"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bitsov-unsigned-macos-arm64-${{ github.sha }}
           path: ${{ runner.temp }}/out/

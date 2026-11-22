@@ -19,8 +19,10 @@
  * Nothing here contacts a STUN or TURN server, gathers candidates, or opens
  * a direct path to the peer app: the connection state follows the node link.
  */
-import type { CallAudio, MediaTransport } from './callAudio';
+import type { CallAudio, CallAudioDiagnostics, MediaTransport } from './callAudio';
+import type { CallVideo, VideoTransport } from './callVideo';
 import type { CallSeal, MediaBridge, MediaLink } from './mediaBridge';
+import { isVideoFrame } from './videoFrame';
 
 export const NODE_ROUTED_MARKER = 'a=x-bitsov-media:node-routed-v1';
 const CALL_ATTRIBUTE = 'a=x-bitsov-call:';
@@ -28,6 +30,10 @@ const CALL_ATTRIBUTE = 'a=x-bitsov-call:';
 const SEAL_ATTRIBUTE = 'a=x-bitsov-e2e:';
 /** A closed node link may come back (the host reconnects); after this long the call ends. */
 export const LINK_GRACE_MS = 30_000;
+/** A node link down this long (frozen or lost media) is said as Reconnecting on the card. Display only. */
+export const MEDIA_FROZEN_MS = 3_000;
+/** How often an open link is checked for frames still arriving. */
+const FRAME_WATCH_MS = 500;
 
 /** The placeholder description that tells an M6 app "meet me at the node". */
 export function nodeRoutedSdp(type: 'offer' | 'answer', callId: string | null, sealAttribute?: string | null): string {
@@ -48,7 +54,10 @@ export function nodeRoutedSdp(type: 'offer' | 'answer', callId: string | null, s
 export const isNodeRoutedSdp = (sdp: string | null | undefined) =>
   typeof sdp === 'string' && sdp.split(/\r?\n/).includes(NODE_ROUTED_MARKER);
 
-export type MediaSessionEvent = { callId: string; state: 'open' | 'closed'; at: number };
+/** `refused`: the node refused the media socket for good (401 or 403), as opposed to a drop or an audio failure. */
+export type MediaSessionEvent = { callId: string; state: 'open' | 'closed'; at: number; refused?: boolean };
+/** How the host words a node's refusal of the media socket for this pairing's authority. */
+const AUTH_REFUSED = /refused the media socket \((401|403)\)/;
 
 /**
  * What the call label may say, on a build with sealing on.
@@ -98,6 +107,12 @@ export type NodeRoutedDeps = {
   /** Builds the audio engine; it calls `onFatal` when it can no longer carry audio. */
   audio: (stream: MediaStream, transport: MediaTransport, onFatal: () => void) => CallAudio;
   /**
+   * A video call also opens the video path on the same socket (flag
+   * `VITE_CALL_VIDEO`). Absent, or `null` from `build` on an audio call, and
+   * the call is an audio call in every byte. Nothing video does can end a call.
+   */
+  video?: { build: (transport: VideoTransport, track: MediaStreamTrack | null) => CallVideo | null; camera: (engine: CallVideo, track: MediaStreamTrack | null) => void };
+  /**
    * The node media session for `callId` opened, or closed for good (fatal
    * audio, the node ended the link, the reconnect grace ran out, or the call
    * closed), once each. Paying does not start on `open`: the node admits the
@@ -146,20 +161,37 @@ export class NodeRoutedConnection {
   onicecandidate: Handler = null;
   /** Why the node link ended for good, when the engine needs to say so (`not_paid`). */
   endDetail: string | null = null;
+  /**
+   * Display only: the open link has been down for `MEDIA_FROZEN_MS` (`endsAt`: when its grace ends the call),
+   * or it came back (`null`). Nothing here restarts, signals or pays.
+   */
+  oninterruption: ((endsAt: number | null) => void) | null = null;
 
   private stream: MediaStream | null = null;
   private audio: CallAudio | null = null;
+  private video: CallVideo | null = null;
+  private videoTrack: MediaStreamTrack | null = null;
   private opened = false;
   private closed = false;
   private wasOpen = false;
   /** `onSession` closed was emitted for this session (exactly once). */
   private sessionEnded = false;
+  /** The node refused the media socket (401/403) when the link ended. */
+  private refused = false;
   /** The node link is up (the host said `open`); `connected` also needs `audioReady`. */
   private linkOpen = false;
   private audioReady = false;
   /** The owner's own mute, kept for an audio engine built later. */
   private muted = false;
   private graceTimer: ReturnType<typeof setTimeout> | undefined;
+  private frozenTimer: ReturnType<typeof setTimeout> | undefined;
+  private interrupted = false;
+  /** When the last media frame arrived; null until the first one (a call that never had media is not "frozen"). */
+  private lastFrameAt: number | null = null;
+  /** Checks, while the link is open, that frames keep arriving. */
+  private frameWatch: ReturnType<typeof setInterval> | undefined;
+  /** The current stall comes from frames stopping on an open link (not from the link closing). */
+  private frameStall = false;
   private readonly now: () => number;
   /** This connection made its offer or answer. Never a second: a seal does not restart. */
   private sealOffered = false;
@@ -176,7 +208,17 @@ export class NodeRoutedConnection {
   /** The engine's mic stream; the sender stub keeps its camera code harmless. */
   addTrack(track: MediaStreamTrack, stream?: MediaStream): RTCRtpSender {
     this.stream = stream ?? this.stream;
+    if (track.kind === 'video' && this.deps.video) {
+      this.videoTrack = track;
+      // Camera off and on come back through the engine's sender; the video engine follows.
+      return { track, replaceTrack: async (next: MediaStreamTrack | null) => this.setVideoTrack(next) } as unknown as RTCRtpSender;
+    }
     return { track, replaceTrack: async () => undefined } as unknown as RTCRtpSender;
+  }
+
+  private setVideoTrack(track: MediaStreamTrack | null) {
+    this.videoTrack = track;
+    if (this.video) this.deps.video?.camera(this.video, track);
   }
 
   async createOffer(_options?: RTCOfferOptions): Promise<RTCSessionDescriptionInit> {
@@ -276,17 +318,19 @@ export class NodeRoutedConnection {
   async addIceCandidate(_candidate: RTCIceCandidateInit): Promise<void> {}
   restartIce(): void {}
   async getStats(): Promise<RTCStatsReport> { return new Map() as unknown as RTCStatsReport; }
+  /** For the call report: which codecs carried this call's audio, and the context rate. Null without an engine. */
+  audioDiagnostics(): CallAudioDiagnostics | null { return this.audio?.diagnostics?.() ?? null; }
   addEventListener(): void {}
   removeEventListener(): void {}
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    clearTimeout(this.graceTimer);
-    this.graceTimer = undefined;
+    this.stopWatching();
     const audio = this.audio;
     this.audio = null;
     void audio?.close();
+    this.closeVideo();
     if (this.opened) {
       void this.deps.bridge.close();
       this.endSession();
@@ -294,6 +338,12 @@ export class NodeRoutedConnection {
     if (this.deps.seal && this.sealCallId) void this.deps.seal.cancel(this.sealCallId);
     this.connectionState = 'closed';
     this.iceConnectionState = 'closed';
+  }
+
+  private closeVideo() {
+    const video = this.video;
+    this.video = null;
+    video?.close();
   }
 
   private setState(state: RTCPeerConnectionState) {
@@ -322,7 +372,23 @@ export class NodeRoutedConnection {
       // No audio graph (no AudioContext, worklet refused): a silent "live" call is worse than an ended one.
       () => { if (this.audio === audio) this.audioFailed(); },
     );
-    const open = () => this.deps.bridge.open(callId, peer, (frame) => { if (audio && this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link), this.sealing || undefined)
+    const sendVideo = this.deps.bridge.sendVideo;
+    // Video is never sealed: a connection with a key exchange carries none.
+    const video = this.deps.video && sendVideo && !this.sealing ? this.deps.video.build({ send: (payload) => sendVideo(payload) }, this.videoTrack) : null;
+    this.video = video;
+    const onFrame = (frame: Uint8Array) => {
+      this.frameArrived();
+      if (video && isVideoFrame(frame)) {
+        if (this.video === video) video.feed(frame);
+        return;
+      }
+      if (audio && this.audio === audio) audio.feed(frame);
+    };
+    const onLink = (link: MediaLink) => this.onLink(link);
+    // Without video this is exactly the audio call's open, sealed or not.
+    const open = () => (video
+      ? this.deps.bridge.open(callId, peer, onFrame, onLink, undefined, true)
+      : this.deps.bridge.open(callId, peer, onFrame, onLink, this.sealing || undefined))
       .catch(() => this.onLink({ link: 'ended', detail: 'media_link_refused' }));
     const admitted = this.deps.admitted;
     if (!admitted) { void open(); return; }
@@ -361,7 +427,7 @@ export class NodeRoutedConnection {
     if (!this.wasOpen || this.sessionEnded) return;
     this.sessionEnded = true;
     const callId = this.deps.callId();
-    if (callId) this.deps.onSession?.({ callId, state: 'closed', at: this.now() });
+    if (callId) this.deps.onSession?.({ callId, state: 'closed', at: this.now(), ...(this.refused ? { refused: true } : {}) });
   }
 
   /** The audio engine could not start, or broke mid-call: release it, close the socket, end the call. */
@@ -372,27 +438,95 @@ export class NodeRoutedConnection {
     // No way back to `connected`: a late or reconnected link finds no audio.
     this.audioReady = false;
     this.linkOpen = false;
+    this.stopWatching();
     void audio?.close();
+    this.closeVideo();
     void this.deps.bridge.close();
     this.setState('closed');
     this.endSession();
+  }
+
+  /** The call is over here: no stall deadline, no frame watch. */
+  private stopWatching() {
+    this.clearStall(false);
+    clearInterval(this.frameWatch);
+    this.frameWatch = undefined;
+  }
+
+  /**
+   * Media stopped at `since` (the link closed, or frames stopped on an open link): the call ends after the link's
+   * grace unless media comes back, and past `MEDIA_FROZEN_MS` the card says Reconnecting. Nothing is restarted,
+   * signalled or paid for it.
+   */
+  private startStall(since: number) {
+    if (this.graceTimer !== undefined || this.closed) return;
+    const grace = this.deps.linkGraceMs ?? LINK_GRACE_MS;
+    const endsAt = since + grace;
+    this.graceTimer = setTimeout(() => {
+      this.graceTimer = undefined;
+      clearTimeout(this.frozenTimer);
+      this.frozenTimer = undefined;
+      clearInterval(this.frameWatch);
+      this.frameWatch = undefined;
+      this.setState('closed');
+      this.endSession();
+    }, Math.max(0, endsAt - this.now()));
+    this.frozenTimer = setTimeout(() => {
+      this.frozenTimer = undefined;
+      if (this.closed || this.connectionState === 'closed' || this.graceTimer === undefined) return;
+      this.interrupted = true;
+      this.oninterruption?.(endsAt);
+    }, Math.max(0, Math.min(since + MEDIA_FROZEN_MS, endsAt) - this.now()));
+  }
+
+  /** Media is back: no deadline, and the card is told once if it said Reconnecting. */
+  private clearStall(say: boolean) {
+    clearTimeout(this.graceTimer);
+    this.graceTimer = undefined;
+    clearTimeout(this.frozenTimer);
+    this.frozenTimer = undefined;
+    this.frameStall = false;
+    if (this.interrupted) { this.interrupted = false; if (say) this.oninterruption?.(null); }
+  }
+
+  /** A frame arrived: media advances. The first one starts the open-link watch. */
+  private frameArrived() {
+    if (this.closed) return;
+    this.lastFrameAt = this.now();
+    if (this.frameStall) this.clearStall(true);
+    if (this.frameWatch === undefined) {
+      this.frameWatch = setInterval(() => {
+        if (this.closed || this.connectionState === 'closed') { clearInterval(this.frameWatch); this.frameWatch = undefined; return; }
+        // Only an open link that stopped carrying frames; a closed link has its own stall.
+        if (!this.linkOpen || this.frameStall || this.graceTimer !== undefined || this.lastFrameAt === null) return;
+        if (this.now() - this.lastFrameAt < MEDIA_FROZEN_MS) return;
+        this.frameStall = true;
+        this.startStall(this.lastFrameAt);
+      }, FRAME_WATCH_MS);
+    }
   }
 
   private onLink(link: MediaLink) {
     if (this.closed) return;
     switch (link.link) {
       case 'open': {
-        clearTimeout(this.graceTimer);
-        this.graceTimer = undefined;
+        // A reopened socket is not media: once frames have flowed, only a frame arriving again clears the stall,
+        // and its deadline (counted from the last frame) stands meanwhile. Before any frame, the link is all there is.
+        if (this.lastFrameAt === null) this.clearStall(true);
+        else if (this.graceTimer !== undefined) this.frameStall = true;
         this.linkOpen = true;
+        if (link.limits) this.video?.setNodeLimits(link.limits);
         this.maybeConnected();
         break;
       }
       case 'closed':
         this.linkOpen = false;
+        this.video?.linkReset();
         // The host reconnects on its own; the call stays live meanwhile.
-        if (this.wasOpen && this.graceTimer === undefined) {
-          this.graceTimer = setTimeout(() => { this.graceTimer = undefined; this.setState('closed'); this.endSession(); }, this.deps.linkGraceMs ?? LINK_GRACE_MS);
+        if (this.wasOpen) {
+          // A stall already running keeps its deadline; otherwise media stopped at the last frame (or now, if none came).
+          this.frameStall = false;
+          this.startStall(this.lastFrameAt ?? this.now());
         }
         break;
       case 'sealed':
@@ -405,7 +539,11 @@ export class NodeRoutedConnection {
       case 'ended':
         // The call could not stay sealed: say so. It does not go on in the clear.
         if (link.detail && SEAL_DETAIL.test(link.detail)) this.endDetail = SEAL_ENDED;
-        // The node refused or dropped the media session for good.
+        if (link.detail && AUTH_REFUSED.test(link.detail)) this.refused = true;
+        // The node refused or dropped the media session for good. A refusal
+        // reaches the shell first, with its reason, before the generic close.
+        this.stopWatching();
+        if (this.refused) this.endSession();
         this.setState('closed');
         this.endSession();
         break;

@@ -222,13 +222,13 @@ fn exchange_secret(secret: StaticSecret, peer: &[u8; 32]) -> Result<Secret32, Se
 
 fn random_secret() -> Result<StaticSecret, SealError> {
     let mut bytes = Zeroizing::new([0u8; 32]);
-    getrandom::getrandom(bytes.as_mut()).map_err(|_| SealError::NotReady)?;
+    getrandom::fill(bytes.as_mut()).map_err(|_| SealError::NotReady)?;
     Ok(StaticSecret::from(*bytes))
 }
 
 fn random_nonce() -> Result<[u8; 16], SealError> {
     let mut nonce = [0u8; 16];
-    getrandom::getrandom(&mut nonce).map_err(|_| SealError::NotReady)?;
+    getrandom::fill(&mut nonce).map_err(|_| SealError::NotReady)?;
     Ok(nonce)
 }
 
