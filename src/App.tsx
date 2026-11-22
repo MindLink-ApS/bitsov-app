@@ -775,7 +775,9 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       const state = await props.source.fundState();
       if (stale(id)) return;
       setFund(state);
-      setError(null);
+      // "Not started" does not undo a failed start. That error stays until the
+      // owner tries again, or a deposit is actually reported.
+      if (state || error()?.summary !== 'obFundStartFailed') setError(null);
       // The onboarding record carries the address once started; fall back to the
       // payments endpoint if the node did not include one.
       if (state && !state.funding_address && !address() && !props.moneyBlocked?.()) {
@@ -846,7 +848,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       if (disposed) return;
       setError(isMoneyNotReady(e) ? null : { message: String(e), summary: 'obFundStartFailed' });
     } finally {
-      setBusy(false);
+      if (!disposed) setBusy(false);
     }
   };
 

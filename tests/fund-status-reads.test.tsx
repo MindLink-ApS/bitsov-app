@@ -418,3 +418,113 @@ it('keeps a failed deposit start when an older status read then returns not star
   expect(shownAddress()).toBeNull();
   expect(panel()!.querySelector('[data-fund-start]')).not.toBeNull();
 });
+
+it('polls again once the status read that was in flight at the start has settled', async () => {
+  vi.useFakeTimers();
+  const polls = watchStatusPoll();
+  const host = stubHost({ holdStart: true });
+  await openWallet(host);
+  const stale = await tickPending(host);
+  const reads = host.counts.fundState;
+  submitStart();
+  await flush();
+  expect(host.starts).toHaveLength(1);
+  // The node drops out before the start returns, so the follow-up refresh does not run.
+  host.connection.ready = false;
+  const statuses = host.counts.nodeStatus;
+  expect(polls.length).toBeGreaterThan(0);
+  polls[polls.length - 1]();
+  await flush();
+  expect(host.counts.nodeStatus).toBeGreaterThan(statuses);
+  host.starts[0].resolve(fundState());
+  await flush();
+  expect(host.counts.fundState).toBe(reads);
+  expect(shownAddress()).toBe(ADDRESS);
+  // The node is back, but that pre-start read is still out, so a tick must not start another.
+  host.connection.ready = true;
+  polls[polls.length - 1]();
+  await flush();
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.counts.fundState).toBe(reads);
+  stale.resolve(null);
+  await flush();
+  expect(shownAddress(), 'the pre-start read must not clear the deposit').toBe(ADDRESS);
+  // That run has finished, which frees the in-flight slot. The next tick reads afresh.
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.counts.fundState, 'the poll after the in-flight read settles must read again').toBe(reads + 1);
+  host.reads[host.reads.length - 1].resolve(fundState({ funding_amount_sats_received: 600 }));
+  await flush();
+  expect(panel()!.querySelector('.progress strong')?.textContent).toBe('600 sats');
+  expect(shownAddress()).toBe(ADDRESS);
+});
+
+it('keeps a failed deposit start until a later poll observes a deposit or the owner tries again', async () => {
+  vi.useFakeTimers();
+  const host = stubHost({ holdStart: true });
+  await openWallet(host);
+  const stale = await tickPending(host);
+  const raw = 'Error: POST /onboarding/start returned 502: {"error":"wallet"}';
+  const summary = () => panel()!.querySelector('[data-soft-summary]')?.textContent;
+  submitStart();
+  await flush();
+  host.starts[0].reject(raw);
+  await flush();
+  expect(summary()).toBe(START_FAILED);
+  stale.resolve(null);
+  await flush();
+  const reads = host.counts.fundState;
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.counts.fundState).toBe(reads + 1);
+  host.reads[host.reads.length - 1].resolve(null);
+  await flush();
+  expect(summary(), 'an empty status must not clear the failed start').toBe(START_FAILED);
+  expect(panel()!.querySelector('[data-soft-detail]')?.textContent).toContain(raw);
+  expect(shownAddress()).toBeNull();
+  expect(panel()!.querySelector('[data-fund-start]')).not.toBeNull();
+  // Trying again clears the failure while the new start is still out.
+  submitStart();
+  await flush();
+  expect(host.starts).toHaveLength(2);
+  expect(summary()).toBeUndefined();
+  host.starts[1].reject(raw);
+  await flush();
+  expect(summary()).toBe(START_FAILED);
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.counts.fundState).toBe(reads + 2);
+  host.reads[host.reads.length - 1].resolve(fundState({ funding_amount_sats_received: 250 }));
+  await flush();
+  expect(summary(), 'an observed deposit replaces the failed start').toBeUndefined();
+  expect(shownAddress()).toBe(ADDRESS);
+  expect(panel()!.querySelector('.progress strong')?.textContent).toBe('250 sats');
+});
+
+it.each(['resolves', 'rejects'] as const)('a deposit start that %s after the panel is gone does not write or refresh', async (outcome) => {
+  vi.useFakeTimers();
+  const host = stubHost({ holdStart: true });
+  const errors = vi.spyOn(console, 'error');
+  await openWallet(host);
+  const stale = await tickPending(host);
+  submitStart();
+  await flush();
+  expect(host.starts).toHaveLength(1);
+  const reads = host.counts.fundState;
+  click('[data-tab="general"]');
+  await flush();
+  expect(panel()).toBeNull();
+  if (outcome === 'resolves') host.starts[0].resolve(fundState({ funding_address: null }));
+  else host.starts[0].reject('Error: POST /onboarding/start returned 502: {"error":"wallet"}');
+  await flush();
+  // Started with no address: a live panel would ask the payments endpoint, then refresh.
+  stale.resolve(fundState({ funding_address: null }));
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(host.counts.fundState, 'the settled start must not refresh').toBe(reads);
+  expect(host.counts.fundingAddress).toBe(0);
+  click('[data-tab="wallet"]');
+  await flush();
+  expect(panel()).not.toBeNull();
+  expect(shownAddress()).toBeNull();
+  expect(panel()!.querySelector('[data-soft-summary]')).toBeNull();
+  expect(panel()!.querySelector('.progress')).toBeNull();
+  expect(panel()!.querySelector('.funded')).toBeNull();
+  expect(errors).not.toHaveBeenCalled();
+});
