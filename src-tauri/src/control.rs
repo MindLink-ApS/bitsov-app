@@ -62,6 +62,11 @@ pub struct Peer {
     /// `porch_quote_v1` (or legacy `porch_read_v1`). Derived by [`with_porch_support`], never read from the node.
     #[serde(default, skip_deserializing)]
     pub porch: bool,
+    /// Their node takes a free answer or declined hangup to its own ringing
+    /// offer: connected now and advertising `call_reply_free_v1`. Derived by
+    /// [`with_meeting_support`], never read from the node.
+    #[serde(default, skip_deserializing)]
+    pub free_replies: bool,
 }
 
 /// How a connected peer's node lists the meeting advert (genome
@@ -70,6 +75,9 @@ pub const PEER_MEETING_CAPABILITY: &str = r#"Custom("call_meeting_v1")"#;
 /// How a connected peer's node lists the room advert (genome
 /// `Capability::Custom("room_binding_v1")`).
 pub const PEER_ROOM_CAPABILITY: &str = r#"Custom("room_binding_v1")"#;
+/// How a connected peer's node lists the free call reply advert (genome
+/// `Capability::Custom("call_reply_free_v1")`).
+pub const PEER_FREE_REPLY_CAPABILITY: &str = r#"Custom("call_reply_free_v1")"#;
 
 /// Mark each peer whose node is known to take meeting legs, and room chats.
 /// A node without the advert (older, or not connected so we cannot tell)
@@ -79,6 +87,7 @@ pub fn with_meeting_support(mut peers: Vec<Peer>) -> Vec<Peer> {
     for p in &mut peers {
         let lists = |cap: &str| p.connected && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == cap));
         (p.meetings, p.rooms) = (lists(PEER_MEETING_CAPABILITY), lists(PEER_ROOM_CAPABILITY));
+        p.free_replies = lists(PEER_FREE_REPLY_CAPABILITY);
     }
     peers
 }
@@ -271,7 +280,12 @@ pub struct NodeStatusResponse {
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
 /// `owner_device_approval_v1`: the node approves spend windows and first contact
 /// from an enrolled owner device (node #303); the renderer only changes copy on it.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1", "owner_device_approval_v1", "owner_device_approval_breaker_reset_v1", "starter_channel_request_v1"];
+/// `call_continuity_v1`: an admitted call outlives its grant's expiry or
+/// renewal (never a revoke). `call_reply_free_v1`: this node sends a free
+/// answer or declined hangup to a caller that also advertises it.
+/// `standing_allowance_v1`: read for readiness only; it proves no live
+/// allowance and no funds by itself.
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1", "owner_device_approval_v1", "owner_device_approval_breaker_reset_v1", "starter_channel_request_v1", "call_continuity_v1", "call_reply_free_v1", "standing_allowance_v1"];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -1843,6 +1857,41 @@ mod tests {
         // The renderer sees the derived flag, never the raw capability list.
         let out = serde_json::to_value(&peers[0]).unwrap();
         assert_eq!(out["meetings"], true);
+        assert!(out.get("capabilities").is_none(), "{out}");
+    }
+
+    #[test]
+    fn overview_keeps_the_call_capabilities_by_their_exact_names_only() {
+        let status = serde_json::from_value(serde_json::json!({
+            "status": "ok", "node_id": "x",
+            "api_capabilities": ["call_continuity_v1", "call_reply_free_v1", "standing_allowance_v1",
+                "call_continuity_v2", "call_reply_free", "Custom(\"call_reply_free_v1\")", "standing_allowance_v1x"]
+        })).unwrap();
+        let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+        assert_eq!(projected["capabilities"], serde_json::json!(["call_continuity_v1", "call_reply_free_v1", "standing_allowance_v1"]));
+        for one in ["call_continuity_v1", "call_reply_free_v1", "standing_allowance_v1"] {
+            let status = serde_json::from_value(serde_json::json!({"status": "ok", "node_id": "x", "api_capabilities": [one]})).unwrap();
+            assert_eq!(serde_json::to_value(NodeOverview::from_status(status, 1)).unwrap()["capabilities"], serde_json::json!([one]));
+        }
+        let legacy = serde_json::from_value(serde_json::json!({"status": "ok", "node_id": "x"})).unwrap();
+        assert_eq!(serde_json::to_value(NodeOverview::from_status(legacy, 1)).unwrap()["capabilities"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_peer_takes_free_call_replies_only_when_connected_with_the_exact_advert() {
+        let peers: Vec<Peer> = serde_json::from_str(r#"[
+            {"node_id":"a","connected":true,"capabilities":["X3dh","Custom(\"call_reply_free_v1\")"]},
+            {"node_id":"b","connected":false,"capabilities":["Custom(\"call_reply_free_v1\")"]},
+            {"node_id":"c","connected":true,"capabilities":["call_reply_free_v1","Custom(\"call_reply_free_v1x\")"]},
+            {"node_id":"d","connected":true},
+            {"node_id":"e","connected":true,"free_replies":true},
+            {"node_id":"f","connected":true,"capabilities":["Custom(\"call_meeting_v1\")"]}
+        ]"#).unwrap();
+        let peers = with_meeting_support(peers);
+        assert_eq!(peers.iter().map(|p| p.free_replies).collect::<Vec<_>>(), [true, false, false, false, false, false]);
+        assert_eq!(peers.iter().map(|p| p.meetings).collect::<Vec<_>>(), [false, false, false, false, false, true]);
+        let out = serde_json::to_value(&peers[0]).unwrap();
+        assert_eq!(out["free_replies"], true);
         assert!(out.get("capabilities").is_none(), "{out}");
     }
 

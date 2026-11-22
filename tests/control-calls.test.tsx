@@ -513,6 +513,93 @@ describe('call restart negotiation', () => {
     caller.e.endLocal(); callee.e.endLocal();
   });
 
+  describe('a reconnect that has to ask first', () => {
+    const restartId = 'e'.repeat(32);
+    const deliver = async (target: ReturnType<typeof engine>, signal: Sent, sender: string, own: string) =>
+      target.e.receive(msg(signal.kind, signal.body, sender), own);
+    /** A live paid call whose callee asks before any reconnect; its asks are held until answered. */
+    const live = async (calleeAsk: () => Promise<boolean>, callerOver: Partial<CallDeps> = {}) => {
+      let n = 0;
+      let held = false;
+      const asks: ((ok: boolean) => void)[] = [];
+      const authorize = vi.fn(() => held ? new Promise<boolean>((r) => { asks.push(r); }) : calleeAsk());
+      const caller = engine({ newCallId: () => n++ === 0 ? ID : restartId, ...callerOver });
+      const callee = engine({ authorize });
+      await caller.e.place(A, 'audio', QUOTE);
+      await deliver(callee, caller.sent[0], OWN, A);
+      await callee.e.accept(QUOTE);
+      await deliver(caller, callee.sent[0], A, OWN);
+      const [a, b] = FakePc.made;
+      a.connect(); b.connect();
+      return { caller, callee, a, b, asks, authorize, hold: () => { held = true; } };
+    };
+
+    it.each([[true, 1], [false, 0]] as const)('a caller\'s restart that lands while the callee is asking is answered on that one answer (approved %s): never a paid request', async (approved, answers) => {
+      const t = await live(async () => true);
+      t.hold();
+      const asked = t.authorize.mock.calls.length;
+      // Both sides drop: the callee asks before its reconnect request, the caller sends its restart.
+      t.a.state('failed'); t.b.state('failed');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.asks).toHaveLength(1);
+      const restart = t.caller.sent.find((s) => s.kind === 400 && s.body.call_id === restartId)!;
+      expect(restart).toBeDefined();
+      await deliver(t.callee, restart, OWN, A);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.callee.sent.filter((s) => s.kind === 401 && s.body.call_id === restartId)).toHaveLength(0);
+      t.asks[0](approved);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.callee.sent.filter((s) => s.kind === 402)).toHaveLength(0);
+      expect(t.callee.sent.filter((s) => s.kind === 401 && s.body.call_id === restartId)).toHaveLength(answers);
+      expect(t.callee.e.view().recoveryUsed).toBe(approved);
+      expect(t.authorize).toHaveBeenCalledTimes(asked + 1);
+      t.caller.e.endLocal(); t.callee.e.endLocal();
+    });
+
+    it('a drop that heals while the reconnect ask is open spends nothing when it is approved', async () => {
+      const t = await live(async () => true);
+      t.hold();
+      t.b.state('disconnected');
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(t.asks).toHaveLength(1);
+      t.b.connect();
+      expect(t.callee.e.view().phase).toBe('live');
+      t.asks[0](true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.callee.sent.filter((s) => s.kind === 402)).toHaveLength(0);
+      expect(t.callee.e.view().recoveryUsed).toBe(false);
+      t.caller.e.endLocal(); t.callee.e.endLocal();
+    });
+
+    it('an approval that fails to open says so, spends nothing and keeps the recovery', async () => {
+      const t = await live(async () => true);
+      t.authorize.mockImplementation(async () => { throw new Error('approval sheet gone'); });
+      t.b.state('failed');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.callee.sent.filter((s) => s.kind === 402)).toHaveLength(0);
+      expect(t.callee.e.view().recoveryUsed).toBe(false);
+      expect(t.callee.e.view().recoveryError).toContain('approval sheet gone');
+      t.caller.e.endLocal(); t.callee.e.endLocal();
+    });
+
+    it('a caller\'s recovery refused by the grant\'s remaining budget keeps the recovery for after a top-up', async () => {
+      let remaining = 1_000_000;
+      const grant = () => ({ budget_msat: 2_000_000, remaining_msat: remaining, per_call_max_msat: 700_000, expires_at_ms: 10 ** 13, envelopes: null });
+      const t = await live(async () => true, { authorize: async () => true, grant });
+      remaining = 1;
+      t.a.state('failed');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.caller.sent.filter((s) => s.kind === 400 && s.body.call_id === restartId)).toHaveLength(0);
+      expect(t.caller.e.view().recoveryUsed).toBe(false);
+      remaining = 1_000_000;
+      t.a.state('failed');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.caller.sent.filter((s) => s.kind === 400 && s.body.call_id === restartId)).toHaveLength(1);
+      expect(t.caller.e.view().recoveryUsed).toBe(true);
+      t.caller.e.endLocal(); t.callee.e.endLocal();
+    });
+  });
+
   it('a camera error before a drop is not a recovery error: recoveryError stays empty', async () => {
     const local = stream(true);
     const fresh = stream(true, false);
@@ -571,6 +658,24 @@ describe('call restart negotiation', () => {
     pc.state('disconnected');
     expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', error: cameraError });
     caller.e.endLocal();
+  });
+
+  it.each([
+    ['a node that keeps the call sends the callee’s reconnect request without asking again', true],
+    ['a node that does not keeps asking for an approval first', false],
+  ] as const)('after the approval ran out, %s', async (_name, continuity) => {
+    let approved = true;
+    const authorize = vi.fn(async () => approved);
+    const incoming = engine({ authorize, callContinuity: () => continuity });
+    await incoming.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await incoming.e.accept(QUOTE);
+    approved = false;
+    authorize.mockClear();
+    const pc = FakePc.made[0]; pc.connect(); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(incoming.sent.filter(s => s.kind === 402)).toHaveLength(continuity ? 1 : 0);
+    expect(authorize).toHaveBeenCalledTimes(continuity ? 0 : 1);
+    incoming.e.endLocal();
   });
 
   it('a callee-only failure requests one restart and caller ignores duplicate requests', async () => {
@@ -3320,7 +3425,57 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(pause.mock.contexts).toContain(audio));
     expect($('[data-call-panel="incoming"]')).toBeNull();
     expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_free_reply')).toHaveLength(0);
     expect(host.used('op_end_call')).toHaveLength(0);
+    expect(host.used('spend_request')).toHaveLength(0);
+  });
+
+  const FREE_NODE = () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
+    lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
+    capabilities: ['call_reply_free_v1'] });
+  const freeReceipt = (args?: Record<string, unknown>) => ({ message_id: 'r1', kind: args!.kind, amount_msat: 0, total_msat: 0, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: Date.now() });
+
+  it.each([
+    ['en', 'Declining is free. They are told you declined.', 'Declined. They were told, and it cost nothing.'],
+    ['da', 'Det er gratis at afvise. Den anden får besked om, at du afviste.', 'Afvist. Den anden fik besked, og det kostede intet.'],
+  ] as const)('with free replies on both nodes, Decline posts the free declined hangup: zero cap, no grant, no spend request (%s)', async (lang, note, ended) => {
+    const host = stubHost({
+      messages_list: () => [], call_quote: () => QUOTE, node_overview: FREE_NODE,
+      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, free_replies: true }],
+      call_free_reply: freeReceipt,
+    });
+    await openShell();
+    setLanguagePref(lang);
+    incoming(host);
+    await vi.waitFor(() => expect(text('[data-call-decline-note]')).toBe(note));
+    expect(visible('[data-call-panel="incoming"]')).not.toMatch(/konsensus\s|--op\b|Terminal/);
+    $<HTMLButtonElement>('[data-call-decline]')!.click();
+    await vi.waitFor(() => expect(host.used('call_free_reply')).toHaveLength(1));
+    expect(host.used('call_free_reply')[0].args).toEqual({ peer: A, kind: 403, plaintext: JSON.stringify({ v: 1, call_id: ID, reason: 'declined' }) });
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe(ended));
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('spend_request')).toHaveLength(0);
+    expect(host.used('op_end_call')).toHaveLength(0);
+  });
+
+  it.each([
+    ['our node only', true, false],
+    ['their node only', false, true],
+    ['their node, but not connected', true, 'offline'],
+  ] as const)('with free replies on %s, Decline stays the local Ignore and posts nothing', async (_name, own, theirs) => {
+    const host = stubHost({
+      messages_list: () => [], call_quote: () => QUOTE,
+      ...(own ? { node_overview: FREE_NODE } : {}),
+      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: theirs !== 'offline', fingerprint: null, free_replies: theirs !== false }],
+      call_free_reply: freeReceipt,
+    });
+    await openShell();
+    incoming(host);
+    await vi.waitFor(() => expect(text('[data-call-decline-note]')).toBe('Declining is free and sends nothing. Their phone keeps ringing until the call times out.'));
+    $<HTMLButtonElement>('[data-call-decline]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).toBeNull());
+    expect(host.used('call_free_reply')).toHaveLength(0);
+    expect(host.used('call_signal')).toHaveLength(0);
     expect(host.used('spend_request')).toHaveLength(0);
   });
 
