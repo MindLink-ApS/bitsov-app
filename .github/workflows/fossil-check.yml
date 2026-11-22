@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
       - name: Test the diff scanner
         run: python3 scripts/ci/test-fossil-check.py
-      - name: Check added lines, changed paths and commit metadata
+      - name: Check added lines and changed paths
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}

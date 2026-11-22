@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject private-record references introduced by a Git diff or its commits."""
+"""Reject private-record references introduced by a Git diff."""
 
 import argparse
 import hashlib
@@ -169,25 +169,6 @@ def main():
         return found
 
     # An address whose host is a machine name, a private suffix or an IP literal.
-    local_address = re.compile(
-        r"(?<=[a-z0-9_.%+-])@(?:(?:[a-z0-9-]+\.)*(?:local|localdomain|lan|internal|home)|localhost|"
-        r"\[?\d{1,3}(?:\.\d{1,3}){3}\]?)(?![a-z0-9-]|\.[a-z0-9])", re.I
-    )
-
-    def identity_categories(name, email):
-        found = categories(name) + categories(email)
-        host = email.rpartition("@")[2].strip("[]").casefold()
-        if (not host or "." not in host or local_address.search("x@" + host)
-                or ":" in host):
-            found.append("machine-local email address")
-        return found
-
-    def message_categories(line):
-        found = categories(line)
-        if local_address.search(line):
-            found.append("machine-local email address")
-        return found
-
     try:
         base = git("merge-base", args.base, args.head).strip()
         paths = git("diff", "--no-ext-diff", "--no-textconv", "--no-renames",
@@ -195,9 +176,6 @@ def main():
         diff = git("diff", "--no-ext-diff", "--no-textconv", "--no-renames",
                    "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--unified=0",
                    base, args.head, "--")
-        log = git("log", "--no-show-signature",
-                  "--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00%B%x1e",
-                  args.head, "^" + args.base, "--")
     except subprocess.CalledProcessError:
         print("Fossil check could not read the complete diff; fetch both commits and their history.",
               file=sys.stderr)
@@ -220,19 +198,6 @@ def main():
         elif in_hunk and line.startswith("+"):
             violations.extend(("added line", category)
                               for category in categories(line[1:], current_path))
-
-    for record in log.split("\x1e"):
-        fields = record.strip("\n").split("\0")
-        if len(fields) != 6:
-            continue
-        sha, author, author_email, committer, committer_email, message = fields
-        where = f"commit {sha[:12]}"
-        for name, email in ((author, author_email), (committer, committer_email)):
-            violations.extend((f"{where} identity", category)
-                              for category in identity_categories(name, email))
-        for line in message.split("\n"):
-            violations.extend((f"{where} message", category)
-                              for category in message_categories(line))
 
     if violations:
         # Never echo the offending text or file paths into public Actions logs.

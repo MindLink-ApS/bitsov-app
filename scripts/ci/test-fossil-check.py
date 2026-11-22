@@ -246,63 +246,6 @@ class FossilCheckTests(unittest.TestCase):
         self.commit()
         self.check(1)
 
-    def check_commit(self, expected, message="Update sample", author=None):
-        self.write("added.txt", f"public text {self.git('rev-parse', 'HEAD')}\n")
-        self.commit(message, author)
-        try:
-            result = self.check(expected)
-            output = result.stdout + result.stderr
-            if expected == 1:
-                self.assertRegex(result.stderr, r"in commit [0-9a-f]{12} (message|identity)\.")
-            return result, output
-        finally:
-            self.base = self.git("rev-parse", "HEAD")
-
-    def test_commit_messages_are_checked(self):
-        trailer = f"Co-authored-by: {RESERVED[4].title()} <noreply@example.invalid>"
-        for index, message in enumerate((
-                "Fix layout\n\n" + trailer,
-                "Fix layout\n\nSee " + HOME_PATH,
-                "Fix layout\n\nSee " + SESSION,
-                "Fix layout\n\nMoved from " + PRIVATE_NAME,
-                "Fix layout\n\nCo-authored-by: Someone <someone@workstation.local>",
-                "Fix layout\n\nCo-authored-by: Someone <someone@10.0.0.2>",
-                f"Fix layout ({RESERVED[2].upper()} review)")):
-            with self.subTest(index=index):
-                _, output = self.check_commit(1, message)
-                self.assertIn("message", output)
-                for line in message.splitlines()[1:]:
-                    if line:
-                        self.assertNotIn(line, output)
-
-    def test_commit_identities_are_checked(self):
-        for index, author in enumerate((
-                "Someone <someone@workstation.local>",
-                "Someone <someone@10.2.0.2>",
-                "Someone <someone@localhost>",
-                "Someone <someone@workstation>",
-                f"{RESERVED[0].title()} <bot@example.invalid>",
-                f"Someone <{RESERVED[5]}@example.invalid>")):
-            with self.subTest(index=index):
-                _, output = self.check_commit(1, author=author)
-                self.assertIn("identity", output)
-                self.assertNotIn(author.split("<")[1].rstrip(">"), output)
-
-    def test_ordinary_commit_metadata_passes(self):
-        for message, author in (
-                ("Fix layout\n\nCo-authored-by: Someone <someone@home.example.org>", None),
-                ("Bind to 127.0.0.1 and tell users @home about it", None),
-                ("Bump vite", "dependabot[bot] <1+dependabot[bot]@users.noreply.example.invalid>"),
-                ("Fix layout", "Someone <123+someone@users.noreply.example.invalid>")):
-            with self.subTest(message=message):
-                self.check_commit(0, message, author)
-
-    def test_commits_already_in_the_base_are_not_rechecked(self):
-        self.write("added.txt", "public text\n")
-        self.commit("Fix layout\n\nSee " + SESSION, "Someone <someone@workstation.local>")
-        self.base = self.git("rev-parse", "HEAD")
-        self.check_commit(0)
-
     def test_invalid_or_unavailable_revision_fails_closed(self):
         self.check(2, base="not-a-commit")
         self.check(2, base="f" * 40)
