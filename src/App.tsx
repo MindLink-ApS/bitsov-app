@@ -759,45 +759,93 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   const [amount, setAmount] = createSignal(String(DEFAULT_FUNDING_SATS));
   const [busy, setBusy] = createSignal(false);
   // `summary` is the plain sentence for a host failure; the raw text stays behind Details.
-  const [error, setError] = createSignal<{ message: string; summary?: 'obFundStateFailed' | 'obFundStartFailed' } | null>(null);
+  const [error, setError] = createSignal<{ message: string; summary?: 'obFundStateFailed' } | null>(null);
+  // Kept apart from a status-read failure, which must not replace it.
+  const [startError, setStartError] = createSignal<{ message: string; summary: 'obFundStartFailed' } | null>(null);
 
-  const refresh = async () => {
-    if (!props.ready()) return;
+  // On a slow node a read can outlast the 3 s poll. Only the newest read may write,
+  // a poll tick is skipped while one is in flight, and nothing writes once the
+  // panel is gone.
+  let disposed = false;
+  let latest = 0;
+  let inFlight: Promise<void> | null = null;
+  // Set after a successful start. The next null status does not undo that deposit.
+  let holdStarted = false;
+  // The interval stops once funded. A null held after that start still needs the
+  // one confirming read, until a real status arrives or that next read is empty.
+  let confirmHeld = false;
+  const stale = (id: number) => disposed || id !== latest;
+
+  const read = async () => {
+    const id = ++latest;
     try {
       const state = await props.source.fundState();
+      if (stale(id)) return;
+      // Right after a successful start the node can still report "not started".
+      // Keep the deposit for that one null; a later null confirms it.
+      if (state === null && holdStarted && fund()) {
+        holdStarted = false;
+        setError(null);
+        confirmHeld = fund()!.funded;
+        return;
+      }
+      holdStarted = false;
+      confirmHeld = false;
       setFund(state);
+      // A failed start stays until the owner tries again or a deposit is observed.
+      // A status-read failure is separate, and any answer clears it.
+      if (state !== null) setStartError(null);
       setError(null);
       // The onboarding record carries the address once started; fall back to the
       // payments endpoint if the node did not include one.
       if (state && !state.funding_address && !address() && !props.moneyBlocked?.()) {
         try {
-          setAddress(await props.source.fundingAddress());
+          const fallback = await props.source.fundingAddress();
+          if (stale(id)) return;
+          setAddress(fallback);
           setAddressError(null);
         } catch (e) {
+          if (stale(id)) return;
           // The wallet backend may not expose one (only embedded LDK does); the
           // state address is primary, but say so instead of waiting forever.
           setAddressError(isMoneyNotReady(e) ? null : String(e));
         }
       }
     } catch (e) {
+      if (stale(id)) return;
       setError({ message: String(e), summary: 'obFundStateFailed' });
     }
+  };
+
+  // A poll joins the read in flight. An explicit refresh reads afresh when the
+  // node is ready, and that reply is newer than a poll still in flight.
+  const refresh = (explicit = false): Promise<void> => {
+    if (disposed || !props.ready()) return Promise.resolve();
+    if (inFlight && !explicit) return inFlight;
+    const run: Promise<void> = read().finally(() => {
+      if (inFlight === run) inFlight = null;
+    });
+    inFlight = run;
+    return run;
   };
 
   let timer: number | undefined;
   onMount(() => {
     void refresh();
     timer = window.setInterval(() => {
-      if (!fund()?.funded) void refresh();
+      if (!fund()?.funded || confirmHeld) void refresh();
     }, 3000);
   });
   onCleanup(() => {
+    disposed = true;
     if (timer) window.clearInterval(timer);
   });
 
   const start = async (event: Event) => {
     event.preventDefault();
     if (props.moneyBlocked?.()) return;
+    // Trying again retires the previous start failure, including a bad amount.
+    setStartError(null);
     const value = Number(amount());
     if (!Number.isInteger(value) || value < 1 || value > 4_294_967_295) {
       setError({ message: t('obWholeSats') });
@@ -806,21 +854,32 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     setBusy(true);
     setError(null);
     try {
-      setFund(await props.source.fundStart(value));
-      await refresh();
+      const started = await props.source.fundStart(value);
+      // The panel may have closed while the node was starting the deposit.
+      if (disposed) return;
+      // A status read that began before this start must not overwrite it. refresh()
+      // only bumps `latest` when it actually reads, and it does not read while the node is not ready.
+      latest++;
+      setFund(started);
+      holdStarted = true;
+      await refresh(true);
     } catch (e) {
-      setError(isMoneyNotReady(e) ? null : { message: String(e), summary: 'obFundStartFailed' });
+      // The read still in flight must not clear this failure.
+      latest++;
+      if (disposed) return;
+      if (!isMoneyNotReady(e)) setStartError({ message: String(e), summary: 'obFundStartFailed' });
     } finally {
-      setBusy(false);
+      if (!disposed) setBusy(false);
     }
   };
 
   // The interval above stops reading once the node reports funded, so a status
-  // failure in that state must not promise an automatic retry.
+  // failure in that state must not promise an automatic retry. A null still
+  // being confirmed after the start is the exception: that read does retry.
   const errorSummary = () => {
     const summary = error()?.summary;
     if (!summary) return undefined;
-    return t(summary === 'obFundStateFailed' && fund()?.funded ? 'obFundStateStopped' : summary);
+    return t(summary === 'obFundStateFailed' && fund()?.funded && !confirmHeld ? 'obFundStateStopped' : summary);
   };
 
   const depositAddress = () => fund()?.funding_address ?? address()?.address ?? null;
@@ -873,7 +932,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
               <div class="panel funded">
                 <h2>{t('obFundingSeen')}</h2>
                 <p class="hint">
-                  {t('obObservedAmount', fmtAmount(received() * 1000))}{t('obFundingNext')}</p>
+                  {t('obObservedAmount', fmtAmount(received() * 1000, 'down'))}{t('obFundingNext')}</p>
                 <Show when={fund()!.funding_evidence}>
                   <p class="evidence">{t('obEvidence')}{' '}{fund()!.funding_evidence}</p>
                 </Show>
@@ -915,7 +974,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                   <div class="fill" style={{ width: `${progress()}%` }} />
                 </div>
                 <div class="numbers">
-                  <strong>{fmtAmount(received() * 1000)}</strong>{t('obOfAmountSeen', fmtAmount(required() * 1000))}
+                  <strong>{fmtAmount(received() * 1000, 'down')}</strong>{t('obOfAmountSeen', fmtAmount(required() * 1000, 'up'))}
                 </div>
               </div>
               <p class="hint">
@@ -926,6 +985,9 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       </Show>
 
 
+      <Show when={startError()}>
+        <SoftError message={startError()!.message} summary={t('obFundStartFailed')} />
+      </Show>
       <Show when={error()}>
         <SoftError message={error()!.message} summary={errorSummary()} />
       </Show>

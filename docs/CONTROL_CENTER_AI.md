@@ -106,7 +106,7 @@ The sealed window uses the same words as the AI track: **From your node** for li
 
 ## Actions never spend
 
-A request like "draft a 2-sat message to Maya", "pay Josh 500 sats" or "request 2000 sats from Josh" produces a draft card. **Open in Maya's composer** fills that peer's composer once, in Message, Pay (direct, amount only) or Request mode. From there slice B takes over:
+A request like "draft a 2-sat message to Robin", "pay Kim 500 sats" or "request 2000 sats from Kim" produces a draft card. **Open in Robin's composer** fills that peer's composer once, in Message, Pay (direct, amount only) or Request mode. From there slice B takes over:
 
 - The composer shows the cost.
 - The spend window still needs the owner's approval.
@@ -135,7 +135,7 @@ Payment and invoice drafts accept whole positive sats only (including correctly 
 | `22-ai-node-card` | Node card |
 | `23-ai-balance-card` | Balance card |
 | `24-ai-stale-prices` | A stale answer: the node marked the price table stale |
-| `25`, `26` | A draft, and that draft filled into Maya's composer behind the spend approval |
+| `25`, `26` | A draft, and that draft filled into Robin's composer behind the spend approval |
 | `27`–`29` | Preview: counts only, rounded, exact bytes |
 | `30-ai-remote-answer` | The sample model's answer |
 | `31-ai-phone` | Phone width |

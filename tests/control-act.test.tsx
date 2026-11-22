@@ -33,7 +33,7 @@ const openView = (armedBy: string | null = 'ab12', grantedOp = 'cd34') =>
 
 function stubHost(overrides: Record<string, Reply> = {}) {
   resetContactsForTests();
-  setPetname(A, 'Maya');
+  setPetname(A, 'Robin');
   const calls: Call[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   const spend = { v: view('locked') };
@@ -45,7 +45,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
     }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null }],
     rooms_list: () => [{ id: ROOM, name: 'Mexico build', created_by: OWN, created_at: null }],
     room_members: () => [OWN, A],
     room_quote: () => ({ room_id: ROOM, members: [{ node_id: A, msat: 2000, advertised: true, connected: true }], total_msat: 2000, unreachable: [], estimate: false }),
@@ -156,7 +156,7 @@ describe('acting from the track', () => {
     if (/nothing paid/.test(unsentReason())) expect(host.used('message_send')).toHaveLength(0);
   };
   const pressWaiting = async (host: ReturnType<typeof stubHost>) => {
-    type('[data-composer] textarea', 'gm Maya');
+    type('[data-composer] textarea', 'gm Robin');
     await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
     await waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
@@ -243,16 +243,16 @@ describe('acting from the track', () => {
   it('Approve & send: not approved (the request is refused) → Unsent "not sent, nothing paid", and nothing was dispatched', async () => {
     const host = stubHost({ spend_request: () => { throw { code: 'spend_refused', message: 'This pairing cannot ask.' }; } });
     await openShell();
-    type('[data-composer] textarea', 'gm Maya');
+    type('[data-composer] textarea', 'gm Robin');
     await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
     await waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved.'));
-    expect(text('[data-unsent] .bubble')).toBe('gm Maya');
+    expect(text('[data-unsent] .bubble')).toBe('gm Robin');
     expect(host.used('message_send')).toHaveLength(0);
     expect($('[data-sending]')).toBeNull();
     // Put back in the box restores the words for another try.
     $<HTMLButtonElement>('[data-unsent-restore]')!.click();
-    await waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya'));
+    await waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Robin'));
   });
 
   it.each([['another chat', `room:${ROOM}`], ['Discover (the composer unmounts)', 'discover']])('Approve & send: leaving to %s before the grant ends it unsent; a later grant sends nothing', async (_where, key) => {
@@ -263,7 +263,7 @@ describe('acting from the track', () => {
     await waitFor(() => expect($(`[data-track="${key}"]`)?.getAttribute('aria-current')).toBe('true'));
     host.spend.v = openView();
     $<HTMLElement>(`[data-track="peer:${A}"]`)!.click();
-    await waitFor(() => expect(text('[data-unsent] .bubble')).toBe('gm Maya'));
+    await waitFor(() => expect(text('[data-unsent] .bubble')).toBe('gm Robin'));
     expect(unsentReason()).toMatch(/^Not sent · nothing paid · You left/);
     await vi.advanceTimersByTimeAsync(2500);
     expect(host.used('message_send')).toHaveLength(0);
@@ -278,7 +278,7 @@ describe('acting from the track', () => {
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('second thought');
     host.spend.v = openView();
     await waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
-    expect(host.used('message_send')[0].args).toMatchObject({ plaintext: 'gm Maya', max_msat: 2000 });
+    expect(host.used('message_send')[0].args).toMatchObject({ plaintext: 'gm Robin', max_msat: 2000 });
     // The newer draft is untouched and was never sent.
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('second thought');
     nothingPaidIsTrue(host);
@@ -311,10 +311,10 @@ describe('acting from the track', () => {
   it('Approve & send: an approval whose result names no request and no grant cannot be tied to this message: the plain flow at once, nothing sent', async () => {
     const host = stubHost({ spend_request: () => ({ ...view('open', { basis: 'app_lock', open_until_ms: Date.now() + WINDOW }), request_id: null, granted_op: null }) });
     await openShell();
-    type('[data-composer] textarea', 'gm Maya');
+    type('[data-composer] textarea', 'gm Robin');
     await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
-    await waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya'));
+    await waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Robin'));
     expect($('[data-sending]')).toBeNull();
     expect(text('[data-composer-note]')).toBe('Approved. Press Send to send it.');
     await vi.advanceTimersByTimeAsync(300);
@@ -334,7 +334,7 @@ describe('acting from the track', () => {
   it('#227: an approval that armed the window itself (its result names the grant) sends once while that grant is open', async () => {
     const host = stubHost({ spend_request: () => { host.spend.v = openView(null, 'cd34'); return { ...host.spend.v, request_id: null }; } });
     await openShell();
-    type('[data-composer] textarea', 'gm Maya');
+    type('[data-composer] textarea', 'gm Robin');
     await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
     await waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
@@ -534,19 +534,19 @@ describe('acting from the track', () => {
       spend_request: () => legacy('pending', { pending: { op_id: 'ab12', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op ab12', owner_can_grant: true } }),
     });
     await openShell();
-    type('[data-composer] textarea', 'gm Maya');
+    type('[data-composer] textarea', 'gm Robin');
     await waitFor(() => expect(text('[data-send]')).toBe('Send'));
     submit();
     await waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
     expect($('[data-sending]')).toBeNull();
-    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Robin');
   });
 
   it('Approve & send r1 #2: its own approval failing while spending opened another way never sends it', async () => {
     let refuse!: () => void;
     const host = stubHost({ spend_request: () => new Promise((_resolve, reject) => { refuse = () => reject({ code: 'spend_refused', message: 'Refused.' }); }) });
     await openShell();
-    type('[data-composer] textarea', 'gm Maya');
+    type('[data-composer] textarea', 'gm Robin');
     await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
     await waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
@@ -604,7 +604,7 @@ describe('acting from the track', () => {
     });
     await openShell();
     setLanguagePref(lang);
-    type('[data-composer] textarea', 'gm Maya');
+    type('[data-composer] textarea', 'gm Robin');
     submit();
     await waitFor(() => expect($('[data-approval="pending"]')).not.toBeNull());
     const shown = visible('[data-approval="pending"]');
@@ -636,7 +636,7 @@ describe('acting from the track', () => {
   it('asks the owner once (Approve & send), then sends that message once the grant lands, and shows the receipt and delivery', async () => {
     const host = stubHost();
     await openShell();
-    type('[data-composer] textarea', 'gm Maya');
+    type('[data-composer] textarea', 'gm Robin');
 
     // Locked: the button is the approval, and this press also sends the message once it is approved.
     await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
@@ -660,7 +660,7 @@ describe('acting from the track', () => {
     expect($('[data-approval="pending"]')).not.toBeNull();
     expect(host.used('message_send')).toHaveLength(0);
     // The words wait in their bubble; the box is free.
-    expect(text('[data-sending="waiting"] .bubble')).toBe('gm Maya');
+    expect(text('[data-sending="waiting"] .bubble')).toBe('gm Robin');
     expect(text('[data-sending="waiting"] [data-sending-cap]')).toContain('Sends when approved');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
 
@@ -670,8 +670,12 @@ describe('acting from the track', () => {
     expect(text('[data-spend="open"]')).toContain('ten minutes per approval');
 
     await waitFor(() => expect(host.used('message_send')).toHaveLength(1));
-    expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
-    await waitFor(() => expect(text('[data-message="sent-1"] .stamp .money-text')).toBe('paid 2 sats · network fee not reported'));
+    expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Robin', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
+    // The cost is not printed under the message; one tap shows it.
+    expect($('[data-message="sent-1"] .stamp .money-text')).toBeNull();
+    await waitFor(() => expect($('[data-message="sent-1"] .sats-meta')?.getAttribute('title')).toBe('paid 2 sats · network fee amount unknown'));
+    $<HTMLButtonElement>('[data-message="sent-1"] .sats-meta')!.click();
+    await waitFor(() => expect(text('[data-message="sent-1"] .stamp .money-text')).toBe('paid 2 sats · network fee amount unknown'));
     expect(text('[data-message="sent-1"] .stamp')).not.toContain('ceiling');
     expect(text('[data-message="sent-1"] [data-delivery]').trim()).toBe('Sent');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
@@ -885,10 +889,10 @@ describe('acting from the track', () => {
     type('[data-composer] textarea', 'after the restart');
     submit();
     await waitFor(() => expect($('[data-readmission-quote]')).not.toBeNull());
-    expect(text('[data-readmission-quote]')).toContain('Maya asks for admission again, 1 sat. Nothing was paid.');
+    expect(text('[data-readmission-quote]')).toContain('Robin asks for admission again, 1 sat. Nothing was paid.');
     expect(text('[data-readmission-quote]')).toContain('13 sats in all');
     expect($('[data-cost-msat]')!.getAttribute('data-cost-msat')).toBe('13000');
-    expect(text('[data-cost]')).toContain('Maya asks for admission again: 1 sat, then 2 sats for this message');
+    expect(text('[data-cost]')).toContain('Robin asks for admission again: 1 sat, then 2 sats for this message');
     expect($('[data-artifact="failed"]'), 'an ask, not a failure').toBeNull();
     expect($('[data-door="out-refused"]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value, 'the draft stays').toBe('after the restart');
@@ -896,8 +900,14 @@ describe('acting from the track', () => {
     submit();
     await waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('message_send')[1].args!.max_msat, 'the quoted all-in total').toBe(13_000);
+    // Quiet chat: no amount under the sent bubble until the sender opens its cost.
+    await waitFor(() => expect($('[data-message-cost]')).not.toBeNull());
+    expect($('[data-readmission-paid]'), 'no admission amount printed under a sent bubble').toBeNull();
+    $<HTMLButtonElement>('[data-message-cost]')!.click();
     await waitFor(() => expect($('[data-readmission-paid]')).not.toBeNull());
     expect(text('[data-readmission-paid]')).toContain('incl. admission again 1 sat');
+    $<HTMLButtonElement>('[data-message-cost]')!.click();
+    await waitFor(() => expect($('[data-readmission-paid]')).toBeNull());
     expect($('[data-readmission-quote]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value, 'draft clears only after the paid send').toBe('');
   });
@@ -995,6 +1005,24 @@ describe('acting from the track', () => {
     expect(host.used('invoice_create')[0].args).toEqual({ amount_msat: 21_000, note: 'coffee', expiry_secs: null });
     expect(host.used('spend_request')).toHaveLength(0);
     expect($('[data-artifact="invoice"] svg.qr')).not.toBeNull();
+  });
+
+  it('a chat invoice for 1.5 sats reads about 1 sat received, exact one tap away, never about 2', async () => {
+    const host = stubHost();
+    await openShell();
+    $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
+    type('[data-request-amount]', '1.5');
+    await waitFor(() => expect(text('[data-send]')).toBe('Create invoice'));
+    submit();
+    await waitFor(() => expect($('[data-artifact="invoice"]')).not.toBeNull());
+    expect((host.used('invoice_create')[0].args as { amount_msat: number }).amount_msat).toBe(1500);
+    const card = $('[data-artifact="invoice"]')!;
+    expect(card.querySelector('.sats.big summary')?.textContent).toMatch(/about 1 sat/);
+    expect(card.querySelector('[data-exact-amount-value]')?.textContent).toMatch(/1\.5/);
+    const ready = $('[data-request-created]')!;
+    expect(ready).not.toBeNull();
+    expect(ready.querySelector('.basis summary')?.textContent).toMatch(/about 1 sat/);
+    expect(ready.textContent).not.toMatch(/about 2/);
   });
 
   it.each(['invoice', 'keysend'])('explains a refused app %s and keeps its draft', async (method) => {
@@ -1300,7 +1328,8 @@ describe('acting from the track', () => {
     submit();
     await waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 8000, first_contact_msat: null }));
     await waitFor(() => expect(text('[data-message="file-1"] .file-name')).toBe('hi.txt'));
-    expect(text('[data-message="file-1"] .sats-meta')).toBe('paid 4.375 sats');
+    $<HTMLButtonElement>('[data-message="file-1"] .sats-meta')!.click();
+    expect(text('[data-message="file-1"] .sats-meta')).toBe('paid about 5 sats · exactly 4.375 sats');
     expect($('[data-message="file-1"] .bubble')!.classList.contains('file')).toBe(true);
     expect($('[data-message="file-1"] [data-delivery]')?.getAttribute('data-delivery')).toBe('sent');
   });
@@ -1336,13 +1365,13 @@ describe('acting from the track', () => {
 });
 
 describe('sample source actions', () => {
-  const MAYA = 'a'.repeat(64);
+  const ROBIN = 'a'.repeat(64);
   const GAMMA = 'd'.repeat(64);
   const OFFLINE = 'c'.repeat(64);
 
   it('refuses to spend until the sample owner grants, then opens a ten-minute window', async () => {
     const s = sampleSource({ firstLiveMs: 1e9 });
-    await expect(s.send(MAYA, false, 'x', 5000)).rejects.toMatchObject({ code: 'spend_locked' });
+    await expect(s.send(ROBIN, false, 'x', 5000)).rejects.toMatchObject({ code: 'spend_locked' });
     expect((await s.spendRequest()).state).toBe('pending');
     expect((await s.spendStatus()).state).toBe('pending');
     const open = await s.spendStatus();
@@ -1351,7 +1380,7 @@ describe('sample source actions', () => {
     expect((await s.spendLock()).state).toBe('locked');
   });
 
-  it('delivers to Maya, rejects Gamma for underpaying, refuses an offline peer and a blocked room', async () => {
+  it('delivers to Robin, rejects Gamma for underpaying, refuses an offline peer and a blocked room', async () => {
     vi.useFakeTimers();
     try {
       const s = sampleSource({ firstLiveMs: 1e9 });
@@ -1361,12 +1390,12 @@ describe('sample source actions', () => {
       await s.spendStatus();
       await s.spendStatus();
 
-      const toMaya = await s.send(MAYA, false, 'gm', 10000);
-      expect(toMaya.amount_msat).toBe(2000);
+      const toRobin = await s.send(ROBIN, false, 'gm', 10000);
+      expect(toRobin.amount_msat).toBe(2000);
       const toGamma = await s.send(GAMMA, false, 'gm', 10000);
       expect(toGamma.amount_msat).toBe(1000);
       vi.advanceTimersByTime(1500);
-      expect(events).toContainEqual({ type: 'delivery', message_id: toMaya.message_id, status: 'delivered', reason: null });
+      expect(events).toContainEqual({ type: 'delivery', message_id: toRobin.message_id, status: 'delivered', reason: null });
       expect(events).toContainEqual(expect.objectContaining({ type: 'delivery', message_id: toGamma.message_id, status: 'rejected' }));
 
       await expect(s.send(OFFLINE, false, 'gm', 10000)).rejects.toMatchObject({ code: 'node', message: expect.stringContaining('offline') });

@@ -179,7 +179,7 @@ describe('stale snapshots, honest states, nothing vanishes', () => {
     list = ops([op({ op_id: 'op-u', state: 'settled', paid_msat: 2250 })]);
     await go(`peer:${B}`);
     await go(`peer:${A}`);
-    await vi.waitFor(() => expect($('[data-restored-state]')!.textContent).toBe('This app’s record: paid 2.25 sats, finished. Delivery is not confirmed here.'));
+    await vi.waitFor(() => expect($('[data-restored-state]')!.textContent).toBe('This app’s record: paid about 3 sats, finished. Delivery is not confirmed here.'));
     expect($('[data-artifact="restored"]')!.textContent).not.toMatch(/\bsent,|delivered\./);
   });
 
@@ -196,8 +196,8 @@ describe('stale snapshots, honest states, nothing vanishes', () => {
     const states = [...mount.querySelectorAll('[data-artifact="restored"]')].map((c) => c.getAttribute('data-op-state')).sort();
     expect(states).toEqual(['paid', 'paid_undelivered']);
     const texts = [...mount.querySelectorAll('[data-restored-state]')].map((c) => c.textContent);
-    expect(texts).toContain('This app’s record: paid 2.25 sats; delivery not confirmed yet. Check pending result.');
-    expect(texts).toContain('This app’s record: paid 2.25 sats, not delivered. Check pending result to retry delivery or stop retrying.');
+    expect(texts).toContain('This app’s record: paid about 3 sats; delivery not confirmed yet. Check pending result.');
+    expect(texts).toContain('This app’s record: paid about 3 sats, not delivered. Check pending result to retry delivery or stop retrying.');
   });
 
   it('a message held behind a paid-not-delivered one says so (not "result not known")', async () => {
@@ -505,7 +505,7 @@ describe('the host op list (H1 op_list, read only)', () => {
     const card = $('[data-artifact="restored"]')!;
     expect(card.getAttribute('data-op-state')).toBe('unknown');
     expect(card.textContent).toContain('Message sent before this app restarted');
-    expect(card.textContent).toContain('Up to 9.75 sats');
+    expect(card.textContent).toContain('Up to about 10 sats');
     expect($('[data-restored-state]')!.textContent).toBe('This app’s record: the result is not known yet. Check pending result before sending it again.');
     expect(card.querySelector('button')).toBeNull();
     // All peers: the host's pending fence is global.
@@ -523,7 +523,7 @@ describe('the host op list (H1 op_list, read only)', () => {
     await go(`peer:${A}`);
     await vi.waitFor(() => expect($('[data-artifact="restored"]')!.getAttribute('data-op-state')).toBe('paid_undelivered'));
     expect(mount.querySelectorAll('[data-artifact="restored"]')).toHaveLength(1);
-    expect($('[data-restored-state]')!.textContent).toBe('This app’s record: paid 2.25 sats, not delivered. Check pending result to retry delivery or stop retrying.');
+    expect($('[data-restored-state]')!.textContent).toBe('This app’s record: paid about 3 sats, not delivered. Check pending result to retry delivery or stop retrying.');
   });
 
   it('a send in flight is never restored beside its own bubble', async () => {

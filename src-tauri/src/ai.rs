@@ -715,7 +715,7 @@ pub struct Disclosures {
 
 fn new_id() -> Option<String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).ok()?;
+    getrandom::fill(&mut bytes).ok()?;
     Some(hex::encode(bytes))
 }
 

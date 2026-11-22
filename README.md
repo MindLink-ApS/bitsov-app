@@ -35,7 +35,7 @@ There are no production signing, notarization or app-store guarantees here.
 
 ## Build from a clean checkout
 
-Install Git and Node.js 22 with npm. Clone this repository using its HTTPS URL
+Install Git and Node.js 22.12 or newer (see `.nvmrc`) with npm. Clone this repository using its HTTPS URL
 and run the following from its root:
 
 ```sh
@@ -125,3 +125,4 @@ it is not an encrypted app-to-node connection.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to build, test and propose changes.
 Report security concerns privately as described in [SECURITY.md](SECURITY.md).
+Taking part in this project means following the [Code of Conduct](CODE_OF_CONDUCT.md).

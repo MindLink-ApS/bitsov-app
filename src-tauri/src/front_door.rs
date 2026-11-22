@@ -507,7 +507,7 @@ mod tests {
                 },
                 profile: FrontDoorProfile {
                     kind: ProfileKind::Person,
-                    display_name: "Maya".into(),
+                    display_name: "Robin".into(),
                     tagline: "Build in the open".into(),
                     about: "Pilot peer.".into(),
                     avatar: None,
@@ -528,7 +528,7 @@ mod tests {
         let card = sample(&key, now);
         let view = card.view(now + 10).unwrap();
         assert!(view.fresh);
-        assert_eq!(view.profile.display_name, "Maya");
+        assert_eq!(view.profile.display_name, "Robin");
         let parsed = parse(&view.link).unwrap();
         assert_eq!(parsed.seq, 1);
         parsed.view(now + 10).unwrap();
@@ -558,6 +558,6 @@ mod tests {
         let card = sample(&key, 1_700_000_000);
         let json = serde_json::to_string(&card).unwrap();
         let view = read(&json, 1_700_000_010).unwrap();
-        assert_eq!(view.profile.display_name, "Maya");
+        assert_eq!(view.profile.display_name, "Robin");
     }
 }
