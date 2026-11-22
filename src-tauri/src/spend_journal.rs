@@ -279,7 +279,7 @@ pub fn unknown(detail: impl std::fmt::Display) -> ActionError {
 /// Read the atomic journal snapshot for accounting evidence. Spending and
 /// reconciliation still require the Journal's exclusive OS lock.
 pub fn read_pending(dir: &Path) -> Result<Option<Pending>, ActionError> {
-    match read_file(&dir.join("spend-pending.json")) {
+    match read_file(dir, &dir.join("spend-pending.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(unknown),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(&dir.join("spend-pending.json")) => Ok(None),
         Err(e) => Err(unknown(e)),
@@ -491,7 +491,7 @@ impl Journal {
     }
 
     pub fn operation_record(&self, id: &str) -> Result<Option<OperationRecord>, ActionError> {
-        read_operation(&self.operation_path(id)?, Some(id))
+        read_operation(&self.dir, &self.operation_path(id)?, Some(id))
     }
 
     fn call_parent(&self, node_id: &str, peer: &str, call: &str) -> Result<Option<String>, ActionError> {
@@ -529,10 +529,10 @@ impl Journal {
         }
         let filename = format!("{index_id}.json");
         let path = self.dir.join("call-index").join(&filename);
-        if !present(&path)? && !present(&self.dir.join("call-index-unresolved").join(&filename))? {
+        if !present(&self.dir, &path)? && !present(&self.dir, &self.dir.join("call-index-unresolved").join(&filename))? {
             return Err(damaged_record());
         }
-        let index = read_file(&path).ok().and_then(|b| serde_json::from_slice::<CallIndex>(&b).ok());
+        let index = read_file(&self.dir, &path).ok().and_then(|b| serde_json::from_slice::<CallIndex>(&b).ok());
         if let Some(index) = index {
             let record = self.operation_record(&index.op_id).ok().flatten().or_else(|| {
                 // Reading the raw slot avoids automatic repair of damaged files.
@@ -579,8 +579,8 @@ impl Journal {
     fn call_operations_once(&self, node_id: &str, peer: Option<&str>, call: Option<&str>) -> Result<Vec<OperationRecord>, ActionError> {
         // An H1 index may outlive its damaged offer. Its hashed key cannot tell
         // us the peer, so preserve the evidence and fail closed for calls only.
-        for entry in read_entries(&self.dir.join("call-index-unresolved"))? {
-            let bytes = read_file(&self.dir.join("call-index").join(entry.file_name())).map_err(|_| damaged_record())?;
+        for entry in read_entries(&self.dir, &self.dir.join("call-index-unresolved"))? {
+            let bytes = read_file(&self.dir, &self.dir.join("call-index").join(entry.file_name())).map_err(|_| damaged_record())?;
             let index: CallIndex = serde_json::from_slice(&bytes).map_err(|_| damaged_record())?;
             let record = crate::act::with_op(Active(Some(&index.op_id)),
                 self.operation_record(&index.op_id).and_then(|r| r.ok_or_else(damaged_record)))?;
@@ -593,16 +593,16 @@ impl Journal {
         let root = call_membership_root(&self.dir, node_id);
         let directories = match peer {
             Some(peer) => vec![root.join(blake3::hash(peer.as_bytes()).to_hex().as_str())],
-            None => read_entries(&root)?.into_iter().map(|e| e.path()).collect(),
+            None => read_entries(&self.dir, &root)?.into_iter().map(|e| e.path()).collect(),
         };
         let mut records = Vec::new();
         for dir in directories {
             let calls = match call {
                 Some(call) => vec![dir.join(blake3::hash(call.as_bytes()).to_hex().as_str())],
-                None => read_entries(&dir)?.into_iter().map(|e| e.path()).collect(),
+                None => read_entries(&self.dir, &dir)?.into_iter().map(|e| e.path()).collect(),
             };
             for directory in calls {
-                for entry in read_entries(&directory)? {
+                for entry in read_entries(&self.dir, &directory)? {
                     let id = entry.file_name().to_string_lossy().into_owned();
                     let record = crate::act::with_op(Active(Some(&id)), verify_membership(&entry.path())
                         .and_then(|()| self.operation_record(&id)).and_then(|r| r.ok_or_else(damaged_record)))?;
@@ -769,34 +769,18 @@ fn absent(path: &Path) -> bool {
     crate::pairing::key::nothing_at(path)
 }
 
-/// Files that sit directly in the journal folder.
+/// Folders from the journal folder `root` down to `path`'s own folder, in that
+/// order. `None` when `path` is not inside `root`, or a step is not a plain
+/// name: nothing may be read through it. The journal folder is the one the
+/// caller already holds, never a name guessed from `path`.
 #[cfg(any(windows, test))]
-const JOURNAL_FILES: [&str; 5] = ["spend-pending.json", "spend-pending.next", "spend.lock", "history.lock", "call-index-v2"];
-/// Folders directly in the journal folder; everything else lives below one of them.
-#[cfg(any(windows, test))]
-const JOURNAL_DIRS: [&str; 5] = ["ops", "call-index", "call-index-unresolved", "call-index-acknowledged", "call-ops"];
-
-/// The folders from the journal folder down to `path`'s own folder, in that
-/// order. The journal folder is the parent of the nearest top-level journal
-/// folder within the deepest layout (call-ops/<node>/<peer>/<call>/<entry>),
-/// or `path`'s parent for a file that sits in the journal folder. `None`: not
-/// a journal path, so nothing may be read through it.
-#[cfg(any(windows, test))]
-fn journal_folders(path: &Path) -> Option<Vec<PathBuf>> {
-    let parts: Vec<std::path::Component> = path.components().collect();
-    let n = parts.len();
-    let name = path.file_name()?.to_str()?;
-    let root_len = if JOURNAL_FILES.contains(&name) {
-        n - 1
-    } else {
-        (n.saturating_sub(5)..n).rev().find(|&i| matches!(parts[i],
-            std::path::Component::Normal(part) if JOURNAL_DIRS.iter().any(|dir| part == *dir)))?
-    };
-    if root_len == 0 { return None; }
-    let mut folder: PathBuf = parts[..root_len].iter().collect();
+fn folders_from_root(root: &Path, path: &Path) -> Option<Vec<PathBuf>> {
+    let relative = path.parent()?.strip_prefix(root).ok()?;
+    let mut folder = root.to_path_buf();
     let mut folders = vec![folder.clone()];
-    for part in &parts[root_len..n - 1] {
-        folder.push(part);
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else { return None; };
+        folder.push(name);
         folders.push(folder.clone());
     }
     Some(folders)
@@ -807,8 +791,8 @@ fn journal_folders(path: &Path) -> Option<Vec<PathBuf>> {
 /// a missing record is never read through a redirected folder. Below a folder
 /// that is really missing there is nothing to read.
 #[cfg(windows)]
-fn verify_folders(path: &Path) -> Result<(), ActionError> {
-    for folder in journal_folders(path).ok_or_else(storage_refused)? {
+fn verify_folders(root: &Path, path: &Path) -> Result<(), ActionError> {
+    for folder in folders_from_root(root, path).ok_or_else(storage_refused)? {
         if absent(&folder) { return Ok(()); }
         crate::private_fs::verify_dir(&folder).map_err(|_| storage_refused())?;
     }
@@ -832,34 +816,35 @@ fn damaged_record_error() -> ActionError {
 const MAX_RECORD_BYTES: u64 = 1 << 20;
 
 #[cfg(not(windows))]
-fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
+fn read_file(_dir: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
     std::fs::read(path)
 }
 
 /// Windows: a bounded read through a verified private handle. A missing file
-/// is `NotFound`; anything else that does not verify is an error.
+/// is `NotFound`; a folder on the way that does not verify is `PermissionDenied`,
+/// never a silent miss.
 #[cfg(windows)]
-fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
-    verify_folders(path).map_err(|_| std::io::Error::from(std::io::ErrorKind::PermissionDenied))?;
+fn read_file(dir: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
+    verify_folders(dir, path).map_err(|_| std::io::Error::from(std::io::ErrorKind::PermissionDenied))?;
     crate::private_fs::read(path, MAX_RECORD_BYTES).map(|mut bytes| std::mem::take(&mut *bytes))
 }
 
 #[cfg(not(windows))]
-fn present(path: &Path) -> Result<bool, ActionError> {
+fn present(_dir: &Path, path: &Path) -> Result<bool, ActionError> {
     Ok(path.exists())
 }
 
 /// Windows: an object at `path` counts only after it verifies; otherwise refuse.
 #[cfg(windows)]
-fn present(path: &Path) -> Result<bool, ActionError> {
-    verify_folders(path)?;
+fn present(dir: &Path, path: &Path) -> Result<bool, ActionError> {
+    verify_folders(dir, path)?;
     if absent(path) { return Ok(false); }
     crate::private_fs::verify_file(path).map(|()| true).map_err(|_| storage_refused())
 }
 
 #[cfg(not(windows))]
-fn history_marked(_dir: &Path, marker: &Path) -> Result<bool, ActionError> {
-    present(marker)
+fn history_marked(dir: &Path, marker: &Path) -> Result<bool, ActionError> {
+    present(dir, marker)
 }
 
 #[cfg(windows)]
@@ -1235,8 +1220,8 @@ mod durable {
     }
 }
 
-fn read_operation(path: &Path, expected_id: Option<&str>) -> Result<Option<OperationRecord>, ActionError> {
-    match read_file(path) {
+fn read_operation(dir: &Path, path: &Path, expected_id: Option<&str>) -> Result<Option<OperationRecord>, ActionError> {
+    match read_file(dir, path) {
         Ok(bytes) => {
             let record: OperationRecord = serde_json::from_slice(&bytes).map_err(|_| damaged_record())?;
             if expected_id.is_some_and(|id| id != record.op_id) { return Err(damaged_record()); }
@@ -1262,7 +1247,7 @@ fn history_entries(dir: &Path) -> Result<impl Iterator<Item = std::io::Result<st
 #[cfg(windows)]
 fn history_entries(dir: &Path) -> Result<impl Iterator<Item = std::io::Result<std::fs::DirEntry>>, ActionError> {
     let ops = dir.join("ops");
-    verify_folders(&ops)?;
+    verify_folders(dir, &ops)?;
     if absent(&ops) { return Ok(None.into_iter().flatten()); }
     crate::private_fs::verify_dir(&ops).map_err(|_| storage_refused())?;
     std::fs::read_dir(ops).map(|entries| Some(entries).into_iter().flatten()).map_err(unknown)
@@ -1271,24 +1256,24 @@ fn history_entries(dir: &Path) -> Result<impl Iterator<Item = std::io::Result<st
 fn unresolved_calls(dir: &Path, node_id: &str) -> Result<Vec<UnresolvedCall>, ActionError> {
     let mut names = std::collections::BTreeSet::new();
     for folder in ["call-index", "call-index-unresolved"] {
-        for entry in read_entries(&dir.join(folder))? { names.insert(entry.file_name()); }
+        for entry in read_entries(dir, &dir.join(folder))? { names.insert(entry.file_name()); }
     }
     let mut rows = Vec::new();
     for name in names {
         let Some(id) = name.to_str().and_then(|n| n.strip_suffix(".json")) else { continue };
         if id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) { continue; }
         let path = dir.join("call-index").join(&name);
-        let record = read_file(&path).ok().and_then(|b| serde_json::from_slice::<CallIndex>(&b).ok())
+        let record = read_file(dir, &path).ok().and_then(|b| serde_json::from_slice::<CallIndex>(&b).ok())
             .filter(|i| i.op_id.len() == 36 && i.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-'))
-            .and_then(|i| read_operation(&dir.join("ops").join(format!("{}.json", i.op_id)), Some(&i.op_id)).ok().flatten()
+            .and_then(|i| read_operation(dir, &dir.join("ops").join(format!("{}.json", i.op_id)), Some(&i.op_id)).ok().flatten()
                 .filter(|r| r.created_ms == i.created_ms));
         let valid = record.as_ref().is_some_and(|r| matches!(r.kind.as_str(), "call_offer" | "call_recovery")
             && r.call_id.as_deref().is_some_and(|c| call_index_path(dir, &r.node_id, &r.peer, c) == path));
-        if valid && !present(&dir.join("call-index-unresolved").join(&name))? { continue; }
+        if valid && !present(dir, &dir.join("call-index-unresolved").join(&name))? { continue; }
         if valid && record.as_ref().is_some_and(|r| r.node_id != node_id) { continue; }
         let hangup_cap_msat = record.as_ref().filter(|r| valid && r.node_id == node_id)
             .map(|r| r.hangup_cap_msat.unwrap_or(r.cap_msat));
-        rows.push(UnresolvedCall { index_id: id.into(), hangup_cap_msat, acknowledged: present(&dir.join("call-index-acknowledged")
+        rows.push(UnresolvedCall { index_id: id.into(), hangup_cap_msat, acknowledged: present(dir, &dir.join("call-index-acknowledged")
             .join(blake3::hash(node_id.as_bytes()).to_hex().as_str()).join(&name))? });
     }
     Ok(rows)
@@ -1302,7 +1287,7 @@ pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usi
     for entry in history_entries(dir)? {
         let path = match entry { Ok(e) => e.path(), Err(_) => { skipped += 1; continue; } };
         if path.extension().is_none_or(|e| e != "json") { continue; }
-        let record = match read_operation(&path, path.file_stem().and_then(|s| s.to_str())) {
+        let record = match read_operation(dir, &path, path.file_stem().and_then(|s| s.to_str())) {
             Ok(Some(record)) => record,
             _ => { skipped += 1; continue; }
         };
@@ -1318,7 +1303,7 @@ pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usi
 /// waiting on a dispatch. The snapshot grants no payment authority.
 pub fn read_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) -> Result<Option<OperationRecord>, ActionError> {
     let path = call_index_path(dir, node_id, peer, call);
-    let entry: CallIndex = match read_file(&path) {
+    let entry: CallIndex = match read_file(dir, &path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| damaged_record())?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(&path) => return Ok(None),
         Err(_) => return Err(damaged_record()),
@@ -1326,7 +1311,7 @@ pub fn read_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) ->
     if entry.op_id.len() != 36 || !entry.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
         return Err(damaged_record());
     }
-    let record = read_operation(&dir.join("ops").join(format!("{}.json", entry.op_id)), Some(&entry.op_id))?
+    let record = read_operation(dir, &dir.join("ops").join(format!("{}.json", entry.op_id)), Some(&entry.op_id))?
         .ok_or_else(damaged_record)?;
     if record.node_id != node_id || record.peer != peer || record.call_id.as_deref() != Some(call)
         || !matches!(record.kind.as_str(), "call_offer" | "call_recovery") {
@@ -1346,11 +1331,11 @@ pub fn read_completed_call_admission(dir: &Path, node_id: &str, peer: &str, call
         .join(blake3::hash(peer.as_bytes()).to_hex().as_str())
         .join(blake3::hash(call.as_bytes()).to_hex().as_str());
     let mut completed = None::<OperationRecord>;
-    for entry in read_entries(&directory)? {
+    for entry in read_entries(dir, &directory)? {
         let id = entry.file_name().to_string_lossy().into_owned();
         if id.len() != 36 || !id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') { return Err(damaged_record()); }
         verify_membership(&entry.path())?;
-        let record = read_operation(&dir.join("ops").join(format!("{id}.json")), Some(&id))?
+        let record = read_operation(dir, &dir.join("ops").join(format!("{id}.json")), Some(&id))?
             .ok_or_else(damaged_record)?;
         if record.node_id != node_id || record.peer != peer || record.call_id.as_deref() != Some(call) {
             return Err(damaged_record());
@@ -1392,8 +1377,8 @@ pub fn hangup_blocks(record: &OperationRecord) -> bool {
 }
 
 #[cfg(not(windows))]
-fn read_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, ActionError> {
-    match std::fs::read_dir(dir) {
+fn read_entries(_dir: &Path, folder: &Path) -> Result<Vec<std::fs::DirEntry>, ActionError> {
+    match std::fs::read_dir(folder) {
         Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(unknown),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(unknown(e)),
@@ -1402,12 +1387,13 @@ fn read_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, ActionError> {
 
 /// Windows: only a verified private folder is listed. A link, reparse point
 /// or folder with another access list is refused, never treated as empty.
+/// Every folder from the journal folder down is checked first.
 #[cfg(windows)]
-fn read_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, ActionError> {
-    verify_folders(dir)?;
-    if absent(dir) { return Ok(Vec::new()); }
-    crate::private_fs::verify_dir(dir).map_err(|_| storage_refused())?;
-    std::fs::read_dir(dir).and_then(|entries| entries.collect::<Result<Vec<_>, _>>()).map_err(unknown)
+fn read_entries(dir: &Path, folder: &Path) -> Result<Vec<std::fs::DirEntry>, ActionError> {
+    verify_folders(dir, folder)?;
+    if absent(folder) { return Ok(Vec::new()); }
+    crate::private_fs::verify_dir(folder).map_err(|_| storage_refused())?;
+    std::fs::read_dir(folder).and_then(|entries| entries.collect::<Result<Vec<_>, _>>()).map_err(unknown)
 }
 
 fn call_membership_root(dir: &Path, node_id: &str) -> PathBuf {
@@ -1488,7 +1474,7 @@ fn slot_damaged() -> SlotDamaged {
 /// damaged is evidence of an admission that cannot be checked any more:
 /// refuse, and leave it in place for the owner's repair.
 fn index_slot(dir: &Path, path: &Path, record: &OperationRecord) -> Result<IndexSlot, SlotDamaged> {
-    let old: CallIndex = match read_file(path) {
+    let old: CallIndex = match read_file(dir, path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| slot_damaged())?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(path) => return Ok(IndexSlot::Absent),
         Err(_) => return Err(slot_damaged()),
@@ -1499,7 +1485,7 @@ fn index_slot(dir: &Path, path: &Path, record: &OperationRecord) -> Result<Index
         return Err(slot_damaged());
     }
     // read_operation has already logged its failure through damaged_record.
-    let mapped = read_operation(&dir.join("ops").join(format!("{}.json", old.op_id)), Some(&old.op_id))
+    let mapped = read_operation(dir, &dir.join("ops").join(format!("{}.json", old.op_id)), Some(&old.op_id))
         .map_err(|_| SlotDamaged)?
         .ok_or_else(slot_damaged)?;
     let same_slot = matches!(mapped.kind.as_str(), "call_offer" | "call_recovery")
@@ -1591,7 +1577,7 @@ fn initialize_history_once(dir: &Path) -> Result<(), ActionError> {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") { continue; }
-        let Ok(Some(record)) = read_operation(&path, path.file_stem().and_then(|s| s.to_str())) else { continue };
+        let Ok(Some(record)) = read_operation(dir, &path, path.file_stem().and_then(|s| s.to_str())) else { continue };
         write_call_membership(dir, &record)?;
         if !matches!(record.kind.as_str(), "call_offer" | "call_recovery") { continue; }
         let Some(call) = record.call_id.as_deref() else { continue };
@@ -1612,12 +1598,12 @@ fn initialize_history_once(dir: &Path) -> Result<(), ActionError> {
     }
     // Do not silently lose an indexed H1 admission when its record is damaged.
     // Keep unresolved references separate so normal call lookup stays scoped.
-    for entry in read_entries(&dir.join("call-index"))? {
+    for entry in read_entries(dir, &dir.join("call-index"))? {
         if entry.path().extension().is_none_or(|e| e != "json") { continue; }
-        let readable = read_file(&entry.path()).ok()
+        let readable = read_file(dir, &entry.path()).ok()
             .and_then(|bytes| serde_json::from_slice::<CallIndex>(&bytes).ok())
             .filter(|index| index.op_id.len() == 36 && index.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-'))
-            .and_then(|index| read_operation(&dir.join("ops").join(format!("{}.json", index.op_id)), Some(&index.op_id)).ok().flatten())
+            .and_then(|index| read_operation(dir, &dir.join("ops").join(format!("{}.json", index.op_id)), Some(&index.op_id)).ok().flatten())
             .filter(|record| matches!(record.kind.as_str(), "call_offer" | "call_recovery")
                 && record.call_id.as_deref().is_some_and(|call|
                     call_index_path(dir, &record.node_id, &record.peer, call).file_name() == Some(entry.file_name().as_os_str())));
@@ -1981,6 +1967,21 @@ mod windows_journal_tests {
         }
     }
 
+    // The journal folder itself is a junction onto a private empty folder.
+    // A missing record there is not an empty journal.
+    #[test]
+    fn a_redirected_journal_root_is_refused() {
+        if elevated() { return; }
+        let root = temp_root("redirected-journal-root");
+        // A new child, so the private access list is applied at creation.
+        let target = root.join("empty");
+        crate::private_fs::ensure_dir(&target).unwrap();
+        let dir = root.join("app-spend");
+        junction(&dir, &target);
+        assert!(read_pending(&dir).is_err(), "a redirected journal folder is not an empty slot");
+        assert!(list_operations(&dir, "node", None, 100).is_err(), "a redirected journal folder is not an empty history");
+    }
+
     // W02 / W14 on the history folder itself
     #[test]
     fn tampered_history_is_refused_without_writes() {
@@ -2026,30 +2027,45 @@ mod windows_journal_tests {
 
 #[cfg(test)]
 mod journal_folder_tests {
-    use super::journal_folders;
+    use super::folders_from_root;
     use std::path::{Path, PathBuf};
 
-    fn folders(path: &str) -> Option<Vec<PathBuf>> { journal_folders(Path::new(path)) }
+    fn folders(root: &Path, path: &Path) -> Option<Vec<PathBuf>> { folders_from_root(root, path) }
 
     #[test]
     fn every_folder_from_the_journal_folder_down_is_listed() {
-        let j = |parts: &[&str]| parts.iter().fold(PathBuf::from("/data/ops/app-spend"), |p, s| p.join(s));
-        assert_eq!(folders("/data/ops/app-spend/spend-pending.json"), Some(vec![j(&[])]));
-        assert_eq!(folders("/data/ops/app-spend/call-index-v2"), Some(vec![j(&[])]));
-        assert_eq!(folders("/data/ops/app-spend/ops"), Some(vec![j(&[])]));
-        assert_eq!(folders("/data/ops/app-spend/ops/a.json"), Some(vec![j(&[]), j(&["ops"])]));
-        assert_eq!(folders("/data/ops/app-spend/call-index-unresolved/x.json"), Some(vec![j(&[]), j(&["call-index-unresolved"])]));
-        assert_eq!(folders("/data/ops/app-spend/call-ops/n/p/c/op"),
+        let root = Path::new("/data/ops/app-spend");
+        let j = |parts: &[&str]| parts.iter().fold(root.to_path_buf(), |p, s| p.join(s));
+        assert_eq!(folders(root, &j(&["spend-pending.json"])), Some(vec![j(&[])]));
+        assert_eq!(folders(root, &j(&["call-index-v2"])), Some(vec![j(&[])]));
+        assert_eq!(folders(root, &j(&["ops"])), Some(vec![j(&[])]));
+        assert_eq!(folders(root, &j(&["ops", "a.json"])), Some(vec![j(&[]), j(&["ops"])]));
+        assert_eq!(folders(root, &j(&["call-index-unresolved", "x.json"])), Some(vec![j(&[]), j(&["call-index-unresolved"])]));
+        assert_eq!(folders(root, &j(&["call-ops", "n", "p", "c", "op"])),
             Some(vec![j(&[]), j(&["call-ops"]), j(&["call-ops", "n"]), j(&["call-ops", "n", "p"]), j(&["call-ops", "n", "p", "c"])]));
-        // An "ops" folder above the journal folder is never taken for the journal's own.
-        assert_eq!(folders("/data/ops/app-spend/spend.lock"), Some(vec![j(&[])]));
+        // A lock file sits in the journal folder itself.
+        assert_eq!(folders(root, &j(&["spend.lock"])), Some(vec![j(&[])]));
+        // A path deeper than the call layout is still checked from the journal folder.
+        assert_eq!(folders(root, &j(&["a", "b", "c", "d", "e", "f.json"])),
+            Some(vec![j(&[]), j(&["a"]), j(&["a", "b"]), j(&["a", "b", "c"]), j(&["a", "b", "c", "d"]), j(&["a", "b", "c", "d", "e"])]));
     }
 
     #[test]
-    fn a_path_that_is_not_a_journal_path_is_refused() {
-        assert_eq!(folders("/data/app-spend/other.json"), None);
-        assert_eq!(folders("/data/app-spend/a/b/c/d/e/f.json"), None);
-        assert_eq!(folders("ops"), None);
+    fn a_path_outside_the_journal_folder_is_refused() {
+        let root = Path::new("/data/ops/app-spend");
+        assert_eq!(folders(root, Path::new("/data/app-spend/other.json")), None);
+        assert_eq!(folders(root, Path::new("/data/ops/app-spend-extra/spend-pending.json")), None);
+        assert_eq!(folders(root, Path::new("ops")), None);
+        assert_eq!(folders(root, &root.join("ops").join("..").join("spend-pending.json")), None);
+    }
+
+    /// A file under a journal subdirectory can share a top-level journal name.
+    /// The chain must still start at the journal folder, not at that subdirectory.
+    #[test]
+    fn a_nested_journal_file_name_keeps_the_journal_folder() {
+        let root = Path::new("/data/ops/app-spend");
+        let path = root.join("ops").join("spend-pending.json");
+        assert_eq!(folders(root, &path), Some(vec![root.to_path_buf(), root.join("ops")]));
     }
 }
 
