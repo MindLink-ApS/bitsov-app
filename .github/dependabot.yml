@@ -1,4 +1,9 @@
 # Weekly version updates. Security updates are a separate repository setting.
+# Only minor and patch updates are opened, grouped per ecosystem. Major versions
+# are planned as deliberate changes, not automatic PRs.
+# Tauri moves as one unit: its npm packages and Rust crates must share a
+# major/minor release (the Tauri CLI refuses a mismatch) and some crates are
+# pinned exactly, so Tauri is updated by hand across both ecosystems.
 # Actions are pinned to full commit SHAs; Dependabot bumps the SHA and its version comment together.
 version: 2
 updates:
@@ -7,6 +12,10 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@tauri-apps/*"
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]
@@ -16,6 +25,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tauri"
+      - dependency-name: "tauri-*"
     groups:
       cargo-minor-and-patch:
         update-types: [minor, patch]
@@ -27,6 +41,9 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
-      actions:
-        patterns: ["*"]
+      actions-minor-and-patch:
+        update-types: [minor, patch]
