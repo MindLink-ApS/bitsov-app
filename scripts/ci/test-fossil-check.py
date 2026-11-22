@@ -98,7 +98,7 @@ class FossilCheckTests(unittest.TestCase):
     def test_commit_messages_are_checked_without_echoing_them(self):
         private_ips = PRIVATE_V4 + ("fd12:3456::1", "fe80::1")
         values = [HOME_PATH, SESSION, PLANNING_PATH, PRIVATE_NAME, "ssh fixture@host.local",
-                  "fixture@localhost"] + [f"reach the node at {ip}" for ip in private_ips]
+                  "fixture@localhost", "fixture@dev.localhost", "fixture@a.b.localhost"] + [f"reach the node at {ip}" for ip in private_ips]
         for value in values:
             with self.subTest(value=value):
                 self.git("reset", "-q", "--hard", self.base)
@@ -116,7 +116,7 @@ class FossilCheckTests(unittest.TestCase):
                 self.check(0)
 
     def test_commit_identities_are_checked(self):
-        for author in ("Fixture <fixture@mac.local>", "Fixture <fixture@localhost>",
+        for author in ("Fixture <fixture@mac.local>", "Fixture <fixture@localhost>", "Fixture <fixture@dev.localhost>",
                        "Fixture <fixture@[" + PRIVATE_V4[2] + "]>", "Fixture <fixture@nohost>",
                        "Fixture " + PRIVATE_NAME + " <fixture@example.org>"):
             with self.subTest(author=author):

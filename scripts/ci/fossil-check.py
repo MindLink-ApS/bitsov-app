@@ -112,7 +112,7 @@ def main():
 
     # Commit metadata only: hosts that exist on one machine or one private network.
     local_address = re.compile(
-        r"(?<=[a-z0-9_.%+-])@(?:(?:[a-z0-9-]+\.)*(?:local|localdomain|lan|internal|home)|localhost|"
+        r"(?<=[a-z0-9_.%+-])@(?:(?:[a-z0-9-]+\.)*(?:localhost|localdomain|local|lan|internal|home)|"
         r"\[?\d{1,3}(?:\.\d{1,3}){3}\]?)(?![a-z0-9-]|\.[a-z0-9])", re.I
     )
     private_ip = re.compile(
