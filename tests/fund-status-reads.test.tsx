@@ -603,3 +603,53 @@ it('keeps a just-started deposit when the following status read says not started
   expect(panel()!.querySelector('[data-fund-start]')).not.toBeNull();
   expect(panel()!.querySelector('.progress')).toBeNull();
 });
+
+it('clears a failed deposit start when the next try fails the amount check', async () => {
+  vi.useFakeTimers();
+  const host = stubHost({ holdStart: true });
+  await openWallet(host);
+  const raw = 'Error: POST /onboarding/start returned 502: {"error":"wallet"}';
+  submitStart();
+  await flush();
+  expect(host.starts).toHaveLength(1);
+  host.starts[0].reject(raw);
+  await flush();
+  expect(summaries()).toEqual([START_FAILED]);
+  expect(detailText()).toContain(raw);
+
+  const input = panel()!.querySelector<HTMLInputElement>('#amount')!;
+  input.value = '1.5';
+  input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  submitStart();
+  await flush();
+  expect(host.counts.fundStart, 'a rejected amount must not start again').toBe(1);
+  expect(summaries()).toEqual(['Enter a whole number of sats.']);
+  expect(detailText()).not.toContain(raw);
+  expect(panel()!.textContent).not.toContain(START_FAILED);
+});
+
+it('shows the next status after a funded start whose first status was empty', async () => {
+  vi.useFakeTimers();
+  const host = stubHost({ holdStart: true });
+  await openWallet(host);
+  submitStart();
+  await flush();
+  expect(host.starts).toHaveLength(1);
+  const before = host.counts.fundState;
+  host.starts[0].resolve(fundState({ funded: true, funding_amount_sats_received: 1000, funding_evidence: 'txid:stale' }));
+  await flush();
+  expect(host.counts.fundState, 'the start is followed by one status read').toBe(before + 1);
+  host.reads[0].resolve(null);
+  await flush();
+  expect(panel()!.querySelector('.funded'), 'the empty status is held, so the start result stays').not.toBeNull();
+  expect(panel()!.textContent).toContain('txid:stale');
+
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.counts.fundState, 'a held empty status is read again even when the start says funded').toBe(before + 2);
+  host.reads[1].resolve(fundState({ funding_amount_sats_received: 600 }));
+  await flush();
+  expect(panel()!.querySelector('.funded')).toBeNull();
+  expect(shownAddress()).toBe(ADDRESS);
+  expect(panel()!.querySelector('.progress strong')?.textContent).toBe('600 sats');
+  expect(panel()!.textContent).not.toContain('txid:stale');
+});
