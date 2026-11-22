@@ -38,7 +38,7 @@ pub const BLOB_FILE: &str = "device-key.blob";
 /// What the node said about the key, under the pairing store.
 pub const RECORD_FILE: &str = "device-key.json";
 
-/// Contact envelope defaults (research doc: 200 sats per day).
+/// Contact envelope defaults (research doc: 200 sats in total for the window).
 pub const DEFAULT_BUDGET_MSAT: u64 = 200_000;
 /// One day, the node's longest envelope.
 pub const DEFAULT_WINDOW_SECS: i64 = 86_400;
@@ -220,7 +220,7 @@ impl Intent {
             return Err(ActionError::invalid("The per-message maximum must fit the daily budget."));
         }
         let mut nonce = [0u8; 16];
-        getrandom::getrandom(&mut nonce)
+        getrandom::fill(&mut nonce)
             .map_err(|_| ActionError::new("device_key", "This Mac could not produce a random nonce."))?;
         Ok(Self {
             device_key_id: key_id.to_string(),
@@ -254,7 +254,7 @@ pub fn intent_message(node: &str, client_id: &str, i: &Intent) -> String {
 /// approve: the amounts come first, then the contact.
 pub fn intent_reason(contact: &str, budget_msat: u64, per_act_max_msat: u64) -> String {
     format!(
-        "approve paying up to {} per day, at most {} per message, to {contact}",
+        "approve paying up to {} in total for up to 24 hours, at most {} per message, to {contact}",
         grouped_amount(budget_msat),
         grouped_amount(per_act_max_msat)
     )
@@ -357,16 +357,16 @@ pub fn load_blob(store: &Path) -> Option<Vec<u8>> {
 #[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
 pub fn read_blob(store: &Path) -> std::io::Result<Option<Vec<u8>>> {
     #[cfg(all(target_os = "macos", feature = "mobile", not(test)))]
-    { let _ = store; return Err(std::io::Error::other("device Keychain storage is unavailable in the host mobile check")); }
+    { let _ = store; Err(std::io::Error::other("device Keychain storage is unavailable in the host mobile check")) }
     #[cfg(not(all(target_os = "macos", feature = "mobile", not(test))))]
     read_private(&store.join(BLOB_FILE))
 }
 
 pub fn save_blob(store: &Path, blob: &[u8]) -> Result<(), ActionError> {
     #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
-    { return crate::apple_key_material::save(store, blob).map_err(|e| ActionError::new("device_key", e)); }
+    { crate::apple_key_material::save(store, blob).map_err(|e| ActionError::new("device_key", e)) }
     #[cfg(all(target_os = "macos", feature = "mobile", not(test)))]
-    { return Err(ActionError::new("device_key", "device Keychain storage is unavailable in the host mobile check")); }
+    { let _ = (store, blob); Err(ActionError::new("device_key", "device Keychain storage is unavailable in the host mobile check")) }
     #[cfg(not(all(not(test), any(target_os = "ios", target_os = "macos"))))]
     write_private(&store.join(BLOB_FILE), blob)
         .map_err(|e| ActionError::new("device_key", format!("Could not save the device key: {e}")))
@@ -379,7 +379,7 @@ pub fn forget(store: &Path) {
 
 fn delete_protected(store: &Path) -> Result<(), String> {
     #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
-    { return crate::apple_key_material::delete(store); }
+    { crate::apple_key_material::delete(store) }
     #[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
     { let _ = store; Ok(()) }
 }
@@ -581,15 +581,15 @@ mod tests {
 
     #[test]
     fn the_dialog_names_the_contact_by_key_and_both_amounts() {
-        assert_eq!(intent_reason("Maya", 200_000, 21_187), "approve paying up to 200 sats per day, at most 21\u{202f}187 msat per message, to Maya");
+        assert_eq!(intent_reason("Robin", 200_000, 21_187), "approve paying up to 200 sats in total for up to 24 hours, at most 21\u{202f}187 msat per message, to Robin");
         assert_eq!(contact_key(PEER), "node aaaaaaaa…aaaaaaaa");
-        assert_eq!(intent_reason(&contact_key(PEER), 200_000, 2_000), "approve paying up to 200 sats per day, at most 2 sats per message, to node aaaaaaaa…aaaaaaaa");
+        assert_eq!(intent_reason(&contact_key(PEER), 200_000, 2_000), "approve paying up to 200 sats in total for up to 24 hours, at most 2 sats per message, to node aaaaaaaa…aaaaaaaa");
         // Built from the signed intent alone: no label, node-side or local, can reach it.
         let peer = format!("AB12CD34{}EF56AB78", "0".repeat(48));
         let intent = Intent::contact("k1", &peer, 200_000, 2_000, 5).unwrap();
-        assert_eq!(contact_intent_reason(&intent), "approve paying up to 200 sats per day, at most 2 sats per message, to node ab12cd34…ef56ab78");
+        assert_eq!(contact_intent_reason(&intent), "approve paying up to 200 sats in total for up to 24 hours, at most 2 sats per message, to node ab12cd34…ef56ab78");
         let large = Intent::contact("k1", &peer, 1_234_567_000, 1_000_001, 5).unwrap();
-        assert_eq!(contact_intent_reason(&large), "approve paying up to 1\u{202f}234\u{202f}567 sats per day, at most 1\u{202f}000\u{202f}001 msat per message, to node ab12cd34…ef56ab78");
+        assert_eq!(contact_intent_reason(&large), "approve paying up to 1\u{202f}234\u{202f}567 sats in total for up to 24 hours, at most 1\u{202f}000\u{202f}001 msat per message, to node ab12cd34…ef56ab78");
         assert_eq!(default_per_act(Some(2_000), 200_000), 2_000);
         assert_eq!(default_per_act(None, 200_000), 10_000);
         assert_eq!(default_per_act(Some(500_000), 200_000), 200_000);

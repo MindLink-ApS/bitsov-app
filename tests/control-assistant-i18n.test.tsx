@@ -86,7 +86,7 @@ it('translates local failures while preserving raw node text and amount bytes', 
   expect(softenError(raw).detail).toBe(raw);
   expect(groupDigits('1234567')).toBe('1\u202f234\u202f567');
   expect(groupDigits('1234567', true)).toBe('1\u2009234\u2009567');
-  expect(amount(1250000)).toContain('1\u202f250');
+  expect(amount(1250000, 'up')).toContain('1\u202f250');
 });
 
 it('keeps consent terms and native approval reason byte-identical in both languages', () => {

@@ -14,7 +14,6 @@ import {
   verifyState,
 } from '../src/control/petnames';
 import { claimedName, peerName } from '../src/control/state';
-import { shortId } from '../src/control/format';
 import type { Peer } from '../src/control/types';
 
 const A = 'a'.repeat(64);
@@ -32,17 +31,17 @@ afterEach(() => {
 describe('petnames', () => {
   it('stores a local petname and never uses peer.label as the display name', () => {
     const peerWithoutLabel: Peer = { node_id: A, addr: null, label: null, connected: true, fingerprint: 'aaaaaaaa' };
-    expect(peerName(peerWithoutLabel, A)).toBe(`Unnamed contact (${shortId(A)})`);
+    expect(peerName(peerWithoutLabel, A)).toBe('New contact');
     const peer: Peer = { node_id: A, addr: null, label: 'RemoteClaim', connected: true, fingerprint: 'aaaaaaaa' };
-    expect(peerName(peer, A)).toBe(`Unnamed contact (${shortId(A)})`);
+    expect(peerName(peer, A)).toBe('New contact');
     expect(claimedName(peer)).toBe('RemoteClaim');
-    setPetname(A, '  Maya  ');
-    expect(petnameOf(A)).toBe('Maya');
-    expect(peerName(peer, A)).toBe('Maya');
+    setPetname(A, '  Robin  ');
+    expect(petnameOf(A)).toBe('Robin');
+    expect(peerName(peer, A)).toBe('Robin');
   });
 
   it('clears a petname when set empty', () => {
-    setPetname(A, 'Maya');
+    setPetname(A, 'Robin');
     setPetname(A, '   ');
     expect(petnameOf(A)).toBeNull();
   });
@@ -56,28 +55,28 @@ describe('petnames', () => {
   });
 
   it('owner-confirmed key replacement clears verified, keeps petname, and warns until dismiss', () => {
-    setPetname(A, 'Maya');
+    setPetname(A, 'Robin');
     markVerified(A);
     expect(verifyState(A)).toBe('verified');
 
     expect(replaceContactKey(A, B)).toBe(true);
     expect(petnameOf(A)).toBeNull();
-    expect(petnameOf(B)).toBe('Maya');
+    expect(petnameOf(B)).toBe('Robin');
     expect(verifyState(B)).toBe('key-changed');
     expect(verifyState(A)).toBe('unverified');
 
     // Durable across a storage reload (new process / reopen).
     reloadContactsFromStorageForTests();
-    expect(petnameOf(B)).toBe('Maya');
+    expect(petnameOf(B)).toBe('Robin');
     expect(verifyState(B)).toBe('key-changed');
 
     dismissKeyWarning(B);
     expect(verifyState(B)).toBe('unverified');
-    expect(petnameOf(B)).toBe('Maya');
+    expect(petnameOf(B)).toBe('Robin');
   });
 
   it('re-verify after replacement clears the warning', () => {
-    setPetname(A, 'Maya');
+    setPetname(A, 'Robin');
     markVerified(A);
     expect(replaceContactKey(A, B)).toBe(true);
     expect(verifyState(B)).toBe('key-changed');
@@ -86,7 +85,7 @@ describe('petnames', () => {
   });
 
   it('refuses replacement when the new key already belongs to another contact', () => {
-    setPetname(A, 'Maya');
+    setPetname(A, 'Robin');
     markVerified(A);
     setPetname(B, 'Other');
     expect(replaceContactKey(A, B)).toBe(false);
@@ -95,11 +94,11 @@ describe('petnames', () => {
   });
 
   it('does not infer sameness: a new key alone is a different contact', () => {
-    setPetname(A, 'Maya');
+    setPetname(A, 'Robin');
     markVerified(A);
     // B appears with the same claimed label — still unrelated until replaceContactKey.
-    const peerB: Peer = { node_id: B, addr: null, label: 'Maya', connected: true, fingerprint: null };
-    expect(peerName(peerB, B)).toBe(`Unnamed contact (${shortId(B)})`);
+    const peerB: Peer = { node_id: B, addr: null, label: 'Robin', connected: true, fingerprint: null };
+    expect(peerName(peerB, B)).toBe('New contact');
     expect(verifyState(B)).toBe('unverified');
     expect(verifyState(A)).toBe('verified');
   });
@@ -122,7 +121,7 @@ describe('petnames', () => {
 
   it('keeps v1 when a v2 write fails during migration, and recovers on the next successful start', () => {
     const v1Body = JSON.stringify({
-      [A]: { petname: 'Maya', verifiedKey: A, verifiedAt: 1_700_000_000_000 },
+      [A]: { petname: 'Robin', verifiedKey: A, verifiedAt: 1_700_000_000_000 },
     });
     localStorage.removeItem(V2_KEY);
     localStorage.setItem(V1_KEY, v1Body);
@@ -138,7 +137,7 @@ describe('petnames', () => {
     });
 
     reloadContactsFromStorageForTests();
-    expect(petnameOf(A)).toBe('Maya');
+    expect(petnameOf(A)).toBe('Robin');
     expect(verifyState(A)).toBe('verified');
     expect(localStorage.getItem(V1_KEY)).toBe(v1Body);
     expect(localStorage.getItem(V2_KEY)).toBeNull();
@@ -146,7 +145,7 @@ describe('petnames', () => {
     setItemSpy.mockRestore();
 
     reloadContactsFromStorageForTests();
-    expect(petnameOf(A)).toBe('Maya');
+    expect(petnameOf(A)).toBe('Robin');
     expect(verifyState(A)).toBe('verified');
     expect(localStorage.getItem(V1_KEY)).toBeNull();
     expect(localStorage.getItem(V2_KEY)).toBeTruthy();

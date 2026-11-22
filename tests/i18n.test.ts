@@ -39,9 +39,9 @@ it('overrides and resumes the system language, including languagechange', () => 
 
 it('inserts money and recipient text verbatim in both languages', () => {
   setLanguagePref('en');
-  expect(t('uiSentTo', '1 250 sats', 'Maya {0} $&')).toBe('Sent 1 250 sats to Maya {0} $&.');
+  expect(t('uiSentTo', '1 250 sats', 'Robin {0} $&')).toBe('Sent 1 250 sats to Robin {0} $&.');
   setLanguagePref('da');
-  expect(t('uiSentTo', '1 250 sats', 'Maya {0} $&')).toBe('Sendt 1 250 sats til Maya {0} $&.');
+  expect(t('uiSentTo', '1 250 sats', 'Robin {0} $&')).toBe('Sendt 1 250 sats til Robin {0} $&.');
 });
 
 it('translates persisted activity labels without touching invoice notes', async () => {

@@ -5,6 +5,7 @@ import type { PairingView } from '../src/onboarding/pairing';
 import type { BudgetView, SpendView } from '../src/control/types';
 import {
   duration,
+  fileNameOf,
   isVoiceNote,
   pickRecordType,
   sendType,
@@ -55,6 +56,43 @@ const deps = (over: Partial<RecorderDeps> = {}): RecorderDeps => ({
   MediaRecorder: FakeRecorder as unknown as typeof MediaRecorder,
   now: () => Date.UTC(2026, 8, 29, 12, 0, 0),
   ...over,
+});
+
+describe('file names', () => {
+  it('reads the name from a stored file record, never the payload', () => {
+    const rec = JSON.stringify({ filename: 'a/b/clip.webm', mime_type: 'audio/webm', data_b64: 'QUJD' });
+    expect(fileNameOf(rec)).toBe('clip.webm');
+    expect(fileNameOf('{"data_b64":"QUJD"}')).toBeNull();
+    expect(fileNameOf('{broken')).toBeNull();
+    expect(fileNameOf('[file: brief.txt]')).toBe('brief.txt');
+    expect(fileNameOf('brief.txt')).toBe('brief.txt');
+    expect(isVoiceNote(200, JSON.stringify({ filename: 'voice-note-1.webm', data_b64: 'QUJD' }))).toBe(true);
+  });
+});
+
+describe('file name forms', () => {
+  it.each([
+    ['plain', 'brief.txt', 'brief.txt'],
+    ['plain with slashes', 'a/b/brief.txt', 'brief.txt'],
+    ['plain with backslashes', 'C:\\docs\\brief.txt', 'brief.txt'],
+    ['plain, trailing slash', 'a/b/', null],
+    ['plain, trailing backslash', 'a\\b\\', null],
+    ['bracket', '[file: brief.txt]', 'brief.txt'],
+    ['bracket with slashes', '[file: a/b/brief.txt]', 'brief.txt'],
+    ['bracket with backslashes', '[file: a\\b\\brief.txt]', 'brief.txt'],
+    ['bracket, trailing slash', '[file: a/b/]', null],
+    ['json with slashes', '{"filename":"a/b/brief.txt"}', 'brief.txt'],
+    ['json with backslashes', '{"name":"a\\\\b\\\\brief.txt"}', 'brief.txt'],
+    ['json, trailing slash', '{"filename":"a/b/"}', null],
+    ['json, trailing backslash', '{"file_name":"a\\\\b\\\\"}', null],
+  ])('%s', (_form, input, want) => {
+    expect(fileNameOf(input)).toBe(want);
+  });
+
+  it('never returns a payload-bearing malformed record', () => {
+    expect(fileNameOf('{"filename":"brief.txt","data_b64":"QUJD"')).toBeNull();
+    expect(isVoiceNote(200, '{"filename":"voice-note-1.webm","data_b64":"QUJD"')).toBe(false);
+  });
 });
 
 describe('voice note helpers', () => {
@@ -162,7 +200,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
     }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }, { node_id: C, addr: null, label: 'Josh', connected: true, fingerprint: null }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null }, { node_id: C, addr: null, label: 'Kim', connected: true, fingerprint: null }],
     rooms_list: () => [],
     messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
@@ -249,7 +287,7 @@ describe('voice notes in the composer and thread', () => {
     await openShell();
     await recordClip();
     expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · 8 sats$/));
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · up to 8 sats$/));
     const send = $<HTMLButtonElement>('[data-send]')!;
     send.click();
     send.click();
@@ -266,15 +304,51 @@ describe('voice notes in the composer and thread', () => {
   });
 
   it('a budget stop pays nothing and does not retry', async () => {
-    const host = stubHost({ file_send: () => Promise.reject({ code: 'budget_exhausted', message: 'Maya’s budget is used up.' }) });
+    const host = stubHost({ file_send: () => Promise.reject({ code: 'budget_exhausted', message: 'Robin’s budget is used up.' }) });
     await openShell();
     await recordClip();
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · 8 sats$/));
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · up to 8 sats$/));
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect(host.used('file_send')).toHaveLength(1));
     await new Promise((r) => setTimeout(r, 50));
     expect(host.used('file_send')).toHaveLength(1);
     expect($('[data-voice-preview]')).not.toBeNull();
+  });
+
+  it('plays a stored file record as a voice row and shows other files by name only', async () => {
+    const at = Date.now() - 60_000;
+    const payload = (filename: string, mime: string) => JSON.stringify({ filename, mime_type: mime, size_bytes: 9000, data_b64: 'QUJD'.repeat(400) });
+    const FILE_ID = 'd'.repeat(64);
+    stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [
+            { id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: at, plaintext: payload('voice-note-20260929-120000.webm', 'audio/webm'), payment_amount_msat: 3000 },
+            { id: FILE_ID, kind: 200, sender: A, recipient: OWN, timestamp: at + 1, plaintext: payload('brief.txt', 'text/plain'), payment_amount_msat: 3000 },
+            { id: 'f'.repeat(64), kind: 200, sender: OWN, recipient: A, timestamp: at + 2, plaintext: payload('voice-note-20260929-120100.webm', 'audio/webm'), payment_amount_msat: 3000 },
+            { id: '9'.repeat(64), kind: 200, sender: OWN, recipient: A, timestamp: at + 3, plaintext: payload('sent.txt', 'text/plain'), payment_amount_msat: 3000 },
+          ]
+        : []),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
+    expect(text(`[data-message="${FILE_ID}"] .file-name`)).toBe('brief.txt');
+    expect($(`[data-message="${'f'.repeat(64)}"] [data-voice-play]`)).not.toBeNull();
+    expect(text(`[data-message="${'9'.repeat(64)}"] .file-name`)).toBe('sent.txt');
+    expect(mount.textContent).not.toMatch(/data_b64|QUJD/);
+  });
+
+  it('a truncated file record shows the generic file label, not its payload', async () => {
+    const at = Date.now() - 60_000;
+    const BAD = 'e'.repeat(64);
+    stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [{ id: BAD, kind: 200, sender: A, recipient: OWN, timestamp: at, plaintext: '{"filename":"brief.txt","data_b64":"QUJD"', payment_amount_msat: 3000 }]
+        : []),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${BAD}"]`)).not.toBeNull());
+    expect(mount.textContent).not.toMatch(/data_b64|QUJD|brief\.txt/);
+    expect(text(`[data-message="${BAD}"] .file-name`)).not.toBe('');
   });
 
   it('plays a received voice note inline after one read-only fetch; other files stay plain', async () => {
@@ -346,6 +420,151 @@ describe('voice notes in the composer and thread', () => {
     await vi.waitFor(() => expect($('[data-voice-preview]')).not.toBeNull());
     expect(FakeRecorder.made[0].state).toBe('inactive');
     expect(host.used('file_send')).toHaveLength(0);
+  });
+
+  it('Attach while recording, with a chooser that does not blur the window, finishes the clip first', async () => {
+    const host = stubHost();
+    // The chooser is intercepted: it opens, but the window never blurs (some platforms keep focus).
+    const opened: HTMLInputElement[] = [];
+    const click = HTMLInputElement.prototype.click;
+    const spy = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+      if (this.type === 'file') opened.push(this);
+      else click.call(this);
+    });
+    try {
+      await openShell();
+      $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+      await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-composer-plus]')!.click();
+      $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+      expect(opened).toHaveLength(1);
+      // File mode hides the message bar and its Stop: the recording must not outlive it.
+      expect(FakeRecorder.made[0].state).toBe('inactive');
+      await vi.waitFor(() => expect($('[data-voice-preview]')).not.toBeNull());
+      expect($('[data-voice-record="stop"]')).toBeNull();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+      expect(host.used('file_send')).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  describe('Attach while recording, with a stop that finishes late', () => {
+    let releaseStop: (() => void) | null;
+    let opened: HTMLInputElement[];
+    let spy: { mockRestore: () => void };
+
+    beforeEach(() => {
+      releaseStop = null;
+      opened = [];
+      class SlowRecorder extends FakeRecorder {
+        stop() {
+          this.state = 'inactive';
+          void new Promise<void>((r) => { releaseStop = r; }).then(() => {
+            this.ondataavailable?.({ data: FakeRecorder.clip() });
+            this.onstop?.();
+          });
+        }
+      }
+      vi.stubGlobal('MediaRecorder', SlowRecorder);
+      const click = HTMLInputElement.prototype.click;
+      spy = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+        if (this.type === 'file') opened.push(this);
+        else click.call(this);
+      });
+    });
+
+    afterEach(() => { spy.mockRestore(); });
+
+    async function attachWhileRecording() {
+      await openShell();
+      $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+      await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-composer-plus]')!.click();
+      $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+      // The chooser opens in the same press, before the clip is final.
+      expect(opened).toHaveLength(1);
+      await vi.waitFor(() => expect(releaseStop).not.toBeNull());
+    }
+
+    function pick(name: string) {
+      const input = $<HTMLInputElement>('[data-file-input]')!;
+      Object.defineProperty(input, 'files', { configurable: true, value: [new File(['hi'], name, { type: 'text/plain' })] });
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    async function finishStop() {
+      releaseStop!();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    it('keeps the file picked in the chooser', async () => {
+      const host = stubHost();
+      await attachWhileRecording();
+      pick('brief.txt');
+      await finishStop();
+      expect($('[data-voice-preview]')).toBeNull();
+      expect(text('[data-file-chip] .file-name')).toBe('brief.txt');
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+      expect(host.used('file_send')).toHaveLength(0);
+    });
+
+    it('keeps a removed attachment removed', async () => {
+      const host = stubHost();
+      await attachWhileRecording();
+      pick('brief.txt');
+      [...$('[data-file-chip]')!.querySelectorAll<HTMLButtonElement>('button.link')].find((b) => b.textContent?.trim() === 'Remove')!.click();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+      await finishStop();
+      expect($('[data-voice-preview]')).toBeNull();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+      expect(host.used('file_send')).toHaveLength(0);
+    });
+
+    it('keeps a closed panel closed', async () => {
+      const host = stubHost();
+      await attachWhileRecording();
+      $<HTMLButtonElement>('[data-composer-close]')!.click();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+      await finishStop();
+      expect($('[data-voice-preview]')).toBeNull();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+      expect(host.used('file_send')).toHaveLength(0);
+    });
+
+    it('still lands the clip as the unsent preview when nothing else changed', async () => {
+      const host = stubHost();
+      await attachWhileRecording();
+      await finishStop();
+      expect($('[data-voice-preview]')).not.toBeNull();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+      expect(host.used('file_send')).toHaveLength(0);
+    });
+  });
+
+  it('recording lifecycle stays consistent when Attach is pressed early', async () => {
+    const host = stubHost();
+    let grant!: (s: MediaStream) => void;
+    const { stream, track } = fakeStream();
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: () => new Promise<MediaStream>((r) => { grant = r; }) } });
+    const click = HTMLInputElement.prototype.click;
+    const spy = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+      if (this.type !== 'file') click.call(this);
+    });
+    try {
+      await openShell();
+      $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+      await vi.waitFor(() => expect(grant).toBeDefined());
+      $<HTMLButtonElement>('[data-composer-plus]')!.click();
+      $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+      grant(stream);
+      await vi.waitFor(() => expect(track.stop).toHaveBeenCalled());
+      expect(FakeRecorder.made.every((r) => r.state === 'inactive')).toBe(true);
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+      expect(host.used('file_send')).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('blur then hide while recording still keeps the clip as a preview', async () => {
@@ -436,6 +655,34 @@ describe('voice notes in the composer and thread', () => {
     expect($('[data-voice-preview]')).toBeNull();
     expect(host.used('file_send')).toHaveLength(0);
     FakeRecorder.clip = () => new Blob(['hi']);
+  });
+
+  it('names an oversized voice note as too large, not as missing', async () => {
+    stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [{ id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 1000, plaintext: '[file: voice-note-20260929-120000.webm]', payment_amount_msat: 3000 }]
+        : []),
+      voice_note_fetch: () => Promise.reject('file over 1.4 MB'),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-message="${IN_ID}"] [data-voice-play]`)).toBe('Voice note · over 1.4 MB, cannot play'));
+    expect($<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.disabled).toBe(true);
+  });
+
+  it('names an oversized response without claiming the voice note is over the cap', async () => {
+    stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [{ id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 1000, plaintext: '[file: voice-note-20260929-120000.webm]', payment_amount_msat: 3000 }]
+        : []),
+      voice_note_fetch: () => Promise.reject('response too large to load safely'),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-message="${IN_ID}"] [data-voice-play]`)).toBe('Voice note · too large to load safely'));
+    expect($<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.disabled).toBe(true);
   });
 
   it('names a spoofed voice-note file as not audio, not as missing', async () => {

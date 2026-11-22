@@ -190,7 +190,7 @@ describe('front door Discover and editor', () => {
     mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
     await viWait();
     const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
-    name.value = 'Rasmus';
+    name.value = 'Alex';
     name.dispatchEvent(new Event('input', { bubbles: true }));
     const about = root.querySelector<HTMLTextAreaElement>('[data-fd-edit-about]')!;
     about.value = 'Builder';
@@ -199,7 +199,7 @@ describe('front door Discover and editor', () => {
     web.value = 'https://example.com';
     web.dispatchEvent(new Event('input', { bubbles: true }));
     await viWait();
-    expect(root.querySelector('[data-fd-preview] [data-fd-name]')?.textContent).toBe('Rasmus');
+    expect(root.querySelector('[data-fd-preview] [data-fd-name]')?.textContent).toBe('Alex');
     expect(root.querySelector('[data-fd-card-bytes]')?.getAttribute('data-over')).toBe('false');
     root.querySelector<HTMLButtonElement>('[data-fd-publish]')!.click();
     await viWait();
@@ -254,7 +254,7 @@ describe('front door Discover and editor', () => {
     mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
     await viWait();
     const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
-    name.value = 'Rasmus';
+    name.value = 'Alex';
     name.dispatchEvent(new Event('input', { bubbles: true }));
     await viWait();
     root.querySelector<HTMLButtonElement>('[data-fd-publish]')!.click();
@@ -294,7 +294,7 @@ describe('front door Discover and editor', () => {
     mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
     await viWait();
     const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
-    name.value = 'Rasmus';
+    name.value = 'Alex';
     name.dispatchEvent(new Event('input', { bubbles: true }));
     // Oversized about + website push the estimate over without needing canvas.
     await viWait();
@@ -367,7 +367,7 @@ describe('front door Discover and editor', () => {
     mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
     await viWait();
     const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
-    name.value = 'Rasmus';
+    name.value = 'Alex';
     name.dispatchEvent(new Event('input', { bubbles: true }));
     const cv = root.querySelector<HTMLTextAreaElement>('[data-fd-edit-cv]')!;
     cv.value = 'CV line one\nCV line two';

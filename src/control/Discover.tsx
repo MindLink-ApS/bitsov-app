@@ -1,4 +1,5 @@
 import { t as tr } from '../i18n';
+import { OperatorDetails } from './OperatorDetails';
 import { usePairingActivity } from '../pairingActivity';
 import { For, Show, createMemo, createSignal, onCleanup } from 'solid-js';
 import { copyPlainText } from '../assistant/copy';
@@ -295,11 +296,11 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
       <dl class="prices">
         <div>
           <dt>{tr('caKnockFromCard')}</dt>
-          <dd data-fd-knock-price>{fmtAmount(c().prices.admission_msat)}</dd>
+          <dd data-fd-knock-price>{fmtAmount(c().prices.admission_msat, 'up')}</dd>
         </div>
         <div>
           <dt>{tr('caMessageFromCard')}</dt>
-          <dd>{fmtAmount(c().prices.message_msat)}</dd>
+          <dd>{fmtAmount(c().prices.message_msat, 'up')}</dd>
         </div>
       </dl>
     </article>
@@ -662,9 +663,13 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
       <Show when={ownerAsk()}>
         {(ask) => (
           <div class="hint" data-fd-owner-action>
-            <p>{ask().text}</p>
+            {/* Plain words by default; the node's own text and line only under Details, for whoever set up the box. */}
+            <p>{ask().command ? tr('caFrontDoorNeedsOneYes') : ask().text}</p>
             <Show when={ask().command}>
-              <code class="mono" data-fd-owner-command>{ask().command}</code>
+              <OperatorDetails>
+                <p>{ask().text}</p>
+                <code class="mono" data-fd-owner-command>{ask().command}</code>
+              </OperatorDetails>
             </Show>
           </div>
         )}

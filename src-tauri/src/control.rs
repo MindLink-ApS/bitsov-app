@@ -62,6 +62,11 @@ pub struct Peer {
     /// `porch_quote_v1` (or legacy `porch_read_v1`). Derived by [`with_porch_support`], never read from the node.
     #[serde(default, skip_deserializing)]
     pub porch: bool,
+    /// Their node takes a free answer or declined hangup to its own ringing
+    /// offer: connected now and advertising `call_reply_free_v1`. Derived by
+    /// [`with_meeting_support`], never read from the node.
+    #[serde(default, skip_deserializing)]
+    pub free_replies: bool,
 }
 
 /// How a connected peer's node lists the meeting advert (genome
@@ -70,6 +75,9 @@ pub const PEER_MEETING_CAPABILITY: &str = r#"Custom("call_meeting_v1")"#;
 /// How a connected peer's node lists the room advert (genome
 /// `Capability::Custom("room_binding_v1")`).
 pub const PEER_ROOM_CAPABILITY: &str = r#"Custom("room_binding_v1")"#;
+/// How a connected peer's node lists the free call reply advert (genome
+/// `Capability::Custom("call_reply_free_v1")`).
+pub const PEER_FREE_REPLY_CAPABILITY: &str = r#"Custom("call_reply_free_v1")"#;
 
 /// Mark each peer whose node is known to take meeting legs, and room chats.
 /// A node without the advert (older, or not connected so we cannot tell)
@@ -79,6 +87,7 @@ pub fn with_meeting_support(mut peers: Vec<Peer>) -> Vec<Peer> {
     for p in &mut peers {
         let lists = |cap: &str| p.connected && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == cap));
         (p.meetings, p.rooms) = (lists(PEER_MEETING_CAPABILITY), lists(PEER_ROOM_CAPABILITY));
+        p.free_replies = lists(PEER_FREE_REPLY_CAPABILITY);
     }
     peers
 }
@@ -203,9 +212,20 @@ pub struct LightningReadiness {
     pub events: Vec<ReadinessEvent>,
 }
 
+/// Chain source fields used by the public-service notice.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ChainView {
+    #[serde(default)]
+    pub explorer_default: bool,
+    #[serde(default)]
+    pub trust_level: String,
+}
+
 /// `GET /status` — `HealthResponse`. The subset the Node panel shows.
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeStatusResponse {
+    #[serde(default)]
+    pub chain_view: Option<ChainView>,
     /// Node-reported network also works for remote paired clients.
     #[serde(default)]
     pub network: Option<String>,
@@ -260,7 +280,12 @@ pub struct NodeStatusResponse {
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
 /// `owner_device_approval_v1`: the node approves spend windows and first contact
 /// from an enrolled owner device (node #303); the renderer only changes copy on it.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1", "owner_device_approval_v1", "owner_device_approval_breaker_reset_v1", "starter_channel_request_v1"];
+/// `call_continuity_v1`: an admitted call outlives its grant's expiry or
+/// renewal (never a revoke). `call_reply_free_v1`: this node sends a free
+/// answer or declined hangup to a caller that also advertises it.
+/// `standing_allowance_v1`: read for readiness only; it proves no live
+/// allowance and no funds by itself.
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1", "owner_device_approval_v1", "owner_device_approval_breaker_reset_v1", "starter_channel_request_v1", "call_continuity_v1", "call_reply_free_v1", "standing_allowance_v1"];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -449,7 +474,11 @@ mod refusals;
 use refusals::{NodePrePaymentRefusals, PrePaymentRefusals};
 
 /// M6 A1: the node-routed call media bridge (frames, queues, the media socket).
+#[cfg(feature = "call-seal")]
+pub mod call_seal;
 pub mod media;
+/// Latency-critical system activity while a call is live (macOS).
+pub mod call_activity;
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeMembrane {
@@ -557,6 +586,8 @@ pub struct WalletOverview {
 /// `node_overview`.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct NodeOverview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_view: Option<ChainView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub money_ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -678,6 +709,7 @@ impl NodeOverview {
             _ => None,
         };
         Self {
+            chain_view: status.chain_view.filter(|view| view.trust_level == "third_party"),
             money_ready: status.money_ready,
             readiness: status.readiness,
             node_id: status.node_id,
@@ -751,7 +783,9 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
 /// is not evidence that the node lacks the contract.
 pub fn conversation_ceiling_evidence(proven: bool, probe: Result<(), String>) -> Result<(), crate::act::ActionError> {
     probe.map_err(|reason| {
-        if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
+        if reason == "not_ready:chain_unavailable" {
+            crate::act::ActionError::node(reason)
+        } else if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
             crate::act::ActionError::new("peer_not_ready", reason)
         } else {
             crate::act::ActionError::new("price_quote_unavailable", format!("Quote unavailable: {reason}"))
@@ -912,19 +946,25 @@ pub struct PeerCallPrice {
 }
 
 /// The call price the owner sees. `None` offer: their node did not answer
-/// (older genome, offline, or not listed). Principals are floored to the
-/// smallest payment the app makes, as every other send is.
+/// (older genome, offline, or not listed), or its price is out of range; the
+/// signal price is then only this node's own tariff, and no signal is paid on
+/// it. Principals are floored to the smallest payment the app makes, as every
+/// other send is.
 pub fn call_quote(live: Option<&PeerCallPrice>, own_signal_msat: u64) -> CallQuote {
     let floor = |m: u64| m.max(crate::act::MIN_PAYMENT_MSAT);
-    let offer = live.map(|p| floor(p.offer_msat));
     let signal = floor(live.map_or(own_signal_msat, |p| p.signal_msat));
     let fee = crate::act::routing_fee;
+    // An all-in amount that overflows, or that the renderer cannot hold exactly,
+    // is no price: such a quote places, answers and hangs up nothing.
+    let sum = |a: u64, b: u64| a.checked_add(b).filter(|total| *total <= MAX_SAFE_MSAT);
+    let total = live.map(|p| floor(p.offer_msat)).and_then(|offer| sum(sum(offer, fee(offer))?, sum(signal, fee(signal))?));
+    let offer = live.map(|p| floor(p.offer_msat)).filter(|_| total.is_some());
     CallQuote {
         offer_msat: offer,
         offer_max_routing_fee_msat: offer.map(fee).unwrap_or(0),
         signal_msat: signal,
         signal_max_routing_fee_msat: fee(signal),
-        call_total_msat: offer.map(|o| o + fee(o) + signal + fee(signal)),
+        call_total_msat: total,
         block_msat: None,
         block_max_routing_fee_msat: 0,
         reservation_max_msat: None,
@@ -1169,7 +1209,7 @@ pub fn ws_url(api_base: &str, token: &str) -> Result<String, String> {
 pub fn backoff(attempt: u32) -> Duration {
     let ceiling_ms = ((1u64 << attempt.min(5)) * 1000).min(30_000);
     let mut entropy = [0u8; 8];
-    let _ = getrandom::getrandom(&mut entropy);
+    let _ = getrandom::fill(&mut entropy);
     Duration::from_millis(ceiling_ms / 2 + u64::from_le_bytes(entropy) % (ceiling_ms / 2 + 1))
 }
 
@@ -1309,6 +1349,13 @@ mod tests {
     }
 
     #[test]
+    fn chain_quote_probe_preserves_the_typed_refusal() {
+        let error = conversation_ceiling_evidence(false, Err("not_ready:chain_unavailable".into())).unwrap_err();
+        assert_eq!(error.code, "not_ready");
+        assert_eq!(error.reason.as_deref(), Some("chain_unavailable"));
+    }
+
+    #[test]
     fn conversation_ceiling_evidence_distinguishes_missing_contract_from_failed_quote() {
         for reason in ["No route or channel yet", "Peer offline", "Quote unavailable", "Owner approval required"] {
             let err = conversation_ceiling_evidence(false, Err(reason.into())).unwrap_err();
@@ -1347,6 +1394,19 @@ mod tests {
         assert_eq!((none.offer_msat, none.call_total_msat, none.signal_msat), (None, None, 2_000));
         let big = call_quote(Some(&PeerCallPrice { offer_msat: 2_000_000, signal_msat: 50 }), 50);
         assert_eq!(big.offer_max_routing_fee_msat, 10_000);
+    }
+
+    #[test]
+    fn a_call_total_that_overflows_or_passes_the_renderers_range_is_no_price() {
+        let quote = |offer_msat, signal_msat| call_quote(Some(&PeerCallPrice { offer_msat, signal_msat }), 50);
+        for q in [quote(u64::MAX, 50), quote(u64::MAX - 5_000, 50), quote(50, u64::MAX), quote(50, u64::MAX - 5_000),
+            quote(MAX_SAFE_MSAT, 50), quote(50, MAX_SAFE_MSAT)] {
+            assert_eq!((q.offer_msat, q.call_total_msat), (None, None), "{q:?}");
+        }
+        // The last amount that fits: offer + its fee + signal + its fee, exactly.
+        let exact = MAX_SAFE_MSAT - 10_000 - 6_000;
+        assert_eq!(quote(exact, 50).call_total_msat, Some(MAX_SAFE_MSAT));
+        assert_eq!(quote(exact + 1, 50).call_total_msat, None);
     }
 
     #[test]
@@ -1427,6 +1487,25 @@ mod tests {
 
     fn link(state: LinkState, detail: Option<&str>) -> LiveEvent {
         LiveEvent::Link { state, detail: detail.map(str::to_string) }
+    }
+
+    #[test]
+    fn overview_projects_the_default_explorer_notice_without_endpoint_details() {
+        for default in [true, false] {
+            let status = serde_json::from_value(serde_json::json!({
+                "status":"ok", "node_id":"x", "network":"signet",
+                "chain_view":{"explorer_default":default, "trust_level":"third_party", "endpoint":"private-detail"}
+            })).unwrap();
+            let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+            assert_eq!(projected["chain_view"]["explorer_default"], default);
+            assert_eq!(projected["chain_view"]["trust_level"], "third_party");
+            assert!(!projected.to_string().contains("private-detail"));
+        }
+        for view in [serde_json::Value::Null, serde_json::json!({"explorer_default":true,"trust_level":"unknown"})] {
+            let status = serde_json::from_value(serde_json::json!({"status":"ok", "node_id":"x", "chain_view":view})).unwrap();
+            let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+            assert!(projected.get("chain_view").is_none());
+        }
     }
 
     #[test]
@@ -1778,6 +1857,41 @@ mod tests {
         // The renderer sees the derived flag, never the raw capability list.
         let out = serde_json::to_value(&peers[0]).unwrap();
         assert_eq!(out["meetings"], true);
+        assert!(out.get("capabilities").is_none(), "{out}");
+    }
+
+    #[test]
+    fn overview_keeps_the_call_capabilities_by_their_exact_names_only() {
+        let status = serde_json::from_value(serde_json::json!({
+            "status": "ok", "node_id": "x",
+            "api_capabilities": ["call_continuity_v1", "call_reply_free_v1", "standing_allowance_v1",
+                "call_continuity_v2", "call_reply_free", "Custom(\"call_reply_free_v1\")", "standing_allowance_v1x"]
+        })).unwrap();
+        let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+        assert_eq!(projected["capabilities"], serde_json::json!(["call_continuity_v1", "call_reply_free_v1", "standing_allowance_v1"]));
+        for one in ["call_continuity_v1", "call_reply_free_v1", "standing_allowance_v1"] {
+            let status = serde_json::from_value(serde_json::json!({"status": "ok", "node_id": "x", "api_capabilities": [one]})).unwrap();
+            assert_eq!(serde_json::to_value(NodeOverview::from_status(status, 1)).unwrap()["capabilities"], serde_json::json!([one]));
+        }
+        let legacy = serde_json::from_value(serde_json::json!({"status": "ok", "node_id": "x"})).unwrap();
+        assert_eq!(serde_json::to_value(NodeOverview::from_status(legacy, 1)).unwrap()["capabilities"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_peer_takes_free_call_replies_only_when_connected_with_the_exact_advert() {
+        let peers: Vec<Peer> = serde_json::from_str(r#"[
+            {"node_id":"a","connected":true,"capabilities":["X3dh","Custom(\"call_reply_free_v1\")"]},
+            {"node_id":"b","connected":false,"capabilities":["Custom(\"call_reply_free_v1\")"]},
+            {"node_id":"c","connected":true,"capabilities":["call_reply_free_v1","Custom(\"call_reply_free_v1x\")"]},
+            {"node_id":"d","connected":true},
+            {"node_id":"e","connected":true,"free_replies":true},
+            {"node_id":"f","connected":true,"capabilities":["Custom(\"call_meeting_v1\")"]}
+        ]"#).unwrap();
+        let peers = with_meeting_support(peers);
+        assert_eq!(peers.iter().map(|p| p.free_replies).collect::<Vec<_>>(), [true, false, false, false, false, false]);
+        assert_eq!(peers.iter().map(|p| p.meetings).collect::<Vec<_>>(), [false, false, false, false, false, true]);
+        let out = serde_json::to_value(&peers[0]).unwrap();
+        assert_eq!(out["free_replies"], true);
         assert!(out.get("capabilities").is_none(), "{out}");
     }
 

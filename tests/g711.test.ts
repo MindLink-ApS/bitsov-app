@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { decodeMuLaw, encodeMuLaw, muLawDecodeSample, muLawEncodeSample, PCMU_FRAME, PCMU_RATE } from '../src/control/g711';
-import { Framer, frameSamples, resample } from '../src/control/pcm';
+import { Framer, frameSamples } from '../src/control/pcm';
+// Sample-rate conversion: tests/pcm-resampler.test.ts.
 
 describe('G.711 mu-law', () => {
   it('matches the reference companding at known points', () => {
@@ -48,17 +49,6 @@ describe('PCM helpers', () => {
     expect(frameSamples(48_000)).toBe(960);
     expect(frameSamples(44_100)).toBe(882);
     expect(frameSamples(8_000)).toBe(160);
-  });
-
-  it('decimates 48 kHz to 8 kHz by averaging and interpolates back', () => {
-    const input = new Float32Array(960).map((_, i) => i / 960);
-    const down = resample(input, 48_000, 8_000);
-    expect(down.length).toBe(160);
-    expect(down[0]).toBeCloseTo((0 + 1 + 2 + 3 + 4 + 5) / 6 / 960, 6);
-    const up = resample(down, 8_000, 48_000);
-    expect(up.length).toBe(960);
-    for (let i = 0; i < up.length - 6; i += 7) expect(Math.abs(up[i] - input[i])).toBeLessThan(0.01);
-    expect(resample(input, 48_000, 48_000)).toBe(input);
   });
 
   it('the framer hands out whole frames and keeps the remainder', () => {

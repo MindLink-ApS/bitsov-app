@@ -231,7 +231,7 @@ describe('Body panel', () => {
     await source.spendStatus();
     await source.spendStatus();
     await vi.waitFor(() => expect($('[data-setpoint="ceiling"]')?.textContent).toContain('/500'), { timeout: 5000 });
-    expect($(`[data-setpoint="${SAMPLE_PEERS[0].node_id}"]`)?.textContent).toContain('Maya');
+    expect($(`[data-setpoint="${SAMPLE_PEERS[0].node_id}"]`)?.textContent).toContain('Robin');
     $<HTMLButtonElement>('[data-setpoint-lower]')!.click();
     await vi.waitFor(() => expect($('[data-panel="budget"]')).not.toBeNull());
   });

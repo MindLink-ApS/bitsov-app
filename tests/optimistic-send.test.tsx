@@ -48,7 +48,7 @@ describe('optimistic send', () => {
     await press('hello now');
     await vi.waitFor(() => expect(sending()).toHaveLength(1));
     expect(sending()[0].textContent).toContain('hello now');
-    expect(sending()[0].textContent).toContain('Sending · up to 9.75 sats');
+    expect(sending()[0].textContent).toContain('Sending · up to about 10 sats');
     expect(sending()[0].textContent).not.toMatch(/paid/i);
     expect(area().value).toBe('');
     await vi.waitFor(() => expect(pending).toHaveLength(1));
@@ -218,7 +218,7 @@ describe('optimistic send', () => {
   it('send to A, switch to B, A fails: the text never lands in B’s box; it waits on A', async () => {
     const { source, pending } = deferredSource();
     await open(source);
-    await press('for Maya only');
+    await press('for Robin only');
     await vi.waitFor(() => expect(pending).toHaveLength(1));
     await go(B);
     pending[0].fail({ code: 'price_changed', message: 'The price changed. Nothing was sent.' });
@@ -227,11 +227,11 @@ describe('optimistic send', () => {
     expect(unsent()).toHaveLength(0); // Not in B's chat either.
     await go(A);
     await vi.waitFor(() => expect(unsent()).toHaveLength(1));
-    expect(unsent()[0].querySelector('.bubble')!.textContent).toBe('for Maya only');
+    expect(unsent()[0].querySelector('.bubble')!.textContent).toBe('for Robin only');
     expect(area().value).toBe('');
     // Put back fills A's own box only.
     unsent()[0].querySelector<HTMLButtonElement>('[data-unsent-restore]')!.click();
-    await vi.waitFor(() => expect(area().value).toBe('for Maya only'));
+    await vi.waitFor(() => expect(area().value).toBe('for Robin only'));
     expect(source.send).toHaveBeenCalledTimes(1);
   });
 

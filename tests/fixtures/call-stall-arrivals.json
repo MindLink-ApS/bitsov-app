@@ -1,0 +1,19 @@
+{
+  "frameMs": 20,
+  "durationMs": 37000,
+  "segments": [
+    { "gapMs": 20, "frames": 50 },
+    { "gapMs": 300, "frames": 1 },
+    { "gapMs": 0, "frames": 14 },
+    { "gapMs": 20, "frames": 85 },
+    { "gapMs": 100, "frames": 1 },
+    { "gapMs": 0, "frames": 4 },
+    { "gapMs": 20, "frames": 95 },
+    { "gapMs": 100, "frames": 1 },
+    { "gapMs": 0, "frames": 4 },
+    { "gapMs": 20, "frames": 95 },
+    { "gapMs": 100, "frames": 1 },
+    { "gapMs": 0, "frames": 4 },
+    { "gapMs": 20, "frames": 1500 }
+  ]
+}

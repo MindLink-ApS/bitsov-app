@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "mobile-call-seal",
+  "description": "Call sealing, compiled in only with the call-seal feature: the main window may run the key exchange's four host commands. Public values only cross them.",
+  "windows": ["main"],
+  "permissions": [
+    "allow-call-seal-offer",
+    "allow-call-seal-answer",
+    "allow-call-seal-accept",
+    "allow-call-seal-cancel"
+  ]
+}

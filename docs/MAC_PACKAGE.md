@@ -1,14 +1,14 @@
 # macOS package (ad-hoc signed by default)
 
-**Signed pin:** rc19.2 is published, and all five binary pins come from its
+**Signed pin:** rc24 is published, and all five binary pins come from its
 verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
 Runtime, packaging and hardware acceptance remain separate gates.
-See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
+See the [pinned release verifier](../scripts/fetch-node-sidecar.sh).
 
-Internal build of `BitSov.app` for Apple Silicon. By default it has a valid
+Internal native build of `BitSov.app` for Apple Silicon or Intel. By default it has a valid
 ad-hoc signature, no Developer ID identity, and no notarization. It is not published. It is for internal testers who accept a
 Gatekeeper warning. It is not a public download. The protocol pin stays
-`v0.3.0-rc19.2`. Windows packaging is out of scope.
+`v0.3.0-rc24`. Windows packaging is out of scope.
 
 See [the assistant-page packaging policy](#deviation-release-excludes-the-assistant-page)
 for the release bundle's frontend boundary.
@@ -32,7 +32,7 @@ See [HOME_NODE_UNLOCK.md](HOME_NODE_UNLOCK.md) for wrapping and migration detail
 
 ## Build locally
 
-Needs macOS arm64, Node 22, Rust, Apple command-line tools, `gh`, and `gpg`.
+Needs macOS arm64 or x86_64, Node 22, Rust, Apple command-line tools, `gh`, and `gpg`.
 Use a checkout that is not the tree your running app was built from.
 
 ```bash
@@ -40,11 +40,84 @@ bash scripts/package-mac.sh            # .app only
 bash scripts/package-mac.sh --dmg      # .app and .dmg
 ```
 
+### Explicit native architecture
+
+Use a matching native host. Cross builds, Rosetta builds and universal packages are refused:
+
+```bash
+bash scripts/package-mac.sh --arch x86_64 --dmg  # Intel host
+bash scripts/package-mac.sh --arch arm64 --dmg   # Apple Silicon host
+```
+
+An explicit `--arch` passes `--target x86_64-apple-darwin` or
+`--target aarch64-apple-darwin` to Tauri. These builds honor
+`CARGO_TARGET_DIR` (default `src-tauri/target`), including paths with spaces.
+Outputs are isolated under `<target-dir>/<triple>/release/bundle/`:
+
+| Architecture | Source sidecar | App | DMG |
+|---|---|---|---|
+| Intel | `src-tauri/bin/konsensus-x86_64-apple-darwin` | `macos/BitSov.app` | `dmg/BitSov_<version>_x86_64.dmg` |
+| Apple Silicon | `src-tauri/bin/konsensus-aarch64-apple-darwin` | `macos/BitSov.app` | `dmg/BitSov_<version>_aarch64.dmg` |
+
+The native fetcher already maps these names to `bitsov-darwin-x86_64` and
+`bitsov-darwin-aarch64` in the signed rc24 `SHA256SUMS`. There is no renamed
+or combined universal sidecar. Existing-sidecar mode still authenticates
+every installed sidecar. Before signing, the checker requires the app and
+node to be thin Mach-O executables of the selected architecture and compares
+the bundled node to its authenticated source bytes.
+
+On Intel, omitting `--arch` also selects the Intel target path. The original
+implicit ARM command retains its original arguments, fixed target root and
+`src-tauri/target/release/bundle/` output for existing callers. Use explicit
+`--arch arm64` to select a custom Cargo target root on Apple Silicon.
+Explicit target build logs are `<target-dir>/package-mac-<triple>.log`.
+
+For a separate pre-signing check, use
+`bash scripts/check-mac-bundle.sh --arch x86_64` (or `arm64`). It selects the
+same target-specific app and source-sidecar defaults and honors
+`CARGO_TARGET_DIR`; `--app`, `--sidecar` and `--dist` can override paths.
+The checker requires `--arch`, including when all paths are supplied. For the
+implicit ARM package, also pass
+`--app src-tauri/target/release/bundle/macos/BitSov.app`.
+
+### Manual Intel CI artifact
+
+`.github/workflows/mac-package-intel.yml` is a separate workflow with only
+`workflow_dispatch`. It has no push, pull-request, tag or schedule trigger.
+Additional Intel runner use remains an operator decision; adding this file
+does not start an Intel build. The existing ARM workflow is unchanged.
+The native runner is `macos-15-intel`, as listed in the
+[hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+
+When manually dispatched, it uses the existing ad-hoc packaging path, then
+verifies the final resource seal and archives the app and Intel DMG. It uses
+only a read-only workflow token for downloads, with no signing credentials,
+notarization or release publication. It uploads
+`bitsov-unsigned-macos-x86_64-<full-source-sha>` for seven days, containing
+`BitSov-unsigned-macos-x86_64.app.zip`, the `_x86_64.dmg`, `build-info.txt`
+(source SHA, target, node release/asset/source checksum and tool versions)
+and archive `SHA256SUMS`. The `unsigned` name follows the ARM artifact's
+convention; the bundle is ad-hoc signed.
+
+This workflow does not launch the app or run the hardware-dependent Keychain
+smoke. A native package build does not establish protected-storage support,
+pairing or runtime acceptance on a physical Intel Mac. Those checks and the
+sidecar's printed `minos` still need acceptance evidence on supported hardware.
+
+`python3 scripts/test-package-mac-arch.py` exercises native target selection,
+custom output roots, source-asset selection and architecture refusals offline.
+The existing packaging and bundle-checker tests remain unchanged.
+
+For a test build with sealed call audio, add `--call-seal` (with or without
+`--dmg`). It adds `--features call-seal` and sets
+`VITE_CALL_SEAL=sealed` for the build, matching the enabled CI configuration.
+Without this option, the build arguments and environment stay unchanged.
+
 What the script does:
 
 1. **Sidecar.** Deletes every `src-tauri/bin/konsensus-*`. Then it runs
    `scripts/fetch-node-sidecar.sh` with a throwaway `GNUPGHOME`. That script
-   fetches the pinned rc19.2 release and checks its signature and hash fail-closed.
+   fetches the pinned rc24 release and checks its signature and hash fail-closed.
    For local dev, `--use-existing-sidecar` (or
    `BITSOV_USE_EXISTING_SIDECAR=1`) keeps an existing
    `src-tauri/bin/konsensus-aarch64-apple-darwin` and skips the fetch. The
@@ -132,7 +205,7 @@ requires running the package script on macOS.
 Built on macOS 26.6.2 arm64 with Node 22.19.0 using
 `bash scripts/package-mac.sh --dmg --use-existing-sidecar` after the fetch
 script authenticated rc14’s signed checksum manifest. This is historical rc14
-evidence, not rc19.2 acceptance. The unchanged source
+evidence, not rc24 acceptance. The unchanged source
 node SHA256 was
 `1b8fdecb87a308aff657a476eb92c5b100496c64076e90a45e3bee0fb2301305`.
 
@@ -185,14 +258,17 @@ variables do not opt this script into signing/notarization: Tauri runs with
 
 ## Bundle checks
 
-`scripts/check-mac-bundle.sh [--app PATH] [--sidecar PATH] [--dist PATH]`
+`scripts/check-mac-bundle.sh --arch arm64|x86_64 [--app PATH] [--sidecar PATH] [--dist PATH]`
 runs on the **pre-signing** app and reads files only. Re-signing the sidecar
 changes its bytes, so use `codesign --verify --deep --strict` on the final app
-instead of rerunning the source-byte comparison. Any failure means exit 1 and `MAC BUNDLE CHECK: FAIL`.
+instead of rerunning the source-byte comparison. A failed bundle check means
+exit 1 and `MAC BUNDLE CHECK: FAIL`. Missing, empty or unsupported `--arch`
+means exit 2 before bundle inspection.
 
 | Check | Why |
 |---|---|
 | `Contents/MacOS/bitsov-app` and `Contents/MacOS/konsensus` are executable | The app and the bundled node exist |
+| Both executables are thin Mach-O files of the selected architecture | Wrong-architecture and universal binaries are refused |
 | `cmp` of the bundled `konsensus` against the verified sidecar | The output must contain the exact bytes accepted by the pre-bundle release check |
 | `Contents/Resources/icon.icns` is non-empty | Icon packaging (spike blocker) |
 | `Info.plist` lints (`plutil -lint`, or `plistlib` off macOS) | Well-formed bundle |
@@ -215,11 +291,15 @@ Binary markers:
 literal into every build.
 
 `scripts/test-check-mac-bundle.sh` tests the checker on fake bundle trees.
-It uses no network and builds nothing. It has 19 cases: the good tree passes,
+It uses no network and builds nothing. It has 20 cases: the good tree passes,
 and each of these fails: missing or mismatched sidecar, missing verified
 sidecar, missing or non-executable app, missing icon, malformed plist,
 10.13 minimum, a `*.sb` file, the assistant page or chunk in dist, missing
-dist, a loose `assistant.html`, and each of the four binary markers.
+dist, a loose `assistant.html`, and each of the four binary markers. Omitting
+`--arch` is refused even with an otherwise valid bundle and explicit paths.
+`scripts/test-package-mac-arch.py` also covers the implicit ARM build's
+arguments, fixed target root, bundle and image paths, and native checks with
+both fetched and existing sidecars, including a conflicting caller target root.
 Authority Check runs it on Linux, together with `shellcheck` on the three
 scripts. Mac Package runs it on macOS.
 
@@ -261,12 +341,12 @@ gates together and removes the matching checks.
 was 10.13, while the rc7 arm64 sidecar's Mach-O minimum is 11.0 (spike,
 2026-09-14). JSON has no comments, so this note is the record.
 `package-mac.sh` prints the sidecar `minos`. 11.0 is the build floor, not a
-tested support claim. Recheck the rc19.2 sidecar minos in CI using its published signed assets; the historical rc7 inspection is not rc19.2 binary evidence. No macOS version has runtime evidence yet.
+tested support claim. Recheck the rc24 sidecar minos in CI using its published signed assets; the historical rc7 inspection is not rc24 binary evidence. No macOS version has runtime evidence yet.
 
 ## CI artifact
 
 `.github/workflows/mac-package.yml` ("Mac Package") does not run on every
-push to `main`. macos-14 is billed at 10× Linux, so the ad-hoc signed Tauri
+push to `main`. The ad-hoc signed app
 bundle runs nightly (05:00 UTC, default branch), on `v*` tags, on
 `workflow_dispatch`, and on a pull request when `full-ci` is added. The
 label sticks: later pushes to that PR build again. Adding or removing any
@@ -280,7 +360,7 @@ unsupported previews. These packaging jobs are not required checks.
   `contents: read` only. It uses `github.token` read-only for `gh release download`.
 - Fetches the pinned sidecar and explicitly re-verifies all sidecars before
   `scripts/package-mac.sh --dmg --use-existing-sidecar`. The offline checker
-  unit tests run on Linux in Authority Check, not on this 10× runner. The
+  unit tests run on Linux. The
   package script and Tauri hook re-check the sidecars too.
   The package script compares the bundled node to the source before signing.
   Before zipping, CI requires the resource seal and repeats strict signature
@@ -324,6 +404,89 @@ and the remaining release requirements.
 The app starts a local node on port 3141 and uses the normal application data
 directory. Do not run it next to another BitSov app instance.
 
+## Intel Mac tester install (not ready yet)
+
+> **Do not install this build yet.** This package bundles a node and starts
+> it on first launch (see above). The bundled node release creates a
+> **mainnet** configuration by default, and this app does not yet force or
+> check signet. Wait until a beta build is pinned to signet before following
+> these steps. Until then, these steps are a draft for that build.
+
+Use an Intel (`x86_64`) Mac and a **signet node only** for this preview.
+Intel packaging is proposed in [#482](https://github.com/MindLink-ApS/bitsov-app/pull/482);
+until a successful **Mac Package Intel** run supplies the artifact below, there
+is no Intel download to install from these instructions. The existing arm64
+artifact is for Apple Silicon. Intel runtime compatibility and the minimum
+supported macOS version still need validation on physical hardware.
+
+1. **Check for T2 before installing.** In Terminal, run this read-only command:
+
+   ```bash
+   system_profiler SPiBridgeDataType
+   ```
+
+   Look for **Apple T2 Security Chip**. If it is absent or the result is
+   unclear, stop and report the hardware result before trying to pair. The
+   current ad-hoc app requires a Secure Enclave for pairing; an Intel Mac
+   without T2 cannot use that pairing path. T2 presence does not establish
+   that the app works on that Mac, and does not mean Touch ID is available.
+
+2. **Download the Intel artifact.** In this repository's **Actions → Mac
+   Package Intel**, open the successful run for the intended source commit.
+   Under **Summary → Artifacts**, download
+   `bitsov-unsigned-macos-x86_64-<full-source-sha>`, matching the run's full
+   commit SHA. The proposed artifact is retained for seven days and contains
+   `BitSov-unsigned-macos-x86_64.app.zip`, an `_x86_64.dmg`, `build-info.txt`
+   and `SHA256SUMS`. If it is missing or expired, request a new artifact;
+   do not substitute the arm64 build.
+
+3. **Unzip and install.** Open the downloaded artifact ZIP in Finder. In the
+   extracted folder, check that `build-info.txt` names the intended source
+   SHA and `x86_64-apple-darwin` target. In Terminal, change to that folder
+   and verify its files before continuing:
+
+   ```bash
+   shasum -a 256 -c SHA256SUMS
+   ```
+
+   Stop if any checksum differs. Unzip
+   `BitSov-unsigned-macos-x86_64.app.zip`, then drag the extracted
+   `BitSov.app` into `/Applications`. Quit any other BitSov instance first;
+   this app uses the normal application data directory. Use a separate macOS
+   test account if this Mac already has a BitSov installation you need to keep.
+
+4. **Clear quarantine for this copy.** The preview is ad-hoc signed, despite
+   the `unsigned` filename, and is not notarized. Only for the app obtained
+   from the intended repository run, remove its download quarantine:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/BitSov.app
+   ```
+
+   This removes Gatekeeper's quarantine check for this copy. It does not
+   establish trust in an unknown download. If the command is refused or
+   macOS still blocks the app, stop and report the message.
+
+5. **First launch and signet check.** Open `/Applications/BitSov.app` in
+   Finder. Follow the [signet pairing instructions](../README.md#pair-with-your-own-signet-node)
+   with the designated node. Confirm it is on signet before any test payment.
+   The app does not show the node's network today. Ask the node owner to
+   confirm that the node's `konsensus.toml` contains `network = "signet"`,
+   or that its `/status` response reports `"network": "signet"`. Do not
+   continue if they cannot confirm it.
+   After pairing,
+   send and receive a message, then send and receive a signet payment with
+   the node owner available to approve. These are tester checks to perform,
+   not established Intel acceptance results.
+
+On a T2 Mac, missing or unavailable Touch ID is separate from pairing storage.
+After successful pairing, receiving messages and payments does not require
+Touch ID. For sending or paying when approval is needed, **approve at the
+node**: ask the node owner to approve the requested spending window or budget,
+then retry in the app. In-app Touch ID approvals and Touch ID-based
+“Remember on this Mac” are unavailable without working Touch ID. Node-side
+approval does not provide a pairing fallback for a Mac without T2.
+
 ## HUMAN
 
 These remain release-operator responsibilities; the default CI does not enable
@@ -337,7 +500,7 @@ the optional Developer ID/notarization hooks.
 | Gatekeeper on a clean machine | `spctl -a -vv` and a first launch on a machine that has never seen the app, with no existing node or wallet |
 | Publishing | No release, tag, website download, or release metadata until a signed and notarized build exists. `/bitsov/app` stays a waitlist. |
 | PR #13 | `factory/mac-package-spike` stays open. A human decides whether to close it. |
-| Pin | `v0.3.0-rc19.2` (`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`); fetch and verify signed checksums before packaging. |
+| Pin | `v0.3.0-rc24`; fetch and verify signed checksums before packaging. |
 
 Set `BITSOV_MAC_PROVISION_PROFILE` to the Developer ID provisioning profile
 authorized for the app and its private Keychain group. Packaging validates its

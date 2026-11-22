@@ -27,8 +27,10 @@ not committed) — run `fetch-node-sidecar.sh` first. The app icon (`src-tauri/i
 both lockfiles (`package-lock.json`, `src-tauri/Cargo.lock`) are committed.
 
 ## What it does
-1. Rust host runs `konsensus init` on first run, then `konsensus start --config …` as a
-   **supervised sidecar** (killed on exit; init exit status + stderr are checked).
+1. On a fresh profile the Rust host creates nothing until the owner chooses "This Mac"
+   in onboarding and confirms (`node_setup_local`). It then runs `konsensus init`, then
+   `konsensus start --config …` as a **supervised sidecar** (killed on exit; init exit
+   status + stderr are checked). An existing config starts without asking.
 2. Polls health, pairs with rc19.2, then reads identity. Only a 404 on pair/request
    selects the retained rc7 auth/local fallback. The smoke uses rc19.2 read-scoped
    auth/local directly; it is not a pairing or owner-device test.

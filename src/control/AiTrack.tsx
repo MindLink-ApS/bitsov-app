@@ -3,6 +3,7 @@ import { WATCHES, type WatchNotice, type WatchRule, type WatchUpdate } from './w
 import { ASSISTANTS, modelProposalText, type ModelProposal, type LocalTurn, type AssistantId, type AssistantThread } from './assistants';
 import { SoftError } from './SoftError';
 import { DelayedSpinner } from './DelayedSpinner';
+import { StreamFrame } from './StreamFrame';
 // "Ask your node": the AI track in the main window.
 //
 // The app is the broker. A question becomes a topic; the host reads it through
@@ -34,7 +35,7 @@ import {
   type Intent,
   type Proposal,
 } from './ai';
-import { amount, clock, day, satsWhole, uptime } from './format';
+import { amount, clock, day, satsWhole, uptime, type Rounding } from './format';
 import { deviceWord } from '../platform';
 
 /** The host names its local provider "On this computer"; a phone build says "On this phone". */
@@ -565,6 +566,7 @@ export function AiTrack(props: {
         </div>
       </Show>
 
+      <StreamFrame>
       <div class="stream ai-stream" ref={stream} data-stream data-ai-track>
         <div class="chat-column ai-chat-column">
           <Show when={session.turns.length === 0}>
@@ -615,6 +617,7 @@ export function AiTrack(props: {
           </For>
         </div>
       </div>
+      </StreamFrame>
 
       <form
         class="composer ai-composer"
@@ -872,7 +875,7 @@ function CopyButton(props: { text: () => string }) {
   );
 }
 
-const fig = (a: Amount | undefined) => (value(a) === null ? tr('caUnavailableExtra63') : amount(value(a)!));
+const fig = (a: Amount | undefined, round: Rounding) => (value(a) === null ? tr('caUnavailableExtra63') : amount(value(a)!, round));
 
 function CardView(props: { card: Card; nameOf: (id: string) => string; now: number }) {
   const text = () => cardText(props.card, props.nameOf);
@@ -922,15 +925,15 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                 {(b) => (
                   <>
                     <span class="sats big" data-ai-balance>
-                      {value(b().wallet_balance) === null ? fig(b().wallet_balance) : amount(value(b().wallet_balance)!, true)}
+                      {value(b().wallet_balance) === null ? fig(b().wallet_balance, 'down') : amount(value(b().wallet_balance)!, 'down', true)}
                     </span>
                     <dl class="facts">
                       <dt>{tr('caLightningYours')}</dt>
-                      <dd class="sats">{fig(b().channel_local_balance)}</dd>
+                      <dd class="sats">{fig(b().channel_local_balance, 'down')}</dd>
                       <dt>{tr('caLightningTheirs')}</dt>
-                      <dd class="sats">{fig(b().channel_remote_balance)}</dd>
+                      <dd class="sats">{fig(b().channel_remote_balance, 'down')}</dd>
                       <dt>{tr('caChannelCapacity')}</dt>
-                      <dd class="sats">{fig(b().channel_capacity)}</dd>
+                      <dd class="sats">{fig(b().channel_capacity, 'down')}</dd>
                     </dl>
                   </>
                 )}
@@ -945,14 +948,14 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                         <div class="channel">
                           <div class="row">
                             <span>{x.active ? tr('caActive') : tr('caInactive')}</span>
-                            <span class="sats">{fig(x.capacity)}{' '}{tr('caCapacity')}</span>
+                            <span class="sats">{fig(x.capacity, 'down')}{' '}{tr('caCapacity')}</span>
                           </div>
                           <div class="liquidity">
                             <div style={{ width: `${cap > 0 ? (mine / cap) * 100 : 0}%`, opacity: x.active ? 1 : 0.4 }} />
                           </div>
                           <div class="row">
-                            <span class="sats">{fig(x.local_balance)}{' '}{tr('caYours')}</span>
-                            <span class="sats">{fig(x.remote_balance)}{' '}{tr('caTheirs')}</span>
+                            <span class="sats">{fig(x.local_balance, 'down')}{' '}{tr('caYours')}</span>
+                            <span class="sats">{fig(x.remote_balance, 'down')}{' '}{tr('caTheirs')}</span>
                           </div>
                         </div>
                       );
@@ -977,10 +980,10 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
               </div>
               <div class="row ai-totals">
                 <span>
-                  <span class="label">{tr('caSpent')}</span> <span class="sats">{value(r().sent_total) === null ? fig(r().sent_total) : amount(value(r().sent_total)!, true)}</span>
+                  <span class="label">{tr('caSpent')}</span> <span class="sats">{value(r().sent_total) === null ? fig(r().sent_total, 'up') : amount(value(r().sent_total)!, 'up', true)}</span>
                 </span>
                 <span>
-                  <span class="label">{tr('extraReceived')}</span> <span class="sats">{value(r().received_total) === null ? fig(r().received_total) : amount(value(r().received_total)!, true)}</span>
+                  <span class="label">{tr('extraReceived')}</span> <span class="sats">{value(r().received_total) === null ? fig(r().received_total, 'down') : amount(value(r().received_total)!, 'down', true)}</span>
                 </span>
               </div>
               <ul class="ai-payments">
@@ -992,7 +995,7 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                       <span class="when">{day(e.at_ms)} {clock(e.at_ms)}</span>
                       <span class="sats">
                         {e.direction === 'sent' ? '−' : '+'}
-                        {fig(e.amount)}
+                        {fig(e.amount, e.direction === 'sent' ? 'up' : 'down')}
                       </span>
                     </li>
                   )}
@@ -1029,7 +1032,7 @@ function ProposalCard(props: { p: Proposal; onPrefill: (p: Proposal) => void }) 
       </Show>
       <Show when={props.p.kind !== 'message'}>
         <span class="sats big">
-          {amount((props.p as { sats: number }).sats * 1000, true)}
+          {amount((props.p as { sats: number }).sats * 1000, 'up', true)}
         </span>
       </Show>
       <span class="hint">

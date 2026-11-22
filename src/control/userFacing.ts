@@ -13,13 +13,20 @@ export type SoftenedError = {
   money?: boolean;
 };
 
-/** Map host/node error text to a calm summary (+ optional detail). */
-export function softenError(raw: unknown): SoftenedError {
+/**
+ * Map host/node error text to a calm summary (+ optional detail).
+ * `fallback` replaces only the generic summary for technical text; money text is never replaced.
+ */
+export function softenError(raw: unknown, fallback?: string): SoftenedError {
   const m = String(raw ?? '').trim();
   if (!m) return { summary: tr('caSomethingWentWrong'), detail: null };
 
   // Preserve the entire money warning. In particular, transport/address text
   // inside an unknown or settled outcome must not turn it into a connection error.
+  // The same in Danish: the host's refusals arrive translated (`hostCopy`).
+  if (/(?:^|[^\p{L}])(?:betalt|betales|betale|betalte|afregnet|afregnes)(?![\p{L}])|(?:^|[^\p{L}])betaling(?:en)? ukendt(?![\p{L}])/iu.test(m)) {
+    return { summary: m, detail: null, money: true };
+  }
   if (/\b(?:payment|spend)_[a-z_]+\b|\b(?:failed_paid|undelivered_pending|price_cap_exceeded|budget_exceeded|budget_exhausted|ceiling_exhausted)\b|\b(?:paid|charged|settled)\b|\b(?:payment|spend)(?: status| outcome)? (?:is )?(?:unknown|refused|failed|uncertain)\b/i.test(m)) {
     return { summary: m.replace(/\b(payment_refused|spend_unknown|payment_unknown|payment_settled_undelivered)\b/g, code => code.replace(/_/g, ' ')), detail: null, money: true };
   }
@@ -56,6 +63,6 @@ export function softenError(raw: unknown): SoftenedError {
   }
 
   return technical(m)
-    ? { summary: tr('caThatCouldNotBeCompletedOpenDetailsForMore'), detail: m }
+    ? { summary: fallback ?? tr('caThatCouldNotBeCompletedOpenDetailsForMore'), detail: m }
     : { summary: m, detail: null };
 }
