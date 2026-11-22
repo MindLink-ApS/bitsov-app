@@ -155,7 +155,7 @@ export function parseSignal(kind: number, plaintext: string | null): Signal | nu
   }
 }
 
-export function newCallId(random: (a: Uint8Array) => Uint8Array = (a) => crypto.getRandomValues(a)): string {
+export function newCallId(random: (a: Uint8Array<ArrayBuffer>) => Uint8Array = (a) => crypto.getRandomValues(a)): string {
   return [...random(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
