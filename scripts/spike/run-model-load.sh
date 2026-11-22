@@ -21,14 +21,17 @@
 # is still the same regular file (dev:inode). The confined create target is a fresh random name;
 # if the confined create ever succeeded (a FAIL), that file is left in place and reported.
 # Weights are never copied into the repo. Nothing binds TCP; port 3141 is never used.
-# Usage: scripts/spike/run-model-load.sh --model FILE.gguf [--llama-bin DIR] [--evidence-dir DIR] [--keep]
+# Usage: LLAMA_BIN=DIR MODEL_DIR=DIR scripts/spike/run-model-load.sh --model FILE.gguf [--llama-bin DIR] [--evidence-dir DIR] [--keep]
+#   LLAMA_BIN  (required, or --llama-bin) the llama.cpp build/bin folder holding llama-simple, llama-server, llama-cli
+#   MODEL_DIR  (required) the models folder; an optional LANE2-READY marker there (model=, model_sha256=) is checked in M4
 #   DIR must not exist or be an empty directory (else refused before anything runs); evidence is
 #   exported only after a completed run and nothing else in DIR is touched (see j0-evidence.sh).
 
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROFILE="$HERE/j0-confined-child.sb"
-LLAMA_BIN="$HOME/Desktop/seat-drafts/llama.cpp/build/bin"
+LLAMA_BIN="${LLAMA_BIN:-}"
+MODEL_DIR="${MODEL_DIR:-}"
 MODEL=""; EVID=""; KEEP=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -41,6 +44,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 die() { echo "FATAL: $*" >&2; exit 2; }
+[ -n "$LLAMA_BIN" ] || die "LLAMA_BIN is not set: export LLAMA_BIN=<llama.cpp build/bin folder> or pass --llama-bin DIR"
+[ -n "$MODEL_DIR" ] || die "MODEL_DIR is not set: export MODEL_DIR=<models folder> (an optional LANE2-READY marker there is checked)"
+[ -d "$LLAMA_BIN" ] || die "LLAMA_BIN is not a folder: $LLAMA_BIN"
+[ -d "$MODEL_DIR" ] || die "MODEL_DIR is not a folder: $MODEL_DIR"
 . "$HERE/j0-evidence.sh" || die "j0-evidence.sh"
 evid_check "$EVID" || exit 2
 [ -f "$MODEL" ] || die "need --model FILE.gguf"
@@ -199,8 +206,8 @@ else out FAIL M5.gpu_only_for_llm_role "exits u=$M5U llm=$M5L assistant=$M5A (se
 
 echo "== M4b sha256 after"
 SHA_AFTER=$(shasum -a 256 "$MODEL" | cut -d' ' -f1); echo "sha256_after=$SHA_AFTER" >> "$RES/env.txt"
-MARK=$(sed -n "s/^model_sha256=//p" "$HOME/Desktop/seat-drafts/models/LANE2-READY" 2>/dev/null)
-MARKMODEL=$(sed -n "s/^model=//p" "$HOME/Desktop/seat-drafts/models/LANE2-READY" 2>/dev/null)
+MARK=$(sed -n "s/^model_sha256=//p" "$MODEL_DIR/LANE2-READY" 2>/dev/null)
+MARKMODEL=$(sed -n "s/^model=//p" "$MODEL_DIR/LANE2-READY" 2>/dev/null)
 if [[ "$SHA_BEFORE" =~ ^[0-9a-f]{64}$ ]] && [ "$SHA_BEFORE" = "$SHA_AFTER" ]; then
   if [ "$MARKMODEL" = "$MODEL" ] && [ -n "$MARK" ]; then
     [ "$MARK" = "$SHA_AFTER" ] && out PASS M4.model_bytes_unchanged "sha256 $SHA_AFTER before = after = Lane 2 marker" || out FAIL M4.model_bytes_unchanged "matches before/after but NOT Lane 2's marker $MARK"

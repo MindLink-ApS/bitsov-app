@@ -50,7 +50,7 @@ impl ClientKey {
     /// Persistent clients must use `load_or_create` and platform-protected storage.
     pub fn generate_ephemeral() -> Result<Self, PairError> {
         let mut seed = Zeroizing::new([0; 32]);
-        getrandom::getrandom(&mut seed[..]).map_err(|e| PairError::Local(format!("no randomness for the client key: {e}")))?;
+        getrandom::fill(&mut seed[..]).map_err(|e| PairError::Local(format!("no randomness for the client key: {e}")))?;
         Ok(Self::from_seed(*seed))
     }
 
@@ -98,7 +98,7 @@ impl ClientKey {
         match create_new_protected(&path) {
             Ok(mut file) => {
                 let mut seed = [0u8; 32];
-                getrandom::getrandom(&mut seed).map_err(|e| {
+                getrandom::fill(&mut seed).map_err(|e| {
                     PairError::Local(format!("no randomness for the client key: {e}"))
                 })?;
                 let written = file
@@ -144,7 +144,7 @@ impl ClientKey {
                 plain_seed(&plain)?
             } else {
                 let mut seed = Zeroizing::new([0u8; 32]);
-                getrandom::getrandom(&mut seed[..]).map_err(|e| {
+                getrandom::fill(&mut seed[..]).map_err(|e| {
                     PairError::Local(format!("no randomness for the client key: {e}"))
                 })?;
                 seed

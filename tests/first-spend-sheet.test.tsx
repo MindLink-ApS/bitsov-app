@@ -218,7 +218,7 @@ describe('the sheet under a newer modal', () => {
         presets={[{ id: 'careful', ceiling_msat: 500_000, contact_msat: 50_000, room_msat: 100_000 }]}
         initialPreset="careful" maxDailyMsat={1_000_000} costLine="8 sats" blockedReason={null}
         onPreset={() => {}} onAllow={allow} onCancel={() => {}} />
-      <ShowIf when={quit()}><QuitConfirm name="Maya" onStay={() => setQuit(false)} onClose={() => {}} /></ShowIf>
+      <ShowIf when={quit()}><QuitConfirm name="Robin" onStay={() => setQuit(false)} onClose={() => {}} /></ShowIf>
     </>, host);
     try {
       setQuit(true);

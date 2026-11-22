@@ -956,6 +956,8 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
   .msg { max-width: 92%; }
   .cost { flex-wrap: wrap; row-gap: 0; }
   .cost .basis { flex-basis: 100%; }
+  /* A room's can't-send reason wraps instead of being cut off (UX-10). */
+  [data-room-composer] .cost .basis { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
   .ai-providers { padding-left: var(--s-4); padding-right: var(--s-4); flex-wrap: nowrap; overflow-x: auto; }
   .ai-provider { flex: none; }
   .ai-answer { max-width: 100%; }
@@ -1091,6 +1093,15 @@ header > .money-notice { position: fixed; top: max(var(--s-2), env(safe-area-ins
 .call-actions .call-answer { background: var(--ok); border-color: var(--ok); color: var(--bg); font-size: var(--t-lg, 1.125rem); font-weight: 650; min-height: 48px; }
 .call-actions .call-answer:hover:not(:disabled) { background: color-mix(in srgb, var(--ok) 88%, var(--bg)); }
 .call-actions .call-answer:disabled { opacity: 0.55; }
+/* Decline and hang up are the red ones, as big as Answer; colour is never the only cue (each says what it does). */
+.call-actions :is(.call-decline, [data-call-hangup]) { font-size: var(--t-lg, 1.125rem); font-weight: 650; min-height: 48px; }
+/* A call reads like a phone call: who it is, what is happening, then the choices. */
+.call-panel .call-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 2px; padding-top: var(--s-1, 4px); }
+.call-panel .call-head .call-avatar { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; flex: none; margin-bottom: var(--s-2); background: var(--raised); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-strong); font-size: 1.375rem; font-weight: 650; }
+.call-panel .call-head .call-name { margin: 0; flex: none; max-width: 100%; color: var(--ink); font-size: var(--t-xl); font-weight: 650; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
+.call-panel .call-head .call-status { margin: 0; color: var(--muted); font-size: var(--t-sm); line-height: 1.4; overflow-wrap: anywhere; }
+/* While the call is under way the head steps back for the call itself. */
+.call-panel:is([data-call-panel="live"], [data-call-panel="reconnecting"], [data-call-panel="ended"]) .call-head .call-avatar { width: 40px; height: 40px; font-size: var(--t-lg); margin-bottom: var(--s-1, 4px); }
 button.danger { background: var(--err); color: var(--err-ink); border: none; }
 .call-videos { position: relative; border-radius: 10px; overflow: hidden; background: #000; aspect-ratio: 4 / 3; }
 .call-video.remote { width: 100%; height: 100%; object-fit: cover; }
@@ -1297,7 +1308,7 @@ button.danger.soft { border-radius: var(--r-chip); padding: 7px 14px; font-weigh
 .call-panel header strong { font-weight: 600; }
 .call-panel [data-call-paid] { color: var(--muted); }
 /* An ended call that never started (e.g. above the grant ceiling): read it, nothing moved. */
-.call-panel [data-call-ended] { color: var(--ink); background: var(--raised); border-left: 3px solid var(--money); border-radius: var(--r-control); padding: var(--s-2) var(--s-3); max-width: none; line-height: 1.5; }
+.call-panel .call-status:has([data-call-ended]) { color: var(--ink); background: var(--raised); border-left: 3px solid var(--money); border-radius: var(--r-control); padding: var(--s-2) var(--s-3); max-width: none; line-height: 1.5; }
 .call-panel .duration { color: var(--muted); }
 .meeting-panel .meeting-legs label { font-size: var(--t-sm); }
 
@@ -1528,7 +1539,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .send-btn.primary, .primary.soft.send-btn, .send-btn, .composer .attach { height: 44px; min-height: 44px; border-radius: 22px; }
   .node-target-section.compact .node-target-card { min-height: 44px; }
   /* `.track-head > .track-title-btn` sets min-width: 0 so a long name can ellipsize.
-     That beats a bare `.track-title-btn` rule, so a short name ("Maya", "Josh") stayed under 44 px. */
+     That beats a bare `.track-title-btn` rule, so a short name ("Robin", "Kim") stayed under 44 px. */
   .track-head > .track-title-btn { min-width: 44px; }
   .composer-info > summary { min-width: 44px; }
   /* nowrap + flex: 1 let "Accept · 12,345 sats" and "Decline · …" overflow a phone call card. */
@@ -1536,6 +1547,15 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .call-repairs .call-actions { flex-direction: column; align-items: stretch; }
   .call-panel .call-actions button,
   .call-repairs .call-actions button { flex: none; width: 100%; white-space: normal; text-align: center; }
+  /* On a phone-sized window a ringing or calling card fills the screen, like a phone call: the person at the top, the choices at the bottom. */
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) {
+    top: max(var(--s-4), env(safe-area-inset-top, 0px)); bottom: max(var(--s-4), env(safe-area-inset-bottom, 0px));
+    left: max(var(--s-4), env(safe-area-inset-left, 0px)); right: max(var(--s-4), env(safe-area-inset-right, 0px));
+    width: auto; max-height: none; padding: var(--s-6) var(--s-4) var(--s-4);
+  }
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) .call-head { padding-top: 8dvh; padding-bottom: var(--s-4); }
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) .call-head .call-avatar { width: 96px; height: 96px; font-size: 2rem; }
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) .call-actions { margin-top: auto; }
   /* Message bar: the text gets its own full row; emoji, voice, + and Send sit under it. */
   .signal-bar { flex-wrap: wrap; row-gap: var(--s-2); }
   .signal-bar > textarea { order: -1; flex: 1 1 100%; }
@@ -2012,3 +2032,32 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
 .approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; list-style: decimal; }
 .approval-steps > li + li { margin-top: var(--s-2); }
 .approval-steps code { display: block; margin: var(--s-1) 0; overflow-wrap: anywhere; }
+
+/* The Ring confirmation on phones: a sheet at the bottom of the screen, inside the safe area, never taller than it.
+   With large text it scrolls up and down only: every word wraps inside it, and Cancel and Ring stay pinned at its foot,
+   each on its own row when they do not fit side by side. Margins and padding are in px so large text keeps its width. */
+@media (max-width: 480px) {
+  .call-confirm {
+    position: fixed; top: auto; left: max(12px, var(--safe-area-left, 0px)); right: max(12px, var(--safe-area-right, 0px));
+    bottom: max(12px, var(--safe-area-bottom, 0px)); width: auto; max-width: none; z-index: 55; padding: 12px;
+    max-height: calc(100dvh - max(12px, var(--safe-area-top, 0px)) - max(12px, var(--safe-area-bottom, 0px)));
+    overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
+  }
+  .call-confirm > * { min-width: 0; max-width: 100%; }
+  .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; max-width: none; }
+  .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+}
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm {
+  position: fixed; top: auto; left: max(12px, var(--safe-area-left)); right: max(12px, var(--safe-area-right));
+  bottom: max(12px, var(--safe-area-bottom)); width: auto; max-width: none; z-index: 55; padding: 12px;
+  max-height: calc(100dvh - max(12px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+  overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
+}
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm > * { min-width: 0; max-width: 100%; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; max-width: none; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* iOS keeps the full layout height under the keyboard: sit on the keyboard and fit the visible area, like .call-panel and .toast. */
+html[data-platform='ios'] .call-confirm {
+  bottom: calc(var(--keyboard-inset) + max(12px, var(--safe-area-bottom)));
+  max-height: calc(var(--visible-height, 100dvh) - max(12px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+}

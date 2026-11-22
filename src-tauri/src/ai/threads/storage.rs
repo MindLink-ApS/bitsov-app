@@ -38,7 +38,7 @@ impl ThreadSealer<'_> {
         // The pairing bridge accepts 4 KB, so wrap a fresh data key, not the
         // transcript. Neither this key nor the enclave private key goes in Keychain.
         let mut key = Zeroizing::new(vec![0; 32]);
-        getrandom::getrandom(&mut key).map_err(|_| "Could not create the thread key.")?;
+        getrandom::fill(&mut key).map_err(|_| "Could not create the thread key.")?;
         let key_purpose = format!("ai-storage-key-v2:{purpose}");
         let wrapped = self.hardware.seal(&key_purpose, &key)?;
         if wrapped.is_empty()

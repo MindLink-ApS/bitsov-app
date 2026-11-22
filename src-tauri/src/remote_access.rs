@@ -550,7 +550,7 @@ pub fn node_id_fingerprint(node_id_hex: &str) -> String {
 
 pub fn new_local_auth_token() -> Result<String, RemoteError> {
     let mut token = [0u8; 32];
-    getrandom::getrandom(&mut token).map_err(|error| {
+    getrandom::fill(&mut token).map_err(|error| {
         RemoteError::Local(format!("cannot secure remote loopback proxy: {error}"))
     })?;
     Ok(hex::encode(token))
@@ -1389,7 +1389,7 @@ async fn pinned_handshake_bound<S: AsyncRead + AsyncWrite + Unpin>(
             .map_err(|_| RemoteError::Local("invalid built-in Noise protocol".into()))?;
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_initiator()
+            .and_then(|b| b.build_initiator())
             .map_err(|e| RemoteError::Local(format!("cannot initialize Noise: {e}")))?;
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let length = noise
@@ -2603,6 +2603,7 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
         .redirect(reqwest::redirect::Policy::none())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_proxy(
     api_base: &str,
     app_data_dir: &Path,
@@ -3649,11 +3650,11 @@ mod tests {
         let responder_secret = [42u8; 32];
         let mut initiator = Builder::new(params.clone())
             .local_private_key(&initiator_secret)
-            .build_initiator()
+            .and_then(|b| b.build_initiator())
             .unwrap();
         let mut responder = Builder::new(params)
             .local_private_key(&responder_secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut message = vec![0u8; MAX_HANDSHAKE_FRAME];
         let mut plaintext = vec![0u8; MAX_HANDSHAKE_FRAME];
@@ -4027,7 +4028,7 @@ mod tests {
         let params = NOISE_PROTOCOL.parse().unwrap();
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
@@ -4047,7 +4048,7 @@ mod tests {
         let params = NOISE_PROTOCOL.parse().unwrap();
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
@@ -4078,7 +4079,7 @@ mod tests {
     // Count socket handshakes, not requests, so losing pooling fails this test.
     async fn polling_responder(mut stream: TcpStream, secret: [u8; 32]) -> Result<(), RemoteError> {
         let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
-            .local_private_key(&secret).build_responder().unwrap();
+            .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
@@ -4302,7 +4303,7 @@ mod tests {
     // Complete the handshake and read the app's authentication request.
     async fn read_auth_request(stream: &mut TcpStream, secret: [u8; 32]) -> Result<TransportState, RemoteError> {
         let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
-            .local_private_key(&secret).build_responder().unwrap();
+            .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
@@ -4947,7 +4948,7 @@ mod tests {
             let key = ClientKey::load_or_create(store.path()).unwrap();
             remember_endpoint(&descriptor, &answering_endpoint);
 
-            let error = connect_authenticated(&descriptor, &key, "test phone").await.err().expect("the box refused");
+            let error = connect_authenticated(&descriptor, &key, "test phone").await.expect_err("the box refused");
             assert!(expected(&error), "{error}");
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(requests.load(Ordering::SeqCst), 1);

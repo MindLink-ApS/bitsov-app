@@ -183,7 +183,7 @@ fn load_or_create_with_sealer(dir: &Path, store: &dyn KeyStore, sealer: Option<&
                 (None, Some((_, seed))) => seed.clone(),
                 (None, None) => {
                     let mut seed = Zeroizing::new([0; 32]);
-                    getrandom::getrandom(&mut seed[..]).map_err(|_| failure("no randomness for client key"))?;
+                    getrandom::fill(&mut seed[..]).map_err(|_| failure("no randomness for client key"))?;
                     seed
                 }
             };

@@ -60,7 +60,7 @@ impl Sealer for LinuxSealer {
         if blake3::hash(&wrapping_key).as_bytes() != &self.key_id { return Err(failed(())); }
         let key = LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, &wrapping_key).map_err(failed)?);
         let mut nonce = [0; 12];
-        getrandom::getrandom(&mut nonce).map_err(failed)?;
+        getrandom::fill(&mut nonce).map_err(failed)?;
         let mut sealed = Vec::with_capacity(PREFIX_LEN + plaintext.len() + 16);
         sealed.extend_from_slice(HEADER);
         sealed.extend_from_slice(&self.key_id);

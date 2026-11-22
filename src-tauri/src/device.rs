@@ -220,7 +220,7 @@ impl Intent {
             return Err(ActionError::invalid("The per-message maximum must fit the daily budget."));
         }
         let mut nonce = [0u8; 16];
-        getrandom::getrandom(&mut nonce)
+        getrandom::fill(&mut nonce)
             .map_err(|_| ActionError::new("device_key", "This Mac could not produce a random nonce."))?;
         Ok(Self {
             device_key_id: key_id.to_string(),
@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn the_dialog_names_the_contact_by_key_and_both_amounts() {
-        assert_eq!(intent_reason("Maya", 200_000, 21_187), "approve paying up to 200 sats in total for up to 24 hours, at most 21\u{202f}187 msat per message, to Maya");
+        assert_eq!(intent_reason("Robin", 200_000, 21_187), "approve paying up to 200 sats in total for up to 24 hours, at most 21\u{202f}187 msat per message, to Robin");
         assert_eq!(contact_key(PEER), "node aaaaaaaa…aaaaaaaa");
         assert_eq!(intent_reason(&contact_key(PEER), 200_000, 2_000), "approve paying up to 200 sats in total for up to 24 hours, at most 2 sats per message, to node aaaaaaaa…aaaaaaaa");
         // Built from the signed intent alone: no label, node-side or local, can reach it.
