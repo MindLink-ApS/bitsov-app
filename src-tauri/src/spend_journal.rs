@@ -1981,6 +1981,21 @@ mod windows_journal_tests {
         }
     }
 
+    // The journal folder itself is a junction onto a private empty folder.
+    // A missing record there is not an empty journal.
+    #[test]
+    fn a_redirected_journal_root_is_refused() {
+        if elevated() { return; }
+        let root = temp_root("redirected-journal-root");
+        // A new child, so the private access list is applied at creation.
+        let target = root.join("empty");
+        crate::private_fs::ensure_dir(&target).unwrap();
+        let dir = root.join("app-spend");
+        junction(&dir, &target);
+        assert!(read_pending(&dir).is_err(), "a redirected journal folder is not an empty slot");
+        assert!(list_operations(&dir, "node", None, 100).is_err(), "a redirected journal folder is not an empty history");
+    }
+
     // W02 / W14 on the history folder itself
     #[test]
     fn tampered_history_is_refused_without_writes() {
@@ -2050,6 +2065,15 @@ mod journal_folder_tests {
         assert_eq!(folders("/data/app-spend/other.json"), None);
         assert_eq!(folders("/data/app-spend/a/b/c/d/e/f.json"), None);
         assert_eq!(folders("ops"), None);
+    }
+
+    /// A file under a journal subdirectory can share a top-level journal name.
+    /// The chain must still start at the journal folder, not at that subdirectory.
+    #[test]
+    fn a_nested_journal_file_name_keeps_the_journal_folder() {
+        let root = PathBuf::from("/data/ops/app-spend");
+        let path = root.join("ops").join("spend-pending.json");
+        assert_eq!(folders(path.to_str().unwrap()).unwrap()[0], root);
     }
 }
 
