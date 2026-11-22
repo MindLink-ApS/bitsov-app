@@ -220,7 +220,7 @@ impl Intent {
             return Err(ActionError::invalid("The per-message maximum must fit the daily budget."));
         }
         let mut nonce = [0u8; 16];
-        getrandom::getrandom(&mut nonce)
+        getrandom::fill(&mut nonce)
             .map_err(|_| ActionError::new("device_key", "This Mac could not produce a random nonce."))?;
         Ok(Self {
             device_key_id: key_id.to_string(),

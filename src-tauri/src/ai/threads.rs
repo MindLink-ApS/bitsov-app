@@ -49,7 +49,7 @@ pub enum Request {
 
 fn revision() -> Result<String, String> {
     let mut bytes = [0; 16];
-    getrandom::getrandom(&mut bytes).map_err(|_| "Could not create a thread revision.")?;
+    getrandom::fill(&mut bytes).map_err(|_| "Could not create a thread revision.")?;
     Ok(hex::encode(bytes))
 }
 fn check(thread: &Thread) -> Result<(), String> {
@@ -323,7 +323,7 @@ impl LegacyMacSealer {
         let (mut status, mut length, mut bytes) = read()?;
         if status == -25300 && create {
             let mut key = Zeroizing::new(vec![0; 32]);
-            getrandom::getrandom(&mut key).map_err(|_| "Could not create the thread key.")?;
+            getrandom::fill(&mut key).map_err(|_| "Could not create the thread key.")?;
             let added = add_item(&service, purpose, &key).map_err(|_| "Invalid thread key name.")?;
             if added != 0 && added != -25299 {
                 return Err(format!("Keychain could not save the thread key ({added})."));
@@ -355,7 +355,7 @@ fn encrypt(key: &[u8], purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, Strin
     let key =
         LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_| "Invalid thread key.")?);
     let mut nonce = [0; 12];
-    getrandom::getrandom(&mut nonce).map_err(|_| "Could not seal the assistant thread.")?;
+    getrandom::fill(&mut nonce).map_err(|_| "Could not seal the assistant thread.")?;
     let mut body = plaintext.to_vec();
     key.seal_in_place_append_tag(
         Nonce::assume_unique_for_key(nonce),

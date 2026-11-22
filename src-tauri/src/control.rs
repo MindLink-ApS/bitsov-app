@@ -1209,7 +1209,7 @@ pub fn ws_url(api_base: &str, token: &str) -> Result<String, String> {
 pub fn backoff(attempt: u32) -> Duration {
     let ceiling_ms = ((1u64 << attempt.min(5)) * 1000).min(30_000);
     let mut entropy = [0u8; 8];
-    let _ = getrandom::getrandom(&mut entropy);
+    let _ = getrandom::fill(&mut entropy);
     Duration::from_millis(ceiling_ms / 2 + u64::from_le_bytes(entropy) % (ceiling_ms / 2 + 1))
 }
 
