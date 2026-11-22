@@ -797,8 +797,8 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     }
   };
 
-  // A poll joins the read in flight; an explicit refresh (after starting a deposit)
-  // always reads afresh, and being newest, its reply wins over the older one.
+  // A poll joins the read in flight. An explicit refresh reads afresh when the
+  // node is ready, and that reply is newer than a poll still in flight.
   const refresh = (explicit = false): Promise<void> => {
     if (disposed || !props.ready()) return Promise.resolve();
     if (inFlight && !explicit) return inFlight;
@@ -832,9 +832,18 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     setBusy(true);
     setError(null);
     try {
-      setFund(await props.source.fundStart(value));
+      const started = await props.source.fundStart(value);
+      // The panel may have closed while the node was starting the deposit.
+      if (disposed) return;
+      // A status read that began before this start must not overwrite it. refresh()
+      // only bumps `latest` when it actually reads, and it does not read while the node is not ready.
+      latest++;
+      setFund(started);
       await refresh(true);
     } catch (e) {
+      // The read still in flight must not clear this failure.
+      latest++;
+      if (disposed) return;
       setError(isMoneyNotReady(e) ? null : { message: String(e), summary: 'obFundStartFailed' });
     } finally {
       setBusy(false);

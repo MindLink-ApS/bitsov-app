@@ -31,10 +31,15 @@ function stubHost(opts: { started?: unknown; holdStart?: boolean; holdFallback?:
   const reads: Deferred[] = [];
   const fallbacks: Deferred[] = [];
   const starts: Deferred[] = [];
-  const counts = { fundState: 0, fundingAddress: 0, fundStart: 0 };
-  const host = { reads, fallbacks, starts, counts, manual: false };
+  const counts = { fundState: 0, fundingAddress: 0, fundStart: 0, nodeStatus: 0 };
+  // `ready` is the node status the app polls. A test can drop it while a deposit start is in flight.
+  const connection = { ready: true };
+  const host = { reads, fallbacks, starts, counts, manual: false, connection };
   const replies: Record<string, () => unknown> = {
-    node_status: () => ({ ready: true, node_id: OWN, error: null }),
+    node_status: () => {
+      counts.nodeStatus++;
+      return { ready: connection.ready, node_id: OWN, error: null };
+    },
     trust_acknowledge: () => true,
     pairing_status: () => ({
       state: 'paired', scopes: ['read', 'receive'], short_code: null,
@@ -343,4 +348,73 @@ it.each([
   host.reads[1].resolve(fundState({ funded: true, funding_amount_sats_received: 1000.5, funding_evidence: 'txid:0' }));
   await flush();
   expect(panel()!.querySelector('.funded .hint')?.textContent).toContain(observed);
+});
+
+const START_FAILED = 'Could not get a deposit address. Check that your node is running, then try again.';
+
+/** The app's own status poll (every 1.5 s), recorded so a test can run it without also firing the 3 s deposit poll. */
+function watchStatusPoll() {
+  const polls: Array<() => void> = [];
+  const schedule = window.setInterval;
+  const wrapped = (handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    if (timeout === 1500 && typeof handler === 'function') {
+      const run = handler as (...params: unknown[]) => void;
+      polls.push(() => { run(...args); });
+    }
+    return schedule(handler, timeout, ...(args as []));
+  };
+  vi.spyOn(window, 'setInterval').mockImplementation(wrapped as typeof window.setInterval);
+  return polls;
+}
+
+it('keeps a started deposit when the node is not ready and an older status read then says not started', async () => {
+  vi.useFakeTimers();
+  const polls = watchStatusPoll();
+  const host = stubHost({ holdStart: true });
+  await openWallet(host);
+  const mounted = panel();
+  const stale = await tickPending(host);
+  const reads = host.counts.fundState;
+  const statuses = host.counts.nodeStatus;
+  submitStart();
+  await flush();
+  expect(host.starts).toHaveLength(1);
+  host.connection.ready = false;
+  expect(polls.length).toBeGreaterThan(0);
+  polls[polls.length - 1]();
+  await flush();
+  expect(host.counts.nodeStatus).toBeGreaterThan(statuses);
+  expect(panel(), 'the deposit panel stays mounted while the node is briefly not ready').toBe(mounted);
+  host.starts[0].resolve(fundState());
+  await flush();
+  expect(host.counts.fundState, 'a not-ready refresh must not start another status read').toBe(reads);
+  expect(shownAddress()).toBe(ADDRESS);
+  // The read that was already in flight before the start still answers "not started".
+  stale.resolve(null);
+  await flush();
+  expect(shownAddress(), 'that older read must not clear the deposit that just started').toBe(ADDRESS);
+  expect(panel()!.querySelector('form')).toBeNull();
+});
+
+it('keeps a failed deposit start when an older status read then returns not started', async () => {
+  vi.useFakeTimers();
+  const host = stubHost({ holdStart: true });
+  await openWallet(host);
+  const stale = await tickPending(host);
+  const raw = 'Error: POST /onboarding/start returned 502: {"error":"wallet"}';
+  submitStart();
+  await flush();
+  expect(host.starts).toHaveLength(1);
+  const reads = host.counts.fundState;
+  host.starts[0].reject(raw);
+  await flush();
+  expect(host.counts.fundState, 'a failed start must not refresh the status').toBe(reads);
+  expect(panel()!.querySelector('[data-soft-summary]')?.textContent).toBe(START_FAILED);
+  expect(panel()!.querySelector('[data-soft-detail]')?.textContent).toContain(raw);
+  stale.resolve(null);
+  await flush();
+  expect(panel()!.querySelector('[data-soft-summary]')?.textContent).toBe(START_FAILED);
+  expect(panel()!.querySelector('[data-soft-detail]')?.textContent).toContain(raw);
+  expect(shownAddress()).toBeNull();
+  expect(panel()!.querySelector('[data-fund-start]')).not.toBeNull();
 });
