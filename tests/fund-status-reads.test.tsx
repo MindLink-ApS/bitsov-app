@@ -653,3 +653,33 @@ it('shows the next status after a funded start whose first status was empty', as
   expect(panel()!.querySelector('.progress strong')?.textContent).toBe('600 sats');
   expect(panel()!.textContent).not.toContain('txid:stale');
 });
+
+it('a failed confirming read after a held empty status says it retries, and the next tick does', async () => {
+  vi.useFakeTimers();
+  const host = stubHost({ holdStart: true });
+  await openWallet(host);
+  submitStart();
+  await flush();
+  const before = host.counts.fundState;
+  host.starts[0].resolve(fundState({ funded: true, funding_amount_sats_received: 1000, funding_evidence: 'txid:held' }));
+  await flush();
+  host.reads[0].resolve(null);
+  await flush();
+  expect(panel()!.querySelector('.funded'), 'the empty status is held').not.toBeNull();
+
+  // The confirming read fails: the deposit still shows as funded, yet this read is retried,
+  // so the summary must promise the retry, not say that BitSov stopped checking.
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.counts.fundState).toBe(before + 2);
+  host.reads[1].reject(new Error('node read timed out'));
+  await flush();
+  expect(panel()!.textContent).toContain('BitSov tries again by itself every few seconds.');
+  expect(panel()!.textContent).not.toContain('BitSov will not check again by itself.');
+
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.counts.fundState, 'the next tick reads again').toBe(before + 3);
+  host.reads[2].resolve(fundState({ funding_amount_sats_received: 600 }));
+  await flush();
+  expect(panel()!.textContent).not.toContain('BitSov tries again by itself every few seconds.');
+  expect(panel()!.querySelector('.progress strong')?.textContent).toBe('600 sats');
+});
