@@ -89,7 +89,7 @@ describe('P1-3: a person, never "Unnamed contact (c1926…)"', () => {
   });
 
   it('warns instead of offering the name when it copies a name you gave someone else', async () => {
-    await open(withClaims({ [F]: 'maya' }));
+    await open(withClaims({ [F]: 'robin' }));
     await vi.waitFor(() => expect($(`[data-track="peer:${F}"]`)).not.toBeNull());
     $<HTMLButtonElement>(`[data-track="peer:${F}"]`)!.click();
     await vi.waitFor(() => expect($('[data-claimed-name]')).not.toBeNull());

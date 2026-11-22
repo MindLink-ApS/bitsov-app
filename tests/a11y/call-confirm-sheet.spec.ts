@@ -28,7 +28,7 @@ function confirmation(lang: 'en' | 'da') {
   const control = lang === 'en' ? controlEn : controlDa;
   const amount = (n: string) => `${n} sats`;
   return `<div class="call-confirm" role="dialog" data-call-confirm-box="audio">
-    <p class="call-confirm-text"><strong>${app.uiCall} Maya?</strong> <span class="hint">${app.uiUpTo105} ${amount('21')}${app.uiNothingIsPaidUntilYouPressRing}</span></p>
+    <p class="call-confirm-text"><strong>${app.uiCall} Robin?</strong> <span class="hint">${app.uiUpTo105} ${amount('21')}${app.uiNothingIsPaidUntilYouPressRing}</span></p>
     <p class="hint" data-call-minute-price>${fill(control.uiCallMinutePrice, amount('10'), amount('5'))}</p>
     <p class="hint" data-call-reservation-max>${fill(control.uiCallReservationShort, amount('3 600'))}</p>
     <details class="quiet-detail" data-call-reservation-detail><summary>${app.uiDetails}</summary><p class="hint">${fill(control.uiCallReservationMax, amount('3 600'))}</p></details>
@@ -129,7 +129,7 @@ for (const platform of PLATFORMS) for (const phone of PHONES) for (const lang of
       return route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<!doctype html><html lang="${lang}"${platform === 'none' ? '' : ` data-platform="${platform}"`}><head>
         <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
         <style>${withInsets(area)}</style><style>${rootRule} *, *::before, *::after { animation: none !important; transition: none !important; }</style></head>
-        <body><div class="track-head"><strong>Maya</strong><div class="call-buttons"><button type="button" class="soft call-button icon-btn" aria-label="Call">c</button>
+        <body><div class="track-head"><strong>Robin</strong><div class="call-buttons"><button type="button" class="soft call-button icon-btn" aria-label="Call">c</button>
         ${confirmation(lang)}</div></div></body></html>` });
     });
     await page.goto('http://sheet.test/');
@@ -186,7 +186,7 @@ for (const phone of KEYBOARDS) for (const root of [16, 32]) {
         style="--visible-height: ${visible}px; --visible-top: 0px; --keyboard-inset: ${phone.keyboard}px"><head>
         <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
         <style>${withInsets(phone)}</style><style>html[data-platform="ios"] { font-size: ${root}px; } *, *::before, *::after { animation: none !important; transition: none !important; }</style></head>
-        <body><div class="track-head"><strong>Maya</strong><div class="call-buttons"><button type="button" class="soft call-button icon-btn" aria-label="Call">c</button>
+        <body><div class="track-head"><strong>Robin</strong><div class="call-buttons"><button type="button" class="soft call-button icon-btn" aria-label="Call">c</button>
         ${confirmation('en')}</div></div></body></html>` });
     });
     await page.goto('http://sheet.test/');

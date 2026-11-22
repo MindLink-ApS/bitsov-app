@@ -13694,7 +13694,7 @@ mod control_read_tests {
                 "lightning_node_pubkey": "02cd"
             }),
             "/peers" => serde_json::json!([{
-                "node_id": A, "addr": "127.0.0.1:9735", "label": "Maya", "connected": true,
+                "node_id": A, "addr": "127.0.0.1:9735", "label": "Robin", "connected": true,
                 "auto_connect": true, "fingerprint": "aaaaaaaa", "safety_number": "1 2 3"
             }]),
             "/rooms" => serde_json::json!([{
@@ -13778,7 +13778,7 @@ mod control_read_tests {
         assert_eq!(node.targets(), ["/api/v1/status"], "STUN comes only from owner status, never public health");
 
         let peers: Vec<control::Peer> = get_json(&node.state, "/peers").await.unwrap();
-        assert_eq!(peers[0].label.as_deref(), Some("Maya"));
+        assert_eq!(peers[0].label.as_deref(), Some("Robin"));
         let rooms: Vec<control::Room> = get_json(&node.state, "/rooms").await.unwrap();
         assert_eq!(rooms[0].name, "Mexico");
         assert_eq!(read_room_members(&node.state, ROOM).await.unwrap(), vec![A.to_string()]);
@@ -23334,7 +23334,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
             issued_at: now,
             expires_at: now + 24 * 3600,
             prices: FrontDoorPrices { admission_msat: 100_000, message_msat: 10_000, page_msat: 1_000, price_epoch: 0 },
-            profile: FrontDoorProfile { kind: ProfileKind::Person, display_name: "Maya".into(), tagline: String::new(), about: String::new(), avatar: None },
+            profile: FrontDoorProfile { kind: ProfileKind::Person, display_name: "Robin".into(), tagline: String::new(), about: String::new(), avatar: None },
             cv: None,
             media: vec![],
             site: None,
@@ -23492,7 +23492,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let read = do_porch_read(&node.state, &peer, porch::CARD_PATH, quote.total_msat).await.unwrap();
         assert_eq!((read.status, read.kind, read.amount_msat, read.total_msat), ("ok", "card", 1_000, 6_000));
         let shown = read.card.unwrap();
-        assert_eq!((shown.view.profile.display_name.as_str(), shown.view.seq, shown.cached), ("Maya", 2, false));
+        assert_eq!((shown.view.profile.display_name.as_str(), shown.view.seq, shown.cached), ("Robin", 2, false));
         assert_eq!(fetches(&node), [serde_json::json!({"node_id": peer, "path": "/front-door.json", "max_total_msat": 6000, "max_routing_fee_msat": 5000})]);
         assert_eq!(budget_now(&node.state).accounted_msat, 6_000);
         assert_eq!(budget_now(&node.state).spent_msat, 1_000);
@@ -26136,7 +26136,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let sent = node.posts().into_iter().find(|(p, _)| p == "/pair/device-key").unwrap().1;
         assert!(!sent.to_string().contains(&hex::encode(&blob)));
 
-        // One tap for Maya: the node verified the signature over the exact terms.
+        // One tap for Robin: the node verified the signature over the exact terms.
         *g1.grant.lock().unwrap() = relation_grant(A, 7000);
         let view = do_relation_approve(s, A, None, Some(7000)).await.unwrap();
         assert_eq!((view.state, view.basis), (act::SpendState::Open, Some(act::SpendBasis::NodeGrant)));

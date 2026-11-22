@@ -86,15 +86,15 @@ describe('the call sheet head', () => {
   it.each(STATES)('%s says one plain status line (EN and DA)', (_case, over, en, da) => {
     for (const [lang, said] of [['en', en], ['da', da]] as [Language, string][]) {
       setLanguagePref(lang);
-      expect(callStatusLine(view(over), 'Maya')).toBe(said);
+      expect(callStatusLine(view(over), 'Robin')).toBe(said);
     }
   });
 
   it('a known contact: name as the heading, initials in the avatar, the clock beside the status but never announced', () => {
-    dispose = render(() => <CallSheetHead view={view({ phase: 'live', liveAt: 1_000 })} name="Maya Jensen" known nameId="n" statusId="s" now={66_000} />, root);
+    dispose = render(() => <CallSheetHead view={view({ phase: 'live', liveAt: 1_000 })} name="Robin Jensen" known nameId="n" statusId="s" now={66_000} />, root);
     const heading = root.querySelector('h2#n')!;
-    expect(heading.textContent).toBe('Maya Jensen');
-    expect(root.querySelector('[data-call-avatar="initials"]')!.textContent).toBe('MJ');
+    expect(heading.textContent).toBe('Robin Jensen');
+    expect(root.querySelector('[data-call-avatar="initials"]')!.textContent).toBe('RJ');
     expect(root.querySelector('[data-call-avatar]')!.getAttribute('aria-hidden')).toBe('true');
     expect(root.querySelector('#s')!.textContent).toBe('In call · 1:05');
     expect(root.querySelector('[data-call-title]')!.textContent).toBe('In call');
@@ -104,7 +104,7 @@ describe('the call sheet head', () => {
   });
 
   it('an ended call that never connected keeps the "read this" highlight on its status line', () => {
-    dispose = render(() => <div class="call-panel"><CallSheetHead view={view({ phase: 'ended', reason: 'declined' })} name="Maya" known nameId="n" statusId="s" now={0} /></div>, root);
+    dispose = render(() => <div class="call-panel"><CallSheetHead view={view({ phase: 'ended', reason: 'declined' })} name="Robin" known nameId="n" statusId="s" now={0} /></div>, root);
     const css = readFileSync(join(process.cwd(), 'src/styles.css'), 'utf8');
     const selectors = [...css.matchAll(/^([^{}\n]*\[data-call-ended\][^{}\n]*)\{/gm)].map((m) => m[1].trim());
     expect(selectors.length).toBeGreaterThan(0);
@@ -124,7 +124,7 @@ describe('the call sheet head', () => {
   });
 
   it('initials come from the first and last word, in capitals', () => {
-    expect(callInitials('maya')).toBe('M');
+    expect(callInitials('robin')).toBe('R');
     expect(callInitials('  Far  ')).toBe('F');
     expect(callInitials('Anne Sofie Holm')).toBe('AH');
     expect(callInitials('Øjvind Ærø')).toBe('ØÆ');
@@ -194,7 +194,7 @@ const paired: PairingView = { state: 'paired', scopes: ['read', 'receive', 'spen
 const spending = (): SpendView => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 });
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(overrides: Record<string, Reply> = {}, name: string | null = 'Maya') {
+function stubHost(overrides: Record<string, Reply> = {}, name: string | null = 'Robin') {
   resetContactsForTests();
   if (name) setPetname(A, name);
   const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
@@ -328,8 +328,8 @@ describe('the call sheet in the app', () => {
   };
 
   it.each([
-    ['en', 'Maya', 'Incoming audio call', 'Answer', 'Decline', 'Details'],
-    ['da', 'Maya', 'Indgående lydopkald', 'Besvar', 'Afvis', 'Detaljer'],
+    ['en', 'Robin', 'Incoming audio call', 'Answer', 'Decline', 'Details'],
+    ['da', 'Robin', 'Indgående lydopkald', 'Besvar', 'Afvis', 'Detaljer'],
   ] as const)('incoming (%s): the person first, a big green Answer and a red Decline, no money on its face', async (lang, name, status, answer, decline, details) => {
     const host = stubHost();
     await openShell();
@@ -407,7 +407,7 @@ describe('the call sheet in the app', () => {
     key('Escape');
     expect($('[data-call-panel="incoming"]')).not.toBeNull();
     // The quiet call is still announced (once) for screen readers.
-    expect($('[data-incoming-announcement]')!.textContent).toBe('Maya is calling');
+    expect($('[data-incoming-announcement]')!.textContent).toBe('Robin is calling');
     expect(host.used('call_signal')).toHaveLength(0);
     expect(host.used('op_end_call')).toHaveLength(0);
     expect(host.used('spend_request')).toHaveLength(0);
@@ -567,7 +567,7 @@ describe('the call sheet in the app', () => {
     await ring();
     await vi.waitFor(() => expect($('[data-call-panel="calling"]')).not.toBeNull());
     let panel = $('[data-call-panel="calling"]')!;
-    expect(panel.querySelector('h2')!.textContent).toBe('Maya');
+    expect(panel.querySelector('h2')!.textContent).toBe('Robin');
     expect($('[data-call-title]')!.textContent).toBe(calling);
     expect([...panel.querySelectorAll('.call-actions button')].map((b) => b.textContent)).toEqual([cancel]);
     expect($('[data-call-hangup]')!.classList.contains('danger')).toBe(true);

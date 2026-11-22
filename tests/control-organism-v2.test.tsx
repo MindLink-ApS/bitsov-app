@@ -276,6 +276,6 @@ describe('Body panel and stream on an N1/N2 node', () => {
     $<HTMLButtonElement>(`[data-track="peer:${SAMPLE_PEERS[0].node_id}"]`)!.click();
     await vi.waitFor(() => expect($('[data-door="in-refused"]')).not.toBeNull());
     expect($('[data-door="in-refused"]')!.textContent).toContain('needed 2 sats · paid 1 sat');
-    expect($('[data-door="in-refused"]')!.textContent).toContain('Signed by Maya');
+    expect($('[data-door="in-refused"]')!.textContent).toContain('Signed by Robin');
   });
 });

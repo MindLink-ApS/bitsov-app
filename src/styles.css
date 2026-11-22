@@ -1537,7 +1537,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .send-btn.primary, .primary.soft.send-btn, .send-btn, .composer .attach { height: 44px; min-height: 44px; border-radius: 22px; }
   .node-target-section.compact .node-target-card { min-height: 44px; }
   /* `.track-head > .track-title-btn` sets min-width: 0 so a long name can ellipsize.
-     That beats a bare `.track-title-btn` rule, so a short name ("Maya", "Josh") stayed under 44 px. */
+     That beats a bare `.track-title-btn` rule, so a short name ("Robin", "Kim") stayed under 44 px. */
   .track-head > .track-title-btn { min-width: 44px; }
   .composer-info > summary { min-width: 44px; }
   /* nowrap + flex: 1 let "Accept · 12,345 sats" and "Decline · …" overflow a phone call card. */

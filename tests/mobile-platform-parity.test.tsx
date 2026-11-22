@@ -211,7 +211,7 @@ describe.each([
       nonce: '11'.repeat(16), expires_at: Date.now() / 1000 + 200, approval_message: 'test message', status: 'pending', owner_action: null,
     };
     show(() => <>
-      <TouchApproval peer={'a'.repeat(64)} name="Maya" priceMsat={2000} actions={{ approveContact: async () => {} } as never} />
+      <TouchApproval peer={'a'.repeat(64)} name="Robin" priceMsat={2000} actions={{ approveContact: async () => {} } as never} />
       <OwnerApprovals approvals={[approval]} now={Date.now()} approve={vi.fn()} />
     </>);
     expect($('[data-approval-message] summary').textContent).toBe(`Exact message your ${device} signs`);
