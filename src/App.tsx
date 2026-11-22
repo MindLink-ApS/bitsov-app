@@ -771,6 +771,9 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   let inFlight: Promise<void> | null = null;
   // Set after a successful start. The next null status does not undo that deposit.
   let holdStarted = false;
+  // The interval stops once funded. A null held after that start still needs the
+  // one confirming read, until a real status arrives or that next read is empty.
+  let confirmHeld = false;
   const stale = (id: number) => disposed || id !== latest;
 
   const read = async () => {
@@ -783,9 +786,11 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       if (state === null && holdStarted && fund()) {
         holdStarted = false;
         setError(null);
+        confirmHeld = fund()!.funded;
         return;
       }
       holdStarted = false;
+      confirmHeld = false;
       setFund(state);
       // A failed start stays until the owner tries again or a deposit is observed.
       // A status-read failure is separate, and any answer clears it.
@@ -828,7 +833,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   onMount(() => {
     void refresh();
     timer = window.setInterval(() => {
-      if (!fund()?.funded) void refresh();
+      if (!fund()?.funded || confirmHeld) void refresh();
     }, 3000);
   });
   onCleanup(() => {
@@ -869,11 +874,12 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   };
 
   // The interval above stops reading once the node reports funded, so a status
-  // failure in that state must not promise an automatic retry.
+  // failure in that state must not promise an automatic retry. A null still
+  // being confirmed after the start is the exception: that read does retry.
   const errorSummary = () => {
     const summary = error()?.summary;
     if (!summary) return undefined;
-    return t(summary === 'obFundStateFailed' && fund()?.funded ? 'obFundStateStopped' : summary);
+    return t(summary === 'obFundStateFailed' && fund()?.funded && !confirmHeld ? 'obFundStateStopped' : summary);
   };
 
   const depositAddress = () => fund()?.funding_address ?? address()?.address ?? null;
