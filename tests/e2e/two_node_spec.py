@@ -392,6 +392,8 @@ def run(r):
 
     # ---------------------------------------------------------------- step 7
     with r.Step(7, 'Ask your node: "what did I spend today" answers from real node data with freshness') as s:
+        # Ask your node sits in the sidebar's folded Advanced group: open it first (a no-op when already open).
+        r.ui_try('click', selector='[data-rail-advanced]:not([open]) > summary', timeoutMs=3000)
         r.ui('click', selector='[data-track="ai"]')
         r.ui('fill', selector='textarea[data-ai-input]', value='what did I spend today')
         r.ui('click', selector='button[data-ai-ask]')

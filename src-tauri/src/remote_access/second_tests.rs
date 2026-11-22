@@ -2,10 +2,10 @@
 use super::*;
 // Only the desktop macOS enrollment tests use the Keystore-independent wire
 // server. The ticket validation regression below must also run on Linux CI.
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 pub(crate) use fixtures::{node, first_node, claim_code};
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 mod fixtures {
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
@@ -47,7 +47,7 @@ async fn enrollment_node(finalize_status: u16, first_name: Option<&'static str>)
     let server = tokio::spawn(async move {
         for first in [true, false] {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).build_responder().unwrap();
+            let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
             let mut out = vec![0;MAX_HANDSHAKE_FRAME];
             let msg = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await.unwrap();
             hs.read_message(&msg, &mut out).unwrap();
@@ -120,8 +120,10 @@ async fn respond(stream: &mut TcpStream, noise: &mut TransportState, status: u16
 #[test]
 fn second_ticket_expiry_and_consumption_leave_no_replayable_code() {
     // Same signed fixture as transport tests; the expiration check precedes signature parsing.
-    let mut expired = PairingLinkV1::default();
-    expired.code = format!("second_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([77;32]));
-    expired.expires_at = unix_now()-30;
+    let expired = PairingLinkV1 {
+        code: format!("second_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([77;32])),
+        expires_at: unix_now()-30,
+        ..Default::default()
+    };
     assert!(matches!(validate_link(expired,unix_now()),Err(RemoteError::Expired(_))));
 }

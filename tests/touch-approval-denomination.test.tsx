@@ -3,7 +3,7 @@ import { render } from 'solid-js/web';
 import { TouchApproval } from '../src/control/Shell';
 import { setDenom } from '../src/control/prefs';
 
-// Codex app#90: the daily allowance appended a literal "sats" to a number in
+// The daily allowance appended a literal "sats" to a number in
 // the user's denomination, so BTC mode read "0.000002 sats" for 200 sats.
 describe('Touch ID approval terms', () => {
   let dispose: (() => void) | undefined;
@@ -18,7 +18,7 @@ describe('Touch ID approval terms', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     const actions = { approveContact: async () => {} } as never;
-    dispose = render(() => <TouchApproval peer={'a'.repeat(64)} name="Maya" priceMsat={2000} actions={actions} />, mount);
+    dispose = render(() => <TouchApproval peer={'a'.repeat(64)} name="Robin" priceMsat={2000} actions={actions} />, mount);
     return mount.querySelector('[data-touch-approval]')!.textContent!;
   };
 

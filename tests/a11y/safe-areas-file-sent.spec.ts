@@ -9,7 +9,7 @@ const host = () => {
     node_status: () => ({ ready: true, node_id: OWN, error: null }), trust_acknowledge: () => true,
     pairing_status: () => ({ state: 'paired', scopes: ['read', 'receive', 'spend'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null }),
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0, lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }], rooms_list: () => [], messages_list: () => [],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null }], rooms_list: () => [], messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 1000, peer_age_secs: 30, max_routing_fee_msat: 5000, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1000000, lightning_outbound_msat: 500000, channels: [] }), fund_state: () => null,
     file_price: () => ({ principal_msat: 1000, max_routing_fee_msat: 5000, total_msat: 6000 }),

@@ -186,7 +186,7 @@ pub fn sign(blob: &[u8], message: &[u8], reason: &str) -> Result<Vec<u8>, Device
     if status != OK {
         return Err(status_error(status));
     }
-    if signature_len < 2 || signature_len > SIG_CAP || signature[0] != 0x30
+    if !(2..=SIG_CAP).contains(&signature_len) || signature[0] != 0x30
         || usize::from(signature[1]) != signature_len - 2 {
         return Err(DeviceKeyError::Other(ERR_TRANSPORT));
     }
@@ -222,7 +222,7 @@ pub fn sign_setup(blob: &[u8], message: &[u8], reason: &str, finish: bool) -> Re
     if status != OK {
         return Err(status_error(status));
     }
-    if signature_len < 2 || signature_len > SIG_CAP || signature[0] != 0x30
+    if !(2..=SIG_CAP).contains(&signature_len) || signature[0] != 0x30
         || usize::from(signature[1]) != signature_len - 2 {
         return Err(DeviceKeyError::Other(ERR_TRANSPORT));
     }

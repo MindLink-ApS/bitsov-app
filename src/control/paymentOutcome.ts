@@ -15,11 +15,15 @@ const PROVEN_UNPAID = new Set([
   'grant_velocity', 'grant_ledger', 'grant_refused', 'grant_first_contact', 'grant_readmission', 'grant_no_envelope', 'grant_unknown', 'grant_messaging',
   'spend_locked', 'spend_expired', 'budget_needed', 'budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'budget_ledger_full', 'first_contact',
   'call_needs_node_upgrade', 'call_admission_open', 'call_identity_changed',
+  // The box approval ends before this call could: refused by the host before dispatch.
+  'call_window_short',
   // M6 call minutes: refused by the host before paying, or by the node under its grant / not dispatched.
   'call_block_not_due', 'call_reservation_closed', 'call_price_changed', 'call_liquidity_insufficient', 'call_liquidity_unavailable',
   'call_no_consent', 'call_no_reservation', 'call_hold_above_consent', 'call_hold_unconfirmed', 'call_hold_changed', 'call_minutes_unpayable',
   'call_offer_price_above_consent', 'call_offer_hold_above_consent', 'call_hangup_unpayable',
   'call_hangup_above_message_max', 'call_price_unknown', 'call_minutes_above_hold',
+  // A free call reply carries a zero cap: whatever happened to it, nothing could be paid.
+  'call_reply_not_free', 'call_reply_not_sent', 'call_reply_unknown',
 ]);
 export const provenUnpaid = (code: string) => PROVEN_UNPAID.has(code);
 

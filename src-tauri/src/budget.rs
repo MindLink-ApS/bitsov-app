@@ -774,10 +774,10 @@ mod tests {
     #[test]
     fn paid_totals_exclude_in_flight_ceiling_but_limits_include_it() {
         let mut book = Book::new(ME);
-        book.set_limit(MAYA, false, 50_000).unwrap();
-        book.reserve("paid", MAYA, false, 6000, T);
+        book.set_limit(ROBIN, false, 50_000).unwrap();
+        book.reserve("paid", ROBIN, false, 6000, T);
         book.settle("paid", 1000, T);
-        book.reserve("pending", MAYA, false, 6000, T);
+        book.reserve("pending", ROBIN, false, 6000, T);
         let view = serde_json::to_value(view(&book, Autopay::default().view(T), false, T)).unwrap();
         assert_eq!(view["spent_msat"], 1000);
         assert_eq!(view["unsettled_msat"], 6000);
@@ -789,7 +789,7 @@ mod tests {
     #[test]
     fn old_allowances_are_unknown_and_paid_evidence_survives_restart_and_compaction() {
         let mut book = Book::new(ME);
-        book.reserve("legacy", MAYA, false, 6000, T);
+        book.reserve("legacy", ROBIN, false, 6000, T);
         book.settle("legacy", 6000, T);
         let mut old = serde_json::to_value(&book).unwrap();
         old["ledger"][0].as_object_mut().unwrap().remove("paid");
@@ -798,7 +798,7 @@ mod tests {
         assert_eq!((legacy.spent_msat, legacy.accounted_msat), (0, 6000));
         assert!(legacy.fee_unknown, "old ceilings do not prove payments");
         for i in 0..LEDGER_MAX {
-            book.reserve(&format!("new-{i}"), MAYA, false, 6000, T);
+            book.reserve(&format!("new-{i}"), ROBIN, false, 6000, T);
             book.settle(&format!("new-{i}"), 6000, T);
             book.ledger.last_mut().unwrap().paid = Some(Paid { msat: 1000, fee_unknown: true });
         }
@@ -815,8 +815,8 @@ mod tests {
     }
 
     const ME: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-    const MAYA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const JOSH: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const ROBIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const KIM: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const T: u64 = 1_790_000_000_000;
 
     fn ask(target: &str, max: u64, autopay: Option<u64>) -> Ask<'_> {
@@ -831,59 +831,59 @@ mod tests {
         }
     }
 
-    fn book_with_maya(limit: u64) -> Book {
+    fn book_with_robin(limit: u64) -> Book {
         let mut b = Book::new(ME);
-        b.set_limit(MAYA, false, limit).unwrap();
+        b.set_limit(ROBIN, false, limit).unwrap();
         b
     }
 
     #[test]
     fn fractional_budget_refusals_use_explicit_integer_msat() {
-        let b = book_with_maya(2000);
-        let error = plan(&b, ask(MAYA, 21187, Some(500_000))).unwrap_err();
+        let b = book_with_robin(2000);
+        let error = plan(&b, ask(ROBIN, 21187, Some(500_000))).unwrap_err();
         assert!(error.message.contains("used 0 sats of 2 sats"), "{}", error.message);
         assert!(error.message.contains("costs 21187 msat"), "{}", error.message);
         assert!(!error.message.contains("21.187"));
         let mut b = Book::new(ME);
         b.set_ceiling(21187);
-        assert!(b.set_limit(MAYA, false, 22000).unwrap_err().message.contains("21187 msat"));
+        assert!(b.set_limit(ROBIN, false, 22000).unwrap_err().message.contains("21187 msat"));
     }
 
     #[test]
     fn inside_the_budget_pays_automatically() {
-        let b = book_with_maya(50_000);
-        assert_eq!(plan(&b, ask(MAYA, 2000, Some(500_000))).unwrap(), Plan { route: Route::Budget, confirm: None });
+        let b = book_with_robin(50_000);
+        assert_eq!(plan(&b, ask(ROBIN, 2000, Some(500_000))).unwrap(), Plan { route: Route::Budget, confirm: None });
     }
 
     #[test]
     fn strangers_are_never_paid_automatically() {
         let b = Book::new(ME);
-        assert_eq!(plan(&b, ask(JOSH, 1000, Some(500_000))).unwrap_err().code, "first_contact");
-        let mut confirmed = ask(JOSH, 1000, Some(500_000));
+        assert_eq!(plan(&b, ask(KIM, 1000, Some(500_000))).unwrap_err().code, "first_contact");
+        let mut confirmed = ask(KIM, 1000, Some(500_000));
         confirmed.first_contact_msat = Some(20_000);
         assert_eq!(plan(&b, confirmed).unwrap(), Plan { route: Route::Budget, confirm: Some(20_000) });
         // A confirmation cannot choose a budget smaller than the message.
-        let mut tiny = ask(JOSH, 5000, Some(500_000));
+        let mut tiny = ask(KIM, 5000, Some(500_000));
         tiny.first_contact_msat = Some(1000);
         assert_eq!(plan(&b, tiny).unwrap_err().code, "invalid");
         // Nor above the approved total.
-        let mut huge = ask(JOSH, 1000, Some(500_000));
+        let mut huge = ask(KIM, 1000, Some(500_000));
         huge.first_contact_msat = Some(MAX_DAILY_MSAT);
         assert_eq!(plan(&b, huge).unwrap().confirm, Some(b.ceiling_msat));
     }
 
     #[test]
     fn exhaustion_is_refused_with_the_numbers() {
-        let mut b = book_with_maya(5000);
-        b.reserve("r1", MAYA, false, 2000, T - 1000);
+        let mut b = book_with_robin(5000);
+        b.reserve("r1", ROBIN, false, 2000, T - 1000);
         b.settle("r1", 2000, T);
-        b.reserve("r2", MAYA, false, 2000, T - 500);
-        assert!(plan(&b, ask(MAYA, 1000, Some(500_000))).is_ok());
-        let e = plan(&b, ask(MAYA, 2000, Some(500_000))).unwrap_err();
+        b.reserve("r2", ROBIN, false, 2000, T - 500);
+        assert!(plan(&b, ask(ROBIN, 1000, Some(500_000))).is_ok());
+        let e = plan(&b, ask(ROBIN, 2000, Some(500_000))).unwrap_err();
         assert_eq!(e.code, "budget_exhausted");
         assert!(e.message.contains("used 4 sats of 5 sats"), "{}", e.message);
         // The contact budget holds inside a ten-minute window too.
-        let mut windowed = ask(MAYA, 2000, None);
+        let mut windowed = ask(ROBIN, 2000, None);
         windowed.window = Ok(());
         assert_eq!(plan(&b, windowed).unwrap_err().code, "budget_exhausted");
     }
@@ -892,41 +892,41 @@ mod tests {
     fn the_daily_total_caps_every_contact_together() {
         let mut b = Book::new(ME);
         b.set_ceiling(10_000);
-        b.set_limit(MAYA, false, 8000).unwrap();
-        b.set_limit(JOSH, false, 8000).unwrap();
-        b.reserve("r1", MAYA, false, 8000, T - 10);
-        let e = plan(&b, ask(JOSH, 3000, Some(10_000))).unwrap_err();
+        b.set_limit(ROBIN, false, 8000).unwrap();
+        b.set_limit(KIM, false, 8000).unwrap();
+        b.reserve("r1", ROBIN, false, 8000, T - 10);
+        let e = plan(&b, ask(KIM, 3000, Some(10_000))).unwrap_err();
         assert_eq!(e.code, "ceiling_exhausted");
         // The narrower of the approved total and the book's own number wins.
-        assert!(plan(&b, ask(JOSH, 2000, Some(10_000))).is_ok());
-        assert_eq!(plan(&b, ask(JOSH, 2000, Some(9_000))).unwrap_err().code, "ceiling_exhausted");
+        assert!(plan(&b, ask(KIM, 2000, Some(10_000))).is_ok());
+        assert_eq!(plan(&b, ask(KIM, 2000, Some(9_000))).unwrap_err().code, "ceiling_exhausted");
     }
 
     #[test]
     fn a_rolling_day_forgets_old_spends_and_keeps_future_dated_ones() {
-        let mut b = book_with_maya(5000);
-        b.ledger.push(Entry { id: "old".into(), at_ms: T - DAY_MS, target: MAYA.into(), room: false, msat: 5000, settled: true, paid: Some(Paid { msat: 5000, fee_unknown: false }) });
-        b.ledger.push(Entry { id: "skew".into(), at_ms: T + 60_000, target: MAYA.into(), room: false, msat: 3000, settled: true, paid: Some(Paid { msat: 3000, fee_unknown: false }) });
-        assert_eq!(b.spent(MAYA, false, T), 3000);
+        let mut b = book_with_robin(5000);
+        b.ledger.push(Entry { id: "old".into(), at_ms: T - DAY_MS, target: ROBIN.into(), room: false, msat: 5000, settled: true, paid: Some(Paid { msat: 5000, fee_unknown: false }) });
+        b.ledger.push(Entry { id: "skew".into(), at_ms: T + 60_000, target: ROBIN.into(), room: false, msat: 3000, settled: true, paid: Some(Paid { msat: 3000, fee_unknown: false }) });
+        assert_eq!(b.spent(ROBIN, false, T), 3000);
         b.prune(T);
         assert_eq!(b.ledger.len(), 1);
     }
 
     #[test]
     fn pause_refuses_everything_first() {
-        let mut b = book_with_maya(50_000);
+        let mut b = book_with_robin(50_000);
         b.paused = true;
-        let mut windowed = ask(MAYA, 1000, None);
+        let mut windowed = ask(ROBIN, 1000, None);
         windowed.window = Ok(());
         assert_eq!(plan(&b, windowed).unwrap_err().code, "budget_paused");
-        assert_eq!(plan(&b, ask(MAYA, 1000, Some(500_000))).unwrap_err().code, "budget_paused");
+        assert_eq!(plan(&b, ask(ROBIN, 1000, Some(500_000))).unwrap_err().code, "budget_paused");
     }
 
     #[test]
     fn without_an_approval_the_window_decides_and_strangers_stay_unconfirmed() {
         let b = Book::new(ME);
-        assert_eq!(plan(&b, ask(JOSH, 1000, None)).unwrap_err().code, "spend_locked");
-        let mut windowed = ask(JOSH, 1000, None);
+        assert_eq!(plan(&b, ask(KIM, 1000, None)).unwrap_err().code, "spend_locked");
+        let mut windowed = ask(KIM, 1000, None);
         windowed.window = Ok(());
         assert_eq!(plan(&b, windowed).unwrap(), Plan { route: Route::Window, confirm: None });
     }
@@ -934,22 +934,22 @@ mod tests {
     #[test]
     fn limits_only_narrow_below_the_approved_total() {
         let mut b = Book::new(ME);
-        assert_eq!(b.set_limit(MAYA, false, b.ceiling_msat + 1).unwrap_err().code, "invalid");
-        b.set_limit(MAYA, false, 400_000).unwrap();
+        assert_eq!(b.set_limit(ROBIN, false, b.ceiling_msat + 1).unwrap_err().code, "invalid");
+        b.set_limit(ROBIN, false, 400_000).unwrap();
         b.set_ceiling(100_000);
-        assert_eq!(b.limit(MAYA, false), Some(100_000));
-        b.set_limit(MAYA, false, 0).unwrap();
-        assert_eq!(b.limit(MAYA, false), None, "zero forgets: they are a stranger again");
+        assert_eq!(b.limit(ROBIN, false), Some(100_000));
+        b.set_limit(ROBIN, false, 0).unwrap();
+        assert_eq!(b.limit(ROBIN, false), None, "zero forgets: they are a stranger again");
     }
 
     #[test]
     fn reservations_settle_or_release() {
-        let mut b = book_with_maya(50_000);
-        b.reserve("r1", MAYA, false, 2000, T);
-        b.reserve("r2", MAYA, false, 2000, T);
+        let mut b = book_with_robin(50_000);
+        b.reserve("r1", ROBIN, false, 2000, T);
+        b.reserve("r2", ROBIN, false, 2000, T);
         b.settle("r1", 1500, T);
         b.release("r2");
-        assert_eq!(b.spent(MAYA, false, T), 1500);
+        assert_eq!(b.spent(ROBIN, false, T), 1500);
         let v = view(&b, Autopay::default().view(T), false, T);
         assert_eq!((v.spent_msat, v.unsettled_msat), (1500, 0));
     }
@@ -957,15 +957,15 @@ mod tests {
     #[test]
     fn the_book_survives_a_restart_and_holds_no_authority() {
         let dir = tempfile::tempdir().unwrap();
-        let mut b = book_with_maya(50_000);
-        b.reserve("r1", MAYA, false, 2000, T);
+        let mut b = book_with_robin(50_000);
+        b.reserve("r1", ROBIN, false, 2000, T);
         b.settle("r1", 2000, T);
-        b.reserve("r2", MAYA, false, 3000, T);
+        b.reserve("r2", ROBIN, false, 3000, T);
         save(dir.path(), &b).unwrap();
 
         let again = load(dir.path(), ME).unwrap();
         assert_eq!(again, b);
-        assert_eq!(again.spent(MAYA, false, T), 5000, "unknown outcomes stay reserved at their ceiling");
+        assert_eq!(again.spent(ROBIN, false, T), 5000, "unknown outcomes stay reserved at their ceiling");
 
         let raw = std::fs::read_to_string(book_path(dir.path(), ME)).unwrap().to_ascii_lowercase();
         for word in ["spend\"", "scope", "grant", "token", "approv", "until", "basis", "preimage", "plaintext"] {
@@ -984,10 +984,10 @@ mod tests {
     #[test]
     fn legacy_book_without_payment_identities_keeps_existing_charges() {
         let dir = tempfile::tempdir().unwrap();
-        let mut book = book_with_maya(50_000);
-        book.reserve("settled", MAYA, false, 2000, T);
+        let mut book = book_with_robin(50_000);
+        book.reserve("settled", ROBIN, false, 2000, T);
         book.settle("settled", 1500, T);
-        book.reserve("pending", MAYA, false, 3000, T);
+        book.reserve("pending", ROBIN, false, 3000, T);
         let mut legacy = serde_json::to_value(&book).unwrap();
         legacy.as_object_mut().unwrap().remove("accounted_payments");
         std::fs::write(book_path(dir.path(), ME), legacy.to_string()).unwrap();
@@ -1003,7 +1003,7 @@ mod tests {
         std::fs::write(book_path(dir.path(), ME), b"{not json").unwrap();
         assert_eq!(load(dir.path(), ME).unwrap_err().code, "budget_unreadable");
         let mut other = Book::new(ME);
-        other.node_id = MAYA.into();
+        other.node_id = ROBIN.into();
         std::fs::write(book_path(dir.path(), ME), serde_json::to_vec(&other).unwrap()).unwrap();
         assert_eq!(load(dir.path(), ME).unwrap_err().code, "budget_unreadable");
         let mut planted = serde_json::to_value(Book::new(ME)).unwrap();
@@ -1034,12 +1034,12 @@ mod tests {
 
     #[test]
     fn the_view_lists_budgets_and_unbudgeted_spends() {
-        let mut b = book_with_maya(50_000);
-        b.reserve("r1", JOSH, false, 1000, T);
+        let mut b = book_with_robin(50_000);
+        b.reserve("r1", KIM, false, 1000, T);
         let v = view(&b, Autopay::default().view(T), false, T);
         assert_eq!(v.rows.len(), 2);
-        assert_eq!(v.rows.iter().find(|r| r.target == JOSH).unwrap(), &Row { target: JOSH.into(), room: false, limit_msat: None, spent_msat: 0, accounted_msat: 1000, unsettled_msat: 1000, fee_unknown: false });
-        assert_eq!(v.rows.iter().find(|r| r.target == MAYA).unwrap().limit_msat, Some(50_000));
+        assert_eq!(v.rows.iter().find(|r| r.target == KIM).unwrap(), &Row { target: KIM.into(), room: false, limit_msat: None, spent_msat: 0, accounted_msat: 1000, unsettled_msat: 1000, fee_unknown: false });
+        assert_eq!(v.rows.iter().find(|r| r.target == ROBIN).unwrap().limit_msat, Some(50_000));
         assert_eq!(v.unsettled_msat, 1000);
     }
 }

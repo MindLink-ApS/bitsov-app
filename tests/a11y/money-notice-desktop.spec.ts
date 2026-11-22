@@ -9,7 +9,7 @@ const host = () => {
     node_status: () => ({ ready: true, node_id: OWN, error: null }), trust_acknowledge: () => true,
     pairing_status: () => ({ state: 'paired', scopes: ['read', 'receive', 'spend'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null }),
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0, lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: ['room_binding_v1'], money_ready: !w.__notReady, readiness: null }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, rooms: true, session: true }], rooms_list: () => [], messages_list: () => [], room_thread: () => [],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, rooms: true, session: true }], rooms_list: () => [], messages_list: () => [], room_thread: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 1000, peer_age_secs: 30, max_routing_fee_msat: 5000, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1000000, lightning_outbound_msat: 500000, channels: [] }), fund_state: () => null,
     file_price: () => ({ principal_msat: 1000, max_routing_fee_msat: 5000, total_msat: 6000 }),
@@ -185,6 +185,7 @@ const insideStream = async (page: Page) => {
 test('1280x800: the money notice leaves the assistant provider bar usable', async ({ page }) => {
   await openApp(page);
   // Ask your node: the provider bar sits right under the chat header.
+  await page.locator('[data-rail-advanced] > summary').click();
   await page.locator('[data-track="ai"]').click();
   await expect(page.locator('section.track [data-ai-providers] button').first()).toBeVisible();
   const notice = await showNotice(page);
@@ -256,6 +257,7 @@ const openAssistantBars = async (page: Page, height: number) => {
   await page.addInitScript(assistantHost);
   await page.goto('/');
   await page.locator('button', { hasText: 'I understand' }).first().click();
+  await page.locator('[data-rail-advanced] > summary').click();
   await page.locator('[data-track^="assistant:"]').first().click();
   await expect(page.locator('section.track [data-assistant-ready]')).toBeVisible();
   // Watches and the local-server options open: the bars above the list are as tall as they get.

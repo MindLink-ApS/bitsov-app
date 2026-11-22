@@ -3,6 +3,14 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod device_key;
+/// Owner-only storage rules shared by the Windows private-file layer.
+pub mod private_policy;
+/// Verified-handle private files on Windows (protected descriptors, no inheritance).
+#[cfg(windows)]
+pub mod win_private;
+/// Current-user DPAPI for the Windows at-rest sealer.
+#[cfg(windows)]
+pub mod dpapi;
 
 /// Platform-neutral so every target can classify the Apple bridge's result.
 pub mod keychain_status {
@@ -39,3 +47,8 @@ pub mod phone_recovery;
 
 #[cfg(target_os = "ios")]
 pub mod call_audio;
+
+/// Latency-critical activity while a call is live. The Swift bridge is built
+/// only on a macOS desktop build.
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+pub mod call_activity;

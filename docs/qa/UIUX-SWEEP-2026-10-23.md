@@ -71,8 +71,8 @@ Text tokens on `--bg` and `--surface` meet AA in both themes, including small te
 
 - **Screen:** Chat header, when the pill is showing
 - **Severity:** Low
-- **What:** The button’s visible contents are the name plus the pill. `aria-label` was only “Contact Maya”, which replaces those contents, so the pill was not in the name.
-- **Fix:** The name gains “, Verified” or “, Key changed” (and the Danish strings) when that pill is showing. Sample Maya has no saved verification, so the sample name stays “Contact Maya”.
+- **What:** The button’s visible contents are the name plus the pill. `aria-label` was only “Contact Robin”, which replaces those contents, so the pill was not in the name.
+- **Fix:** The name gains “, Verified” or “, Key changed” (and the Danish strings) when that pill is showing. Sample Robin has no saved verification, so the sample name stays “Contact Robin”.
 
 ### 8. The owner-approval sheet ignores the safe area
 

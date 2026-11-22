@@ -387,6 +387,7 @@ for (const lang of ['en', 'da']) {
     test(`${lang} ${width}: the assistant's Forget button keeps its word on one line`, async ({ page }) => {
       await page.setViewportSize({ width, height: 740 });
       await page.goto(`${preview}?scene=list&lang=${lang}`);
+      await page.locator('[data-phone-list] [data-rail-advanced] > summary').click();
       await page.locator('[data-phone-list] [data-track="assistant:node"]').click();
       const forget = page.locator('[data-assistant-forget]');
       await expect(forget).toBeVisible();
