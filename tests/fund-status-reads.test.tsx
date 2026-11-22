@@ -528,3 +528,78 @@ it.each(['resolves', 'rejects'] as const)('a deposit start that %s after the pan
   expect(panel()!.querySelector('.funded')).toBeNull();
   expect(errors).not.toHaveBeenCalled();
 });
+
+const STATE_FAILED = 'Could not read the deposit status from your node. BitSov tries again by itself every few seconds.';
+const summaries = () => [...panel()!.querySelectorAll('[data-soft-summary]')].map((node) => node.textContent);
+const detailText = () => [...panel()!.querySelectorAll('[data-soft-detail]')].map((node) => node.textContent ?? '').join('\n');
+
+it('keeps a failed deposit start visible when a status poll fails and the next one is empty', async () => {
+  vi.useFakeTimers();
+  const host = stubHost({ holdStart: true });
+  await openWallet(host);
+  const startRaw = 'Error: POST /onboarding/start returned 502: {"error":"wallet"}';
+  const pollRaw = 'Error: GET /onboarding/state returned 503: {"error":"node"}';
+  submitStart();
+  await flush();
+  expect(host.starts).toHaveLength(1);
+  host.starts[0].reject(startRaw);
+  await flush();
+  expect(summaries()).toEqual([START_FAILED]);
+
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.reads).toHaveLength(1);
+  host.reads[0].reject(pollRaw);
+  await flush();
+  expect(summaries(), 'a failed status poll must not replace the failed start').toEqual([START_FAILED, STATE_FAILED]);
+  expect(detailText()).toContain(startRaw);
+  expect(detailText()).toContain(pollRaw);
+  expect(shownAddress()).toBeNull();
+  expect(panel()!.querySelector('[data-fund-start]')).not.toBeNull();
+
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.reads).toHaveLength(2);
+  host.reads[1].resolve(null);
+  await flush();
+  expect(summaries(), 'an empty status must not clear the failed start').toEqual([START_FAILED]);
+  expect(detailText()).toContain(startRaw);
+  expect(detailText()).not.toContain(pollRaw);
+  expect(panel()!.textContent).not.toContain(STATE_FAILED);
+  expect(shownAddress()).toBeNull();
+  expect(panel()!.querySelector('[data-fund-start]')).not.toBeNull();
+
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.reads).toHaveLength(3);
+  host.reads[2].resolve(fundState({ funding_amount_sats_received: 250 }));
+  await flush();
+  expect(summaries(), 'an observed deposit clears the failed start and the status error').toEqual([]);
+  expect(shownAddress()).toBe(ADDRESS);
+  expect(panel()!.querySelector('.progress strong')?.textContent).toBe('250 sats');
+});
+
+it('keeps a just-started deposit when the following status read says not started', async () => {
+  vi.useFakeTimers();
+  const host = stubHost({ holdStart: true });
+  await openWallet(host);
+  submitStart();
+  await flush();
+  expect(host.starts).toHaveLength(1);
+  const before = host.counts.fundState;
+  host.starts[0].resolve(fundState());
+  await flush();
+  expect(host.counts.fundState, 'the start is followed by one status read').toBe(before + 1);
+  expect(shownAddress()).toBe(ADDRESS);
+  host.reads[0].resolve(null);
+  await flush();
+  expect(shownAddress(), 'one empty read right after the start must not bring the form back').toBe(ADDRESS);
+  expect(panel()!.querySelector('form')).toBeNull();
+  expect(panel()!.querySelector('[data-fund-start]')).toBeNull();
+  expect(panel()!.querySelector('.progress strong')?.textContent).toBe('0 sats');
+
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(host.counts.fundState).toBe(before + 2);
+  host.reads[1].resolve(null);
+  await flush();
+  expect(shownAddress(), 'a later empty read confirms the deposit is not started').toBeNull();
+  expect(panel()!.querySelector('[data-fund-start]')).not.toBeNull();
+  expect(panel()!.querySelector('.progress')).toBeNull();
+});

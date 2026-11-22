@@ -759,7 +759,9 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   const [amount, setAmount] = createSignal(String(DEFAULT_FUNDING_SATS));
   const [busy, setBusy] = createSignal(false);
   // `summary` is the plain sentence for a host failure; the raw text stays behind Details.
-  const [error, setError] = createSignal<{ message: string; summary?: 'obFundStateFailed' | 'obFundStartFailed' } | null>(null);
+  const [error, setError] = createSignal<{ message: string; summary?: 'obFundStateFailed' } | null>(null);
+  // Kept apart from a status-read failure, which must not replace it.
+  const [startError, setStartError] = createSignal<{ message: string; summary: 'obFundStartFailed' } | null>(null);
 
   // On a slow node a read can outlast the 3 s poll. Only the newest read may write,
   // a poll tick is skipped while one is in flight, and nothing writes once the
@@ -767,6 +769,8 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   let disposed = false;
   let latest = 0;
   let inFlight: Promise<void> | null = null;
+  // Set after a successful start. The next null status does not undo that deposit.
+  let holdStarted = false;
   const stale = (id: number) => disposed || id !== latest;
 
   const read = async () => {
@@ -774,10 +778,19 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     try {
       const state = await props.source.fundState();
       if (stale(id)) return;
+      // Right after a successful start the node can still report "not started".
+      // Keep the deposit for that one null; a later null confirms it.
+      if (state === null && holdStarted && fund()) {
+        holdStarted = false;
+        setError(null);
+        return;
+      }
+      holdStarted = false;
       setFund(state);
-      // "Not started" does not undo a failed start. That error stays until the
-      // owner tries again, or a deposit is actually reported.
-      if (state || error()?.summary !== 'obFundStartFailed') setError(null);
+      // A failed start stays until the owner tries again or a deposit is observed.
+      // A status-read failure is separate, and any answer clears it.
+      if (state !== null) setStartError(null);
+      setError(null);
       // The onboarding record carries the address once started; fall back to the
       // payments endpoint if the node did not include one.
       if (state && !state.funding_address && !address() && !props.moneyBlocked?.()) {
@@ -826,6 +839,8 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   const start = async (event: Event) => {
     event.preventDefault();
     if (props.moneyBlocked?.()) return;
+    // Trying again retires the previous start failure, including a bad amount.
+    setStartError(null);
     const value = Number(amount());
     if (!Number.isInteger(value) || value < 1 || value > 4_294_967_295) {
       setError({ message: t('obWholeSats') });
@@ -841,12 +856,13 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       // only bumps `latest` when it actually reads, and it does not read while the node is not ready.
       latest++;
       setFund(started);
+      holdStarted = true;
       await refresh(true);
     } catch (e) {
       // The read still in flight must not clear this failure.
       latest++;
       if (disposed) return;
-      setError(isMoneyNotReady(e) ? null : { message: String(e), summary: 'obFundStartFailed' });
+      if (!isMoneyNotReady(e)) setStartError({ message: String(e), summary: 'obFundStartFailed' });
     } finally {
       if (!disposed) setBusy(false);
     }
@@ -963,6 +979,9 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       </Show>
 
 
+      <Show when={startError()}>
+        <SoftError message={startError()!.message} summary={t('obFundStartFailed')} />
+      </Show>
       <Show when={error()}>
         <SoftError message={error()!.message} summary={errorSummary()} />
       </Show>
