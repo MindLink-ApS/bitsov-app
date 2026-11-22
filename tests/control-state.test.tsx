@@ -87,10 +87,10 @@ describe('cost to send', () => {
   const now = 1_000_000_000;
 
   it("uses the peer's advertised price when the node has it", () => {
-    const c = costToSend({ kind: 'peer', id: A }, quote({ peer_msat: 2000, peer_age_secs: 240 }), { name: 'Maya', nowMs: now })!;
+    const c = costToSend({ kind: 'peer', id: A }, quote({ peer_msat: 2000, peer_age_secs: 240 }), { name: 'Robin', nowMs: now })!;
     expect(c.msat).toBe(2000);
     expect(c.estimate).toBe(false);
-    expect(c.basis).toBe('Maya’s price, updated 4 min ago; up to 0 sats network fee');
+    expect(c.basis).toBe('Robin’s price, updated 4 min ago; up to 0 sats network fee');
   });
 
   it('never passes our own price off as theirs', () => {

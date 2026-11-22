@@ -1,19 +1,24 @@
 import { createEffect, onCleanup } from 'solid-js';
 import { t } from '../i18n';
-import type { CallView } from './call';
+import { shownPhase, type CallView } from './call';
 import ringUrl from '../assets/incoming-ring.wav';
 
-/** Local media playback uses the system output volume and mute setting. */
-export function IncomingCallAlerts(props: { view: CallView; waiting: CallView[]; nameOf: (peer: string) => string }) {
+/**
+ * The one owner of the incoming ringtone. Local media playback uses the system
+ * output volume and mute setting. `quiet`: calls the owner quieted (Escape on
+ * the ringing card) stop ringing here and stay on screen, still announced once.
+ */
+export function IncomingCallAlerts(props: { view: CallView; waiting: CallView[]; nameOf: (peer: string) => string; quiet?: (id: string) => boolean }) {
   const sounds = new Map<string, HTMLAudioElement>();
   const heardWaiting = new Set<string>();
   const incoming = () => [props.view, ...props.waiting].filter(v => v.phase === 'incoming' && !v.silenced && v.callId && v.peer);
+  const ringing = () => incoming().filter(v => !props.quiet?.(`${v.peer}:${v.callId}`));
   const stop = (id: string) => {
     const audio = sounds.get(id);
     if (audio) { audio.pause(); audio.currentTime = 0; sounds.delete(id); }
   };
   createEffect(() => {
-    const calls = incoming();
+    const calls = ringing();
     for (const id of sounds.keys()) if (!calls.some(v => `${v.peer}:${v.callId}` === id)) stop(id);
     for (const call of calls) {
       const id = `${call.peer}:${call.callId}`;
@@ -95,5 +100,75 @@ export function OutgoingRingback(props: { view: CallView; audioContext?: () => C
     timer = setInterval(beep, RINGBACK_PERIOD_MS);
   });
   onCleanup(stop);
+  return null;
+}
+
+/** One short cue: tones of `ms` each, back to back with a short gap. */
+export type CallCue = { hz: number[]; ms: number };
+const CUE_GAIN = 0.05;
+const CUE_GAP_MS = 60;
+/** Connected (or back after a drop): two rising notes. */
+export const CUE_CONNECTED: CallCue = { hz: [523, 659], ms: 110 };
+/** The connection dropped: one low, quiet note, then silence while it tries again. */
+export const CUE_INTERRUPTED: CallCue = { hz: [392], ms: 160 };
+/** Ended, declined, no answer or failed: two falling notes. The card says which. */
+export const CUE_ENDED: CallCue = { hz: [659, 440], ms: 130 };
+/** Busy: three short beeps on one note. */
+export const CUE_BUSY: CallCue = { hz: [480, 480, 480], ms: 120 };
+
+/** Which cue, if any, a change of the card's state plays. Pure: each change plays at most one. */
+export function cueFor(prev: { callId: string | null; phase: string } | null, v: CallView): CallCue | null {
+  if (!v.callId || v.silenced) return null;
+  const phase = shownPhase(v);
+  const was = prev && prev.callId === v.callId ? prev.phase : null;
+  if (phase === was) return null;
+  if (phase === 'live' && (was === 'connecting' || was === 'reconnecting' || was === 'ringing')) return CUE_CONNECTED;
+  if (phase === 'reconnecting' && was === 'live') return CUE_INTERRUPTED;
+  if (phase === 'ended' && was !== null && was !== 'incoming') return v.reason === 'busy' ? CUE_BUSY : CUE_ENDED;
+  return null;
+}
+
+/**
+ * Short state cues on this device only, never sent into the call: connected,
+ * dropped, ended and busy. One cue per change of state (no repeats on status
+ * updates), none for an incoming call (its ringtone above owns that) and none
+ * for a ringing outgoing call (the ringback owns that). A webview that refuses
+ * audio only stays silent.
+ */
+export function CallCues(props: { view: CallView; audioContext?: () => Ctx }) {
+  let prev: { callId: string | null; phase: string } | null = null;
+  const contexts = new Set<Ctx>();
+  const play = (cue: CallCue) => {
+    let ctx: Ctx;
+    try { ctx = props.audioContext ? props.audioContext() : new AudioContext(); } catch { return; }
+    contexts.add(ctx);
+    try {
+      void Promise.resolve().then(() => ctx.resume()).catch(() => {});
+      let at = ctx.currentTime;
+      for (const hz of cue.hz) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.frequency.value = hz;
+        gain.gain.setValueAtTime(0, at);
+        gain.gain.linearRampToValueAtTime(CUE_GAIN, at + 0.02);
+        gain.gain.setValueAtTime(CUE_GAIN, at + cue.ms / 1000 - 0.02);
+        gain.gain.linearRampToValueAtTime(0, at + cue.ms / 1000);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(at);
+        osc.stop(at + cue.ms / 1000);
+        at += (cue.ms + CUE_GAP_MS) / 1000;
+      }
+    } catch { /* No audio here: the cue stays silent. */ }
+    const total = cue.hz.length * (cue.ms + CUE_GAP_MS) + 100;
+    setTimeout(() => { contexts.delete(ctx); void Promise.resolve().then(() => ctx.close()).catch(() => {}); }, total);
+  };
+  createEffect(() => {
+    const v = props.view;
+    const cue = cueFor(prev, v);
+    prev = { callId: v.callId, phase: shownPhase(v) };
+    if (cue) play(cue);
+  });
+  onCleanup(() => { for (const c of contexts) void Promise.resolve().then(() => c.close()).catch(() => {}); contexts.clear(); });
   return null;
 }

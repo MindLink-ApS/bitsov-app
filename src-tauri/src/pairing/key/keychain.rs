@@ -96,7 +96,10 @@ fn failure(message: &str) -> PairError { PairError::Local(message.into()) }
 // Retain the opened inode until cleanup; never follow links or wipe a different
 // file after a rename. Failure leaves the old identity recoverable for a retry.
 #[cfg(unix)]
-fn legacy(dir: &Path, recovery_seed: Option<&[u8; 32]>) -> Result<Option<(std::fs::File, Zeroizing<[u8; 32]>)>, PairError> {
+type LegacyIdentity = (std::fs::File, Zeroizing<[u8; 32]>);
+
+#[cfg(unix)]
+fn legacy(dir: &Path, recovery_seed: Option<&[u8; 32]>) -> Result<Option<LegacyIdentity>, PairError> {
     use std::io::Read;
     use std::os::unix::fs::{OpenOptionsExt, MetadataExt};
     let mut file = match std::fs::OpenOptions::new().read(true).write(true)

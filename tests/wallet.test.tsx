@@ -156,7 +156,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }),
     peers_list: () => [
-      { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null },
+      { node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null },
       { node_id: B, addr: null, label: 'Jon', connected: true, fingerprint: null },
     ],
     rooms_list: () => [],
@@ -200,7 +200,7 @@ describe('the Wallet page', () => {
     resetContactsForTests();
     resetActivityLog();
     setDenom('sats');
-    setPetname(A, 'Maya');
+    setPetname(A, 'Robin');
     setPetname(B, 'Jon');
   });
   afterEach(() => {
@@ -320,16 +320,16 @@ describe('the Wallet page', () => {
 
   it('names a channel only from an unambiguous node-reported LN mapping', async () => {
     stubHost({ peers_list: () => [{ node_id: A, connected: true, label: null, addr: null, fingerprint: null, ln_pubkey: WALLET.channels[0].peer_pubkey.toUpperCase() }] });
-    setPetname(A, 'Maya');
+    setPetname(A, 'Robin');
     await openWallet();
     $<HTMLButtonElement>('[data-wallet-tab="channels"]')!.click();
-    await vi.waitFor(() => expect(text('[data-channel="c1"] .channel-peer')).toBe('Maya'));
+    await vi.waitFor(() => expect(text('[data-channel="c1"] .channel-peer')).toBe('Robin'));
     expect(text('[data-channel="c2"] .channel-peer')).toContain('New contact');
   });
 
   it('keeps the honest channel fallback when two contacts claim the same LN key', async () => {
     stubHost({ peers_list: () => [A, B].map((node_id) => ({ node_id, connected: true, label: null, addr: null, fingerprint: null, ln_pubkey: WALLET.channels[0].peer_pubkey })) });
-    setPetname(A, 'Maya'); setPetname(B, 'Josh');
+    setPetname(A, 'Robin'); setPetname(B, 'Kim');
     await openWallet();
     $<HTMLButtonElement>('[data-wallet-tab="channels"]')!.click();
     expect(text('[data-channel="c1"] .channel-peer')).toContain('New contact');
@@ -755,7 +755,7 @@ describe('the Wallet page', () => {
     click('[data-activity-filter="all"]');
     click('[data-activity-direction="in"]');
     await vi.waitFor(() => expect(mount.querySelectorAll('[data-activity-list] .wallet-row')).toHaveLength(1));
-    expect(text('[data-activity-list] .wallet-row')).toMatch(/Message received.*Maya.*\+2 sats/);
+    expect(text('[data-activity-list] .wallet-row')).toMatch(/Message received.*Robin.*\+2 sats/);
     click('[data-activity-filter="payments"]');
     await vi.waitFor(() => expect($('[data-activity-empty]')).not.toBeNull());
     expect(text('[data-activity-scope]')).toMatch(/made in this app on this Mac/);

@@ -33,7 +33,7 @@ const paired: OnboardingPairingView = { state: 'paired', scopes: ['read', 'recei
 
 function stubHost() {
   resetContactsForTests();
-  setPetname(A, 'Maya');
+  setPetname(A, 'Robin');
   const calls: { cmd: string; args?: unknown }[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   const mediaIndices = new Map<number, number>();
@@ -51,7 +51,7 @@ function stubHost() {
     pairing_status: () => paired,
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: ['call_meeting_v1'] }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, meetings: true }],
     rooms_list: () => [],
     messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
@@ -302,10 +302,10 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect($('[data-call-route="node"]')?.hasAttribute('data-call-seal')).toBe(false);
     const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
     expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).not.toContain('x-bitsov-e2e');
-    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
   });
 
-  /** Rings Maya on a sealing build and delivers an answer with these extra SDP lines. */
+  /** Rings Robin on a sealing build and delivers an answer with these extra SDP lines. */
   async function sealedRing(host: ReturnType<typeof stubHost>, answerLines: string[]) {
     vi.stubEnv('VITE_CALL_SEAL', 'sealed');
     await openShell();
@@ -464,11 +464,11 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     host.media({ link: 'ended', detail: 'the node refused the media socket (403)' });
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     // Never connected: said as such, with the technical words under Details.
-    expect($('[data-call-ended]')?.textContent).toBe('The call to Maya could not connect.');
+    expect($('[data-call-ended]')?.textContent).toBe('The call to Robin could not connect.');
     expect($('[data-call-end-detail]')!.textContent).toContain('The call audio link through your node closed.');
   });
 
-  /** Rings Maya and brings the call live through the host media socket. */
+  /** Rings Robin and brings the call live through the host media socket. */
   async function routedLive(host: ReturnType<typeof stubHost>, atRinging?: () => void) {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
@@ -492,7 +492,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect($('[data-call-pay]')).toBeNull();
     expect($('[data-call-panel]')!.textContent).not.toMatch(/Lightning payment address/);
     // The short card: name, timer, mute, hang up.
-    expect($('[data-call-panel] .who')?.textContent).toBe('Maya');
+    expect($('[data-call-panel] .who')?.textContent).toBe('Robin');
     expect($('[data-call-duration]')).not.toBeNull();
     expect($('[data-call-mute]')).not.toBeNull();
     expect($('[data-call-hangup]')).not.toBeNull();

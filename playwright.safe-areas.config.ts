@@ -15,7 +15,7 @@ export default defineConfig({
     headless: true,
     isMobile: true,
     hasTouch: true,
-    reducedMotion: 'reduce',
+    contextOptions: { reducedMotion: 'reduce' },
     baseURL: `http://localhost:${port}`,
   },
   webServer: {

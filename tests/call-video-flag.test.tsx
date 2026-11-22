@@ -31,7 +31,7 @@ const paired: OnboardingPairingView = { state: 'paired', scopes: ['read', 'recei
 
 function stubHost() {
   resetContactsForTests();
-  setPetname(A, 'Maya');
+  setPetname(A, 'Robin');
   const calls: { cmd: string; args?: unknown }[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   let mediaIndex = 0;
@@ -51,7 +51,7 @@ function stubHost() {
     pairing_status: () => paired,
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: ['call_meeting_v1'] }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, meetings: true }],
     rooms_list: () => [],
     messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
@@ -198,7 +198,7 @@ describe('call video flag', () => {
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     answer(host);
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
-    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
     expect(constraintsSeen.every((c) => !c.video)).toBe(true);
     expect(host.used('call_media_video_send')).toHaveLength(0);
     expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
@@ -212,6 +212,9 @@ describe('call video flag', () => {
     host.emitLive({ type: 'message', room_id: null, message: { id: 'off', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, media: 'video', sdp: nodeRoutedSdp('offer', callId) }), attachment: null, status: 'delivered' } });
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
     expect($('[data-call-title]')?.textContent).not.toMatch(/video/i);
+    // The card says what will happen: an audio call, with no camera notice.
+    expect($('[data-call-title]')?.textContent).toBe('Incoming audio call');
+    expect($('[data-call-camera-notice]')).toBeNull();
     expect(constraintsSeen.every((c) => !c.video)).toBe(true);
   });
 
@@ -267,7 +270,7 @@ describe('call video flag', () => {
       await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
       answer(host);
       await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
-      expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+      expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
       expect(constraintsSeen.every((c) => !c.video)).toBe(true);
       expect(host.used('call_media_video_send')).toHaveLength(0);
       expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
