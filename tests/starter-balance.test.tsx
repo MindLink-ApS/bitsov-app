@@ -84,8 +84,12 @@ it('persists before dispatch, ignores double taps and reuses the UUID after an a
 });
 it('does not dispatch when durable storage is unavailable', async () => {
   const { request } = mount(); await flush();
-  vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('full'); });
-  host.querySelector('button')!.click(); await flush(); expect(request).not.toHaveBeenCalled(); expect(host.textContent).toContain('Could not save');
+  const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('full'); });
+  // happy-dom's Storage proxy keeps the spied method after vi.restoreAllMocks(),
+  // so reset it to the real implementation before later tests use storage.
+  try {
+    host.querySelector('button')!.click(); await flush(); expect(request).not.toHaveBeenCalled(); expect(host.textContent).toContain('Could not save');
+  } finally { setItem.mockReset(); }
 });
 it('polls to confirmed ready and retains the UUID until terminal', async () => {
   vi.useFakeTimers(); let status: StarterStatus = pending;
