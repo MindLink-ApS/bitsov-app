@@ -556,6 +556,29 @@ describe('call restart negotiation', () => {
       t.caller.e.endLocal(); t.callee.e.endLocal();
     });
 
+    it('one ask answers one restart: a repeated offer while either ask is open is never answered twice', async () => {
+      // The caller sends one recovery offer per call, so one slot is enough; this pins that assumption.
+      for (const calleeAsksFirst of [true, false]) {
+        FakePc.made = [];
+        const t = await live(async () => true);
+        t.hold();
+        if (calleeAsksFirst) { t.a.state('failed'); t.b.state('failed'); } else { t.a.state('failed'); }
+        await vi.advanceTimersByTimeAsync(0);
+        const restart = t.caller.sent.find((s) => s.kind === 400 && s.body.call_id === restartId)!;
+        // Not awaited: while the callee asks, taking the offer waits on that ask.
+        const first = deliver(t.callee, restart, OWN, A);
+        const second = deliver(t.callee, restart, OWN, A);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(t.asks, `one ask (callee asked first: ${calleeAsksFirst})`).toHaveLength(1);
+        t.asks[0](true);
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.all([first, second]);
+        expect(t.callee.sent.filter((s) => s.kind === 401 && s.body.call_id === restartId)).toHaveLength(1);
+        expect(t.callee.sent.filter((s) => s.kind === 402)).toHaveLength(0);
+        t.caller.e.endLocal(); t.callee.e.endLocal();
+      }
+    });
+
     it('a drop that heals while the reconnect ask is open spends nothing when it is approved', async () => {
       const t = await live(async () => true);
       t.hold();
