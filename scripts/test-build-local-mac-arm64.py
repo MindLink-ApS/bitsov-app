@@ -127,6 +127,19 @@ class LocalArmBuild(unittest.TestCase):
             self.builder.run(["touch", str(marker)], self.root, os.environ.copy(), time.monotonic() + 10)
         self.assertFalse(marker.exists())
 
+    def test_archive_step_after_compilation_ignores_load_but_keeps_disk_floor(self):
+        marker = self.root / "archived"
+        with self.resources(load=20), patch.object(self.builder, "check_no_other_builds",
+                                                   side_effect=RuntimeError("busy")):
+            self.builder.run(["touch", str(marker)], self.root, os.environ.copy(),
+                             time.monotonic() + 10, gate=False)
+        self.assertTrue(marker.exists())
+        marker.unlink()
+        with self.resources(free=109 * 1024**3), self.assertRaisesRegex(RuntimeError, "free disk"):
+            self.builder.run(["touch", str(marker)], self.root, os.environ.copy(),
+                             time.monotonic() + 10, gate=False)
+        self.assertFalse(marker.exists())
+
     def test_low_disk_during_command_stops_children(self):
         command, pidfile, marker = self.group_command(True)
         def disk(_):
@@ -169,8 +182,10 @@ class LocalArmBuild(unittest.TestCase):
         (source / "src-tauri").mkdir()
         (source / "src-tauri/tauri.remote-only.conf.json").write_text("{}")
         commands = []
-        def external(command, root, env, deadline):
+        def external(command, root, env, deadline, gate=True):
             commands.append(command)
+            # Only the post-compile archive may skip the load and build gates.
+            self.assertEqual(gate, command[0] != "ditto")
             self.assertEqual(env["CARGO_BUILD_JOBS"], "2")
             self.assertEqual(env["CARGO_TARGET_DIR"], str(target))
             self.assertLessEqual(deadline, time.monotonic() + 3600)
@@ -316,7 +331,7 @@ class LocalArmBuild(unittest.TestCase):
         git("commit", "-q", "-m", "Fixture input")
         return source, git
 
-    def package_fixture_command(self, command, root, env, deadline):
+    def package_fixture_command(self, command, root, env, deadline, gate=True):
         app = Path(env["CARGO_TARGET_DIR"]) / self.builder.TARGET / "release/bundle/macos/BitSov Remote Test.app"
         if command[:3] == ["npm", "run", "tauri"]:
             (app / "Contents/MacOS").mkdir(parents=True)
@@ -359,8 +374,8 @@ class LocalArmBuild(unittest.TestCase):
                 source, git = self.source_repository(f"{phase}/source")
                 foreign, foreign_git = self.source_repository(f"{phase}/foreign")
                 foreign_git("commit", "--allow-empty", "-q", "-m", "Foreign fixture update")
-                def external(command, *args):
-                    self.package_fixture_command(command, *args)
+                def external(command, *args, **kwargs):
+                    self.package_fixture_command(command, *args, **kwargs)
                     if ((phase == "compile" and command[:3] == ["npm", "run", "tauri"])
                             or (phase == "archive" and command[0] == "ditto")):
                         git("commit", "--allow-empty", "-q", "-m", "Fixture update")

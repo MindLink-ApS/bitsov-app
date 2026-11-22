@@ -64,11 +64,17 @@ def build_lock(path):
         yield
 
 
-def run(command, root, env, deadline):
+def run(command, root, env, deadline, gate=True):
+    # gate=False is for cheap steps after compilation (the archive): refusing
+    # there on load or another build would discard a finished build. The disk
+    # floor still applies and is watched while the command runs.
     if time.monotonic() >= deadline:
         raise RuntimeError("The 60-minute build deadline expired.")
-    check_resources()
-    check_no_other_builds()
+    if gate:
+        check_resources()
+        check_no_other_builds()
+    else:
+        check_disk()
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
     process = None
     def prepare_child():
@@ -284,7 +290,8 @@ def build(root, target, output):
     with tempfile.TemporaryDirectory(prefix=".arm64-package-", dir=output.parent) as staging:
         staging = Path(staging)
         archive = staging / "BitSov-Remote-Test-arm64.app.zip"
-        run(["ditto", "-c", "-k", "--keepParent", str(app), str(archive)], root, env, deadline)
+        run(["ditto", "-c", "-k", "--keepParent", str(app), str(archive)], root, env, deadline,
+            gate=False)
         verify_archive(archive, app)
         (staging / "build.json").write_text(json.dumps(metadata, indent=2) + "\n")
         files = [archive, staging / "build.json"]
