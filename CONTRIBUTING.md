@@ -6,7 +6,7 @@ build and pairing instructions.
 
 ## Build and test
 
-From the repository root, using Node.js 22:
+From the repository root, using Node.js 22.12 or newer (see `.nvmrc`):
 
 ```sh
 npm ci --ignore-scripts
@@ -40,16 +40,20 @@ addresses, private repository references and assistant session links. Report
 security concerns through [SECURITY.md](SECURITY.md).
 
 The Fossil Check workflow scans added lines and changed paths. Maintainers
-keep one private repository name per line in the Actions repository variable
-`FOSSIL_PRIVATE_NAMES`. After updating it, regenerate the derived variable:
+store one SHA-256 hash per line in the Actions repository variable
+`FOSSIL_PRIVATE_NAME_HASHES`. To add a hash, run the helper locally:
 
 ```sh
-gh api 'repos/{owner}/{repo}/actions/variables/FOSSIL_PRIVATE_NAMES' --jq .value \
-  | python3 scripts/ci/fossil-check.py --hash-private-names \
-  | gh variable set FOSSIL_PRIVATE_NAME_HASHES
+python3 scripts/ci/fossil-check.py --hash-private-names
 ```
 
+Enter one repository slug per line on standard input, then signal end-of-file
+(Ctrl-D on an empty line on macOS/Linux). The helper strips surrounding
+whitespace and case-folds each slug before hashing it. Append the emitted hashes
+to `FOSSIL_PRIVATE_NAME_HASHES` in the repository's Actions variables, preserving
+all existing hashes. Keep the input names out of repository variables, tracked
+files and shell history.
+
 Only hashes enter CI step environments, so private names do not appear in
-the step's environment log. Keep the names out of tracked files. Missing or
-invalid hash configuration fails the check. Existing context and deletions
-are allowed so cleanup can proceed.
+the step's environment log. Missing or invalid hash configuration fails the
+check. Existing context and deletions are allowed so cleanup can proceed.

@@ -504,10 +504,16 @@ impl From<&RemoteError> for ConnectionError {
     }
 }
 
-// BSD sockets cannot definitively distinguish an iOS privacy denial from an
-// unavailable route. Preserve these classes without asserting permission was
-// denied; a timeout/refusal alone is not evidence of a privacy restriction.
-fn classify_connect_error(error: std::io::Error, ios: bool, endpoint: &str) -> RemoteError {
+/// Platforms that gate connections to local addresses behind a Local Network
+/// permission: iOS, and macOS 15 and later. On these a denial is reported as
+/// `LocalNetwork`, so the tester is pointed at the setting instead of a
+/// generic "unreachable".
+const LOCAL_NETWORK_PRIVACY: bool = cfg!(any(target_os = "ios", target_os = "macos"));
+
+// BSD sockets cannot definitively distinguish a Local Network privacy denial
+// from an unavailable route. Preserve these classes without asserting permission
+// was denied; a timeout/refusal alone is not evidence of a privacy restriction.
+fn classify_connect_error(error: std::io::Error, local_network_privacy: bool, endpoint: &str) -> RemoteError {
     use std::io::ErrorKind;
     let local = endpoint_parts(endpoint).is_ok_and(|(host, _)| {
         match host.parse::<std::net::IpAddr>() {
@@ -516,12 +522,17 @@ fn classify_connect_error(error: std::io::Error, ios: bool, endpoint: &str) -> R
             Err(_) => host.trim_end_matches('.').to_ascii_lowercase().ends_with(".local"),
         }
     });
-    if ios && local && matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::NetworkDown
+    if local_network_privacy && local && matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::NetworkDown
         | ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable) {
         RemoteError::LocalNetwork
     } else {
         RemoteError::HandshakeUnavailable
     }
+}
+
+/// A connect failure on this platform, classified as above.
+fn connect_error(error: std::io::Error, endpoint: &str) -> RemoteError {
+    classify_connect_error(error, LOCAL_NETWORK_PRIVACY, endpoint)
 }
 
 /// Exact UTF-8 string signed by the node for the pairing link.
@@ -539,7 +550,7 @@ pub fn node_id_fingerprint(node_id_hex: &str) -> String {
 
 pub fn new_local_auth_token() -> Result<String, RemoteError> {
     let mut token = [0u8; 32];
-    getrandom::getrandom(&mut token).map_err(|error| {
+    getrandom::fill(&mut token).map_err(|error| {
         RemoteError::Local(format!("cannot secure remote loopback proxy: {error}"))
     })?;
     Ok(hex::encode(token))
@@ -974,6 +985,7 @@ fn open_sealed_code(
     Ok((stored, false))
 }
 
+#[cfg(not(windows))]
 fn persist_with(
     path: &Path,
     descriptor: &RemoteDescriptor,
@@ -1027,6 +1039,19 @@ fn persist_with(
     Ok(())
 }
 
+/// The descriptor file's bytes; unchanged path read outside Windows.
+#[cfg(not(windows))]
+fn read_descriptor_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+/// Windows: the descriptor on the private-file layer.
+#[cfg(windows)]
+#[path = "remote_access/windows_store.rs"]
+mod windows_store;
+#[cfg(windows)]
+use windows_store::{persist_with, read_descriptor_file};
+
 /// Validate with the same parser as import, without storage or network access.
 pub fn preview_pairing_link(link: &str) -> Result<RemotePreviewView, RemoteError> {
     let descriptor = parse_pairing_link(link)?;
@@ -1073,6 +1098,10 @@ pub fn forget_persisted(app_data_dir: &Path) -> Result<(), RemoteError> {
         let dir = app_data_dir.join(REMOTE_CONFIG_DIR);
         pairing::key::restrict_dir(&dir).map_err(|e| RemoteError::Local(e.to_string()))?;
         let reset = dir.join(LOCAL_PAIRING_RESET);
+        #[cfg(windows)]
+        crate::private_fs::ensure_marker(&reset)
+            .map_err(|e| RemoteError::Local(format!("cannot schedule local pairing reset: {e}")))?;
+        #[cfg(not(windows))]
         if reset.exists() {
             pairing::key::check_owner_only(&reset, "local pairing reset")
                 .map_err(|e| RemoteError::Local(e.to_string()))?;
@@ -1120,12 +1149,13 @@ fn load_with(
     path: &Path,
     sealer: Option<&dyn Sealer>,
 ) -> Result<Option<RemoteDescriptor>, RemoteError> {
-    if !path.exists() {
+    if pairing::key::nothing_at(path) {
         return Ok(None);
     }
+    #[cfg(not(windows))]
     pairing::key::check_owner_only(path, "remote access descriptor")
         .map_err(|e| RemoteError::Local(e.to_string()))?;
-    let bytes = std::fs::read(path)
+    let bytes = read_descriptor_file(path)
         .map_err(|e| RemoteError::Local(format!("cannot read remote descriptor: {e}")))?;
     if bytes.len() > MAX_LINK_BYTES {
         return Err(RemoteError::Local(
@@ -1359,7 +1389,7 @@ async fn pinned_handshake_bound<S: AsyncRead + AsyncWrite + Unpin>(
             .map_err(|_| RemoteError::Local("invalid built-in Noise protocol".into()))?;
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_initiator()
+            .and_then(|b| b.build_initiator())
             .map_err(|e| RemoteError::Local(format!("cannot initialize Noise: {e}")))?;
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let length = noise
@@ -1937,7 +1967,7 @@ fn finalize_authenticated_pairing(
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
         // Only update the descriptor this handshake started with. Import or
         // forget may have changed the next startup while the network awaited.
-        let stored = std::fs::read(config_path)
+        let stored = read_descriptor_file(config_path)
             .ok()
             .and_then(|bytes| saved_descriptor(&bytes));
         if !stored.is_some_and(|saved| saved.node_id == current.node_id
@@ -2036,7 +2066,7 @@ async fn connect_bound(
             let target = endpoint;
             let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target))
                 .await.map_err(|_| RemoteError::HandshakeUnavailable)?
-                .map_err(|error| classify_connect_error(error, cfg!(target_os = "ios"), endpoint))?;
+                .map_err(|error| connect_error(error, endpoint))?;
             let (noise, hash) = pinned_handshake_bound(&mut stream, descriptor, key).await?;
             Ok::<_, RemoteError>((stream, noise, hash))
         }.await;
@@ -2078,7 +2108,7 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
 ) -> Result<RemoteDescriptor, RemoteError> {
     verify_transport_proof(node, live_key, live_signature)?;
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-    let stored = std::fs::read(config_path(app_dir)).ok().and_then(|bytes| saved_descriptor(&bytes));
+    let stored = read_descriptor_file(&config_path(app_dir)).ok().and_then(|bytes| saved_descriptor(&bytes));
     if !stored.is_some_and(|saved| saved.node_id == previous.node_id
         && saved.box_transport_pubkey == previous.box_transport_pubkey
         && saved.endpoint == previous.endpoint && saved.endpoints == previous.endpoints
@@ -2105,7 +2135,7 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
 pub fn clear_enrollment_commitment(app_dir: &Path, descriptor: &mut RemoteDescriptor) -> Result<(), RemoteError> {
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
     let path = config_path(app_dir);
-    let mut saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes))
+    let mut saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes))
         .ok_or_else(|| RemoteError::Local("pairing ticket was forgotten or replaced".into()))?;
     if saved.node_id != descriptor.node_id || saved.endpoint != descriptor.endpoint
         || saved.transport_pubkey != descriptor.transport_pubkey || saved.code.is_some()
@@ -2327,7 +2357,7 @@ pub async fn authenticate_pinned_transport_and_save_record(
     let one_use = |d: &RemoteDescriptor| d.code.as_deref().is_some_and(|c| c.starts_with("second_") || c.starts_with("owner_"));
     // A previous interrupted send may already have retired the ticket on disk.
     let descriptor = if one_use(&descriptor) {
-        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        let saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         match saved {
             Some(mut saved) if saved.code.is_none() && saved.node_id == descriptor.node_id
                 && saved.endpoint == descriptor.endpoint && saved.transport_pubkey == descriptor.transport_pubkey
@@ -2342,7 +2372,7 @@ pub async fn authenticate_pinned_transport_and_save_record(
         let mut current = current.lock().unwrap();
         if !one_use(&current) { return Ok(()); }
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        let saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         if !saved.is_some_and(|d| d.node_id == current.node_id && d.endpoint == current.endpoint
             && d.transport_pubkey == current.transport_pubkey && d.code == current.code) {
             return Err(RemoteError::Local("pairing ticket was forgotten or replaced".into()));
@@ -2375,7 +2405,7 @@ pub async fn authenticate_pinned_transport_and_save_record(
             return Err(RemoteError::Invalid("unexpected provisional pairing".into()));
         }
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        let saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         if !saved.is_some_and(|d| d.node_id == descriptor.node_id && d.endpoint == descriptor.endpoint
             && d.code.is_none() && d.enrollment_commitment == descriptor.enrollment_commitment) {
             return Err(RemoteError::Local("pairing ticket was forgotten or replaced".into()));
@@ -2573,6 +2603,7 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
         .redirect(reqwest::redirect::Policy::none())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_proxy(
     api_base: &str,
     app_data_dir: &Path,
@@ -2745,6 +2776,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use std::net::IpAddr;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -2938,7 +2970,7 @@ mod tests {
                 "box_transport_pubkey": box_key,
                 "box_transport_signature": box_signature,
                 "expires_at": NOW + 86_400,
-                "hosted_by": "Rasmus's Pi",
+                "hosted_by": "Alex's Pi",
             });
             for (key, value) in extra.as_object().unwrap() {
                 fields[key] = value.clone();
@@ -2947,7 +2979,7 @@ mod tests {
         };
 
         let descriptor = parse_pairing_link_at(&ticket(serde_json::json!({})), NOW).unwrap();
-        assert_eq!(descriptor.hosted_by(), Some("Rasmus's Pi"));
+        assert_eq!(descriptor.hosted_by(), Some("Alex's Pi"));
         assert!(descriptor.has_code());
         // The node writes `null` when `[node].hosted_by` is unset.
         let unlabeled = parse_pairing_link_at(&ticket(serde_json::json!({ "hosted_by": null })), NOW).unwrap();
@@ -2969,9 +3001,9 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let live = ticket(serde_json::json!({ "expires_at": unix_now() + 86_400 }));
         let view = import_pairing_link(data.path(), &live).unwrap();
-        assert_eq!(view.hosted_by.as_deref(), Some("Rasmus's Pi"));
+        assert_eq!(view.hosted_by.as_deref(), Some("Alex's Pi"));
         let reloaded = load_persisted(data.path()).unwrap().unwrap();
-        assert_eq!(reloaded.hosted_by(), Some("Rasmus's Pi"));
+        assert_eq!(reloaded.hosted_by(), Some("Alex's Pi"));
         assert!(reloaded.has_code());
     }
 
@@ -3070,7 +3102,7 @@ mod tests {
         assert_eq!(label("  My Pi  ").as_deref(), Some("My Pi"));
         // Markup stays literal; the renderer shows it as text.
         assert_eq!(label("<img src=x onerror=alert(1)>").as_deref(), Some("<img src=x onerror=alert(1)>"));
-        for odd in ["Pi\u{202E}kcab", "Rasmus\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
+        for odd in ["Pi\u{202E}kcab", "Alex\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
             assert_eq!(label(odd), None, "{odd:?}");
         }
 
@@ -3168,6 +3200,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn persistence_is_owner_only_and_code_is_stripped() {
         let dir = tempfile::tempdir().unwrap();
         let node = SigningKey::from_bytes(&[11u8; 32]);
@@ -3189,6 +3222,11 @@ mod tests {
         assert!(!text.contains("\"code\""));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mod linux_candidate_tests {
+        include!("remote_access/linux_candidate_tests.rs");
+    }
+
     fn sealed_fixture(seed: u8) -> (tempfile::TempDir, PathBuf, RemoteDescriptor, String) {
         let dir = tempfile::tempdir().unwrap();
         let node = SigningKey::from_bytes(&[seed; 32]);
@@ -3197,6 +3235,51 @@ mod tests {
         let link = signed_link("127.0.0.1:4242".into(), &node, transport, &code);
         let path = config_path(dir.path());
         (dir, path, parse_pairing_link(&link).unwrap(), code)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_descriptor_round_trips_and_tampering_is_refused() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        use crate::private_fs::fixtures::*;
+        if elevated() {
+            return;
+        }
+        let (dir, path, descriptor, code) = sealed_fixture(41);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        let loaded = load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
+        assert_eq!(loaded.code.as_deref(), Some(code.as_str()));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&code) && text.contains("sealed_code"), "{text}");
+        // The reset marker is a private object too.
+        forget_persisted(dir.path()).unwrap();
+        let reset = path.parent().unwrap().join(LOCAL_PAIRING_RESET);
+        crate::private_fs::verify_file(&reset).unwrap();
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        // Extra access entry: refused for reading and replacing, bytes kept.
+        let bytes = std::fs::read(&path).unwrap();
+        grant_everyone_read(&path);
+        assert!(load_with(&path, Some(&MemorySealer)).is_err());
+        assert!(persist_with(&path, &descriptor, Some(&MemorySealer)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // A leftover scratch file is refused, not reused or deleted.
+        let (_dir2, path2, descriptor2, _) = sealed_fixture(43);
+        persist_with(&path2, &descriptor2, Some(&MemorySealer)).unwrap();
+        let scratch = path2.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp"));
+        std::fs::write(&scratch, b"leftover").unwrap();
+        assert!(persist_with(&path2, &descriptor2, Some(&MemorySealer)).is_err());
+        assert_eq!(std::fs::read(&scratch).unwrap(), b"leftover");
+        // Reparse point at the descriptor folder.
+        let (dir3, path3, descriptor3, _) = sealed_fixture(45);
+        let target = dir3.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        junction(path3.parent().unwrap(), &target);
+        assert!(persist_with(&path3, &descriptor3, Some(&MemorySealer)).is_err());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        // Wrong owner.
+        let foreign = foreign_owned_dir().join(REMOTE_CONFIG_FILE);
+        assert!(persist_with(&foreign, &descriptor3, Some(&MemorySealer)).is_err());
     }
 
     #[test]
@@ -3252,6 +3335,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_plaintext_pending_code_is_sealed_once_on_load() {
         use crate::at_rest::test_sealer::MemorySealer;
         let (_dir, path, descriptor, code) = sealed_fixture(41);
@@ -3360,6 +3444,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn returning_auth_validates_existing_record_without_rewriting_it() {
         let app_dir = tempfile::tempdir().unwrap();
         let pairing_store = tempfile::tempdir().unwrap();
@@ -3398,6 +3483,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn derived_key_is_stable_and_not_the_ed25519_seed() {
         let a_dir = tempfile::tempdir().unwrap();
         let b_dir = tempfile::tempdir().unwrap();
@@ -3564,11 +3650,11 @@ mod tests {
         let responder_secret = [42u8; 32];
         let mut initiator = Builder::new(params.clone())
             .local_private_key(&initiator_secret)
-            .build_initiator()
+            .and_then(|b| b.build_initiator())
             .unwrap();
         let mut responder = Builder::new(params)
             .local_private_key(&responder_secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut message = vec![0u8; MAX_HANDSHAKE_FRAME];
         let mut plaintext = vec![0u8; MAX_HANDSHAKE_FRAME];
@@ -3942,7 +4028,7 @@ mod tests {
         let params = NOISE_PROTOCOL.parse().unwrap();
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
@@ -3962,7 +4048,7 @@ mod tests {
         let params = NOISE_PROTOCOL.parse().unwrap();
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
@@ -3993,7 +4079,7 @@ mod tests {
     // Count socket handshakes, not requests, so losing pooling fails this test.
     async fn polling_responder(mut stream: TcpStream, secret: [u8; 32]) -> Result<(), RemoteError> {
         let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
-            .local_private_key(&secret).build_responder().unwrap();
+            .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
@@ -4217,7 +4303,7 @@ mod tests {
     // Complete the handshake and read the app's authentication request.
     async fn read_auth_request(stream: &mut TcpStream, secret: [u8; 32]) -> Result<TransportState, RemoteError> {
         let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
-            .local_private_key(&secret).build_responder().unwrap();
+            .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
@@ -4862,7 +4948,7 @@ mod tests {
             let key = ClientKey::load_or_create(store.path()).unwrap();
             remember_endpoint(&descriptor, &answering_endpoint);
 
-            let error = connect_authenticated(&descriptor, &key, "test phone").await.err().expect("the box refused");
+            let error = connect_authenticated(&descriptor, &key, "test phone").await.expect_err("the box refused");
             assert!(expected(&error), "{error}");
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(requests.load(Ordering::SeqCst), 1);
@@ -5246,6 +5332,18 @@ mod onboarding_error_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_macos_local_network_denial_points_at_the_setting() {
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::HostUnreachable] {
+            let error = connect_error(std::io::Error::from(kind), "10.0.0.2:9735");
+            assert!(matches!(error, RemoteError::LocalNetwork), "{kind:?}");
+            assert!(error.to_string().contains("Local Network permission"));
+        }
+        assert!(matches!(connect_error(std::io::Error::from(std::io::ErrorKind::TimedOut), "10.0.0.2:9735"), RemoteError::HandshakeUnavailable));
+        assert!(matches!(connect_error(std::io::Error::from(std::io::ErrorKind::HostUnreachable), "example.com:9735"), RemoteError::HandshakeUnavailable));
+    }
+
     #[test]
     fn ios_local_network_usage_copy_explains_box_connection_and_recovery() {
         let plist = include_str!("../Info.ios.plist");
@@ -5263,3 +5361,24 @@ mod onboarding_error_tests {
 #[cfg(test)]
 #[path = "remote_access/second_tests.rs"]
 pub(crate) mod second_tests;
+
+/// Preparation entry point; production persistence is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn persist_linux_candidate(path: &Path, descriptor: &RemoteDescriptor, sealer: Option<&dyn Sealer>) -> Result<(), RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => { load_with(path, Some(&sealer))?; }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RemoteError::Local(format!("cannot inspect remote descriptor: {error}"))),
+    }
+    persist_with(path, descriptor, Some(&sealer))
+}
+
+/// Preparation entry point; production loading is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn load_linux_candidate(path: &Path, sealer: Option<&dyn Sealer>) -> Result<Option<RemoteDescriptor>, RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    load_with(path, Some(&sealer))
+}

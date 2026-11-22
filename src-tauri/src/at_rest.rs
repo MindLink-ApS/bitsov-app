@@ -33,6 +33,13 @@ mod macos;
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
 pub use macos::install_macos;
 
+#[cfg(any(windows, test))]
+mod dpapi;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::install_windows;
+
 /// The client Ed25519 seed (`pairing::key`).
 pub const CLIENT_SEED_PURPOSE: &str = "client-ed25519-seed-v1";
 
@@ -94,3 +101,6 @@ pub fn install_ios() -> Result<(), String> {
     }
     install(Arc::new(IosSealer))
 }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) mod linux;

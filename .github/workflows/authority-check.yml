@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run app authority gate
         run: scripts/authority-check.sh
@@ -37,9 +37,12 @@ jobs:
       # by the Mac Package workflow.
       - name: Mac bundle checker tests
         run: |
-          shellcheck scripts/package-mac.sh scripts/check-mac-bundle.sh scripts/test-check-mac-bundle.sh
+          shellcheck scripts/package-mac.sh scripts/check-mac-bundle.sh scripts/test-check-mac-bundle.sh \
+            scripts/make-dev-external-wrapper.sh scripts/test-dev-external-wrapper.sh
           bash scripts/test-check-mac-bundle.sh
+          bash scripts/test-dev-external-wrapper.sh
           python3 scripts/test-package-mac.py
+          python3 scripts/test-package-mac-arch.py
 
       # app #16. The source-guard layer needs no bundle and no macOS: it asserts the
       # run loop still handles BOTH RunEvent variants, that teardown never hunts a

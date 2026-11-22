@@ -21,7 +21,7 @@ const minutes = (patch: Partial<MinutesView> = {}): MinutesView => ({
   agreedBlockMsat: 1000, reservationMaxMsat: 240_000,
   reservation: { reserved_msat: 60_000, spent_msat: 5_050, remaining_msat: 0, per_block_msat: 1000, per_block_fee_msat: 10, max_call_minutes: 60, released_msat: 54_950, closed: true },
   confirmed: true, confirming: false, holdError: null, paidUntilMs: ENDED_AT, blocks: 5, receiptsMsat: 5_050,
-  paying: false, stop: null, settled: true, final: true, ...patch,
+  paying: false, lostMinute: false, undeliveredMinute: false, undeliveredPendingId: null, stop: null, settled: true, final: true, ...patch,
 });
 const ended = (patch: Partial<CallView> = {}): CallView => ({
   ...IDLE, phase: 'ended', state: 'ended', peer: PEER, callId: CALL_ID, media: 'audio', outgoing: true,
@@ -40,6 +40,9 @@ describe('the call report', () => {
       'peer: ab12cd34…ef56ab78',
       'media: audio',
       'media_path: node-routed',
+      'audio_codec_sent: unknown',
+      'audio_codec_received: unknown',
+      'audio_context_hz: unknown',
       'clock: this device',
       'start_time: 2026-11-02T10:00:00.000Z',
       'end_time: 2026-11-02T10:05:12.400Z',
@@ -62,6 +65,15 @@ describe('the call report', () => {
     expect(appVersion()).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
+  it('names the codecs that carried the audio and the context rate, and nothing odd', () => {
+    const audio = (a: unknown) => callReportLines({ view: ended({ audio: a as CallView['audio'] }), routed: true, endedAt: ENDED_AT })
+      .filter((l) => l.startsWith('audio_'));
+    expect(audio({ sent: ['opus'], received: ['opus'], contextRate: 48_000 })).toEqual(['audio_codec_sent: opus', 'audio_codec_received: opus', 'audio_context_hz: 48000']);
+    expect(audio({ sent: ['opus', 'mulaw'], received: ['mulaw'], contextRate: 44_100 })).toEqual(['audio_codec_sent: opus,mulaw', 'audio_codec_received: mulaw', 'audio_context_hz: 44100']);
+    expect(audio({ sent: [], received: [], contextRate: null })).toEqual(['audio_codec_sent: none', 'audio_codec_received: none', 'audio_context_hz: unknown']);
+    expect(audio({ sent: ['opus', 'x<script>'], received: 'opus', contextRate: 48_000.5 })).toEqual(['audio_codec_sent: unknown', 'audio_codec_received: unknown', 'audio_context_hz: unknown']);
+  });
+
   it('names the unpaid, duration-cap and payment-failure ends', () => {
     const reason = (view: CallView) => callReportLines({ view, routed: true, endedAt: ENDED_AT }).find(l => l.startsWith('end_reason:'));
     const stop = (code: NonNullable<MinutesView['stop']>['code']) => ({ code, message: 'ignored' });
@@ -70,6 +82,7 @@ describe('the call report', () => {
     const capped = minutes({ blocks: 60, reservation: { ...minutes().reservation!, max_call_minutes: 60 }, stop: stop('node_ended') });
     expect(reason(ended({ minutes: capped }))).toBe('end_reason: duration_cap');
     expect(reason(ended({ reason: 'failed', minutes: minutes({ stop: stop('payment_failed') }) }))).toBe('end_reason: payment_failed');
+    expect(reason(ended({ reason: 'failed', minutes: minutes({ stop: stop('budget_limit') }) }))).toBe('end_reason: budget_limit');
     expect(reason(ended({ reason: 'hangup', minutes: minutes({ stop: stop('node_ended') }) }))).toBe('end_reason: node_ended');
     // An incoming call the app only watched: no reservation of ours, nothing summed.
     const lines = callReportLines({ view: ended({ outgoing: false, minutes: null, reason: 'declined' }), routed: true, endedAt: ENDED_AT });

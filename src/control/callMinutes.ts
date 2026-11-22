@@ -21,7 +21,7 @@
  * unknown, and reports every reason it stops.
  */
 import { t as tr } from '../i18n';
-import { provenUnpaid } from './paymentOutcome';
+import { provenUnpaid, sendFacts } from './paymentOutcome';
 import { asActionError } from './state';
 import type { ActionError, CallReceipt, CallReservation, CallStatus } from './types';
 
@@ -37,6 +37,11 @@ export const DUE_MARGIN_MS = 1_000;
 /** A block the node did not dispatch (proven unpaid) is tried again after this wait, a few times. */
 export const RETRY_MS = 2_000;
 export const MAX_ATTEMPTS = 4;
+/**
+ * A minute refused for a passing reason is tried again for as long as paid time
+ * and grace remain: 20 seconds before the boundary to 10 seconds after it.
+ */
+export const PASSING_MAX_ATTEMPTS = 15;
 /** After the call ends, read the node until it closes the reservation, at most this long. */
 export const SETTLE_POLL_MS = 1_000;
 export const SETTLE_MAX_MS = 20_000;
@@ -60,18 +65,52 @@ export type MinutesDeps = {
 };
 
 /** The host refused the node's hold for this call (and hung up where it was above the consent): nothing is paid. */
-export const HOLD_REFUSED = new Set(['call_no_reservation', 'call_hold_above_consent', 'call_no_consent', 'call_reservation_closed']);
+export const HOLD_REFUSED = new Set(['call_no_reservation', 'call_hold_above_consent', 'call_no_consent', 'call_reservation_closed', 'call_minutes_above_hold']);
+
+/**
+ * The next minute, at its whole ceiling, stays within the hold the node keeps and
+ * the most the owner agreed to, by the node's spent figure and by the receipts this
+ * app holds (the higher). An amount this app cannot hold exactly does not fit.
+ */
+export function minuteFitsHold(hold: CallReservation, agreedMaxMsat: number | null, receiptsMsat: number): boolean {
+  const most = Math.max(hold.spent_msat, receiptsMsat) + hold.per_block_msat + hold.per_block_fee_msat;
+  const limit = Math.min(hold.reserved_msat, agreedMaxMsat ?? hold.reserved_msat);
+  return Number.isSafeInteger(most) && Number.isSafeInteger(limit) && most <= limit;
+}
+
+/**
+ * Refused before anything was paid, for a reason that passes by itself: their
+ * node or this one is catching up, a rate breaker, a channel read that failed. Each attempt is a new operation, so nothing is paid twice.
+ */
+const PASSING_REFUSAL = new Set(['not_ready', 'peer_not_ready', 'grant_rate_limited', 'grant_velocity', 'call_liquidity_unavailable']);
+/** A limit the owner set: it stays reached until the owner raises it, so trying again cannot help. */
+const LIMIT_REFUSAL = new Set(['budget_exhausted', 'ceiling_exhausted']);
 
 /**
  * Why paying stopped. `unpaid`: the paid time ran out and the node ended the
  * call. `node_ended`: the node ended the call for another reason.
  * `payment_failed`: a block was refused (nothing paid for it).
+ * `budget_limit`: the owner's budget has no room for the next block.
  * `payment_unknown`: a block's outcome is not known. `price_changed`: their
  * node asks more per minute than the owner agreed to. `hold_refused`: the
  * node holds no reservation for the call, or more than the owner agreed to.
  */
-export type MinutesStopCode = 'unpaid' | 'node_ended' | 'payment_failed' | 'payment_unknown' | 'price_changed' | 'hold_refused';
-export type MinutesStop = { code: MinutesStopCode; message: string };
+export type MinutesStopCode = 'unpaid' | 'node_ended' | 'payment_failed' | 'budget_limit' | 'payment_unknown' | 'price_changed' | 'hold_refused';
+export type MinutesStop = {
+  code: MinutesStopCode;
+  message: string;
+  /** The node's own words when they are not plain: shown only under Details. */
+  detail?: string;
+  /**
+   * Display only, kept apart from `message` (which is worded in the language of the moment it stopped):
+   * the node's own text for this stop, and whether their box refused the minute. The ended card words the
+   * cause from `code` in the current language and shows `raw` only under Details.
+   */
+  raw?: string;
+  theirBox?: boolean;
+  /** The node grant or separate app limit that refused the minute, including its accounted amount. */
+  limit?: Pick<ActionError, 'code' | 'message'>;
+};
 
 export type MinutesView = {
   /** The per-minute price the owner agreed to before dialling (their node's advert). */
@@ -94,6 +133,16 @@ export type MinutesView = {
   receiptsMsat: number;
   /** A block payment is in flight. */
   paying: boolean;
+  /**
+   * The call ended while a minute was being paid, and that minute's result is not
+   * known (paid and proven unpaid are both known). Nothing was ended at the host for it (their hangup closes the
+   * admission by itself), so its pending result holds every paid action until checked.
+   */
+  lostMinute: boolean;
+  /** The same, with the minute paid and not delivered: known money, and still pending at the host. */
+  undeliveredMinute: boolean;
+  /** The pending record the host named for that undelivered minute, when it did. */
+  undeliveredPendingId: string | null;
   stop: MinutesStop | null;
   /** The call ended and the node closed the reservation (or no longer lists the call). */
   settled: boolean;
@@ -119,10 +168,19 @@ export const STOP_MESSAGE: Record<MinutesStopCode, () => string> = {
   unpaid: () => tr('caMinutesUnpaid'),
   node_ended: () => tr('caMinutesNodeEnded'),
   payment_failed: () => tr('caMinutesPaymentFailed'),
+  budget_limit: () => tr('caMinutesBudgetLimit'),
   payment_unknown: () => tr('caMinutesPaymentUnknown'),
   price_changed: () => tr('caMinutesPriceChanged'),
   hold_refused: () => tr('caMinutesHoldRefused'),
 };
+
+/**
+ * The callee's box refused the minute (for example its approval ran out, so it
+ * no longer takes this call's media). The node says so in protocol words.
+ */
+export function theirBoxRefused(error: Pick<ActionError, 'message'> & { reason?: string | null }): boolean {
+  return error.reason === 'call_block_unpayable' || /callee refused the call block invoice/i.test(error.message);
+}
 
 export function createCallMinutes(opts: {
   peer: string;
@@ -143,7 +201,7 @@ export function createCallMinutes(opts: {
   let view: MinutesView = {
     agreedBlockMsat: opts.agreedBlockMsat, reservationMaxMsat: opts.reservationMaxMsat,
     reservation: null, confirmed: false, confirming: false, holdError: null,
-    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, stop: null, settled: false, final: false,
+    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, lostMinute: false, undeliveredMinute: false, undeliveredPendingId: null, stop: null, settled: false, final: false,
   };
   /** Paying blocks (between answer and end). */
   let running = false;
@@ -152,6 +210,7 @@ export function createCallMinutes(opts: {
   let disposed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let attempts = 0;
+  let passingAttempts = 0;
   let settleUntil = 0;
   let inFlight = false;
   /** A status read of `tick` is in progress: a second tick would pay the same block twice. */
@@ -186,13 +245,17 @@ export function createCallMinutes(opts: {
   };
 
   /** Stops while ringing (the hold was refused) or while paying; never after the call ended. */
-  const stopWith = (code: MinutesStopCode, detail: string | null = null) => {
+  const stopWith = (code: MinutesStopCode, detail: string | null = null, limit?: Pick<ActionError, 'code' | 'message'>, refusal?: ActionError) => {
     if (stopped || disposed || settling) return;
     stopped = true;
     running = false;
     clearTimeout(timer);
     timer = undefined;
-    const stop = { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code]() };
+    // Their box stopping the call is said in plain words; its protocol text stays under Details.
+    const stop: MinutesStop = code === 'payment_failed' && detail && refusal && theirBoxRefused(refusal)
+      ? { code, message: tr('caMinutesTheirBoxStopped'), detail, raw: detail, theirBox: true }
+      : { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code](), ...(detail ? { raw: detail } : {}) };
+    if (limit) stop.limit = { code: limit.code, message: limit.message };
     emit({ stop });
     opts.onStop(stop);
   };
@@ -228,6 +291,7 @@ export function createCallMinutes(opts: {
     const wait = due + (status.next_block_seq > 0 ? DUE_MARGIN_MS : 0) - now();
     if (wait > 0) { schedule(Math.min(wait, STATUS_POLL_MS), () => void tick()); return; }
     if (!payable()) return;
+    if (hold && !minuteFitsHold(hold, view.reservationMaxMsat, view.receiptsMsat)) { stopWith('hold_refused', tr('caMinutesPastHold')); return; }
     await payBlock(status.next_block_seq);
   };
 
@@ -244,9 +308,11 @@ export function createCallMinutes(opts: {
     try { r = await deps.pay(peer, callId, seq); } catch (error) { r = { ok: false, error: asActionError(error) }; }
     inFlight = false;
     // A receipt is counted even if the call ended meanwhile: it was paid.
-    emit({ paying: false, ...(r.ok ? { receiptsMsat: view.receiptsMsat + r.value.total_msat, blocks: Math.max(view.blocks, seq + 1) } : {}) });
+    emit({ paying: false, ...(r.ok ? { receiptsMsat: view.receiptsMsat + r.value.total_msat, blocks: Math.max(view.blocks, seq + 1) }
+      : running || sendFacts(r.error.code).fenceCleared ? {}
+      : sendFacts(r.error.code).paymentKnown ? { undeliveredMinute: true, undeliveredPendingId: r.error.pending_id ?? null } : { lostMinute: true }) });
     if (!running) return;
-    if (r.ok) { attempts = 0; void tick(); return; }
+    if (r.ok) { attempts = 0; passingAttempts = 0; void tick(); return; }
     const code = r.error.code;
     if (code === 'call_price_changed' || code === 'price_cap_exceeded' || code === 'price_changed') { stopWith('price_changed'); return; }
     // No reservation, or one above the consent: the host hung up and pays none of it.
@@ -263,12 +329,18 @@ export function createCallMinutes(opts: {
       stopWith(lapsed() ? 'unpaid' : 'node_ended');
       return;
     }
+    if (LIMIT_REFUSAL.has(code)) { stopWith('budget_limit', null, r.error); return; }
+    if (PASSING_REFUSAL.has(code)) {
+      if (++passingAttempts < PASSING_MAX_ATTEMPTS && !lapsed()) { schedule(RETRY_MS, () => void tick()); return; }
+      stopWith('payment_failed', r.error.message);
+      return;
+    }
     if (provenUnpaid(code)) {
       // Not dispatched (for example the node's clock says it is not due yet): nothing was paid, try again a few times.
       const retryable = code === 'not_dispatched' || code === 'call_block_not_due';
       attempts++;
       if (retryable && attempts < MAX_ATTEMPTS && !lapsed()) { schedule(RETRY_MS, () => void tick()); return; }
-      stopWith('payment_failed', r.error.message);
+      stopWith('payment_failed', r.error.message, code === 'grant_exhausted' ? r.error : undefined, r.error);
       return;
     }
     // Paid or not is unknown: never pay again on top of it.
@@ -325,6 +397,7 @@ export function createCallMinutes(opts: {
       if (running || disposed || settling || stopped) return;
       running = true;
       attempts = 0;
+      passingAttempts = 0;
       void tick();
     },
     finish: () => {

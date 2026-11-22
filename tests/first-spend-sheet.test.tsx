@@ -25,10 +25,10 @@ function setup(options: { presets?: BudgetPreset[]; reason?: string; max?: numbe
 
 describe.each(['en', 'da'] as const)('first spend sheet (%s)', (lang) => {
   const words = () => lang === 'en' ? {
-    title: 'Let messages spend up to 500 sats a day?', allow: 'Allow 500 sats a day', other: 'Other options', cancel: 'Not now',
+    title: 'Let messages spend up to 500 sats in total, for up to 24 hours?', allow: 'Allow 500 sats in total', other: 'Other options', cancel: 'Not now',
     owner: 'Approve at your box', reason: 'Connect to your node before allowing payments.',
   } : {
-    title: 'Må beskeder bruge op til 500 sats om dagen?', allow: 'Tillad 500 sats om dagen', other: 'Andre muligheder', cancel: 'Ikke nu',
+    title: 'Må beskeder bruge op til 500 sats i alt, i højst 24 timer?', allow: 'Tillad 500 sats i alt', other: 'Andre muligheder', cancel: 'Ikke nu',
     owner: 'Godkend på din boks', reason: 'Opret forbindelse til din node, før du tillader betalinger.',
   };
   it('defaults to one Allow action and keeps costs outside collapsed options', () => {
@@ -55,7 +55,8 @@ describe.each(['en', 'da'] as const)('first spend sheet (%s)', (lang) => {
     expect(text(summary)).toContain('Entry fee: 1 sat · message: 2 sats · routing fee at most: 5 sats · total at most: 8 sats');
     for (const [value, expected] of [['1250', '1 250 sats'], ['1250.5', '1 250 500 msat']]) {
       input.value = value; input.dispatchEvent(new Event('input', { bubbles: true }));
-      expect(text(summary)).toContain(lang === 'en' ? `Allow ${expected} a day` : `Tillad ${expected} om dagen`);
+      expect(text(summary)).toContain(lang === 'en' ? `Allow ${expected} in total` : `Tillad ${expected} i alt`);
+      expect(text(summary)).toContain(lang === 'en' ? 'For up to 24 hours.' : 'I højst 24 timer.');
       expect(button('[data-first-spend-allow]').disabled).toBe(false);
       expect(sheet.scrollTop).toBe(212);
     }
@@ -157,7 +158,7 @@ describe.each(['en', 'da'] as const)('first spend sheet (%s)', (lang) => {
 
 it('uses changed node preset values, including the default, without hardcoded amounts', () => {
   setup({ presets: SAMPLE_PRESETS.map(p => ({ ...p, ceiling_msat: p.ceiling_msat + 750_000 })) });
-  expect(text(mount.querySelector('h2'))).toBe('Let messages spend up to 1 250 sats a day?');
+  expect(text(mount.querySelector('h2'))).toBe('Let messages spend up to 1 250 sats in total, for up to 24 hours?');
   expect(text(button('[data-preset="everyday"]'))).toContain('2 750 sats');
 });
 it('does not invent a preset if the node supplies none', () => {
@@ -202,4 +203,53 @@ it.each(['en', 'da'] as const)('keeps a visible setup action in the %s approval 
   setupButton.click();
   expect(setupApprovals).toHaveBeenCalledOnce();
   expect(allow).not.toHaveBeenCalled();
+});
+
+describe('the sheet under a newer modal', () => {
+  it('lets the quit question keep the keyboard while it is open, and takes focus back after', async () => {
+    const { QuitConfirm } = await import('../src/control/QuitConfirm');
+    const { createSignal: signal, Show: ShowIf } = await import('solid-js');
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const [quit, setQuit] = signal(false);
+    const allow = vi.fn();
+    const stop = render(() => <>
+      <FirstSpendSheet
+        presets={[{ id: 'careful', ceiling_msat: 500_000, contact_msat: 50_000, room_msat: 100_000 }]}
+        initialPreset="careful" maxDailyMsat={1_000_000} costLine="8 sats" blockedReason={null}
+        onPreset={() => {}} onAllow={allow} onCancel={() => {}} />
+      <ShowIf when={quit()}><QuitConfirm name="Robin" onStay={() => setQuit(false)} onClose={() => {}} /></ShowIf>
+    </>, host);
+    try {
+      setQuit(true);
+      await Promise.resolve();
+      const stay = host.querySelector<HTMLButtonElement>('[data-quit-stay]')!;
+      expect(document.activeElement).toBe(stay);
+      // The sheet's own panel must not be asked to take focus back while the quit question is open
+      // (in WebKit that call succeeds even though the sheet is under a newer modal).
+      const panel = host.querySelector<HTMLElement>('[data-first-spend-scrim] [tabindex="-1"]')!;
+      const pulled = vi.spyOn(panel, 'focus');
+      // A focus move inside the quit question must not be pulled back into the sheet underneath.
+      const yes = host.querySelector<HTMLButtonElement>('[data-quit-yes]')!;
+      const moveTo = (el: HTMLElement) => { el.focus(); el.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); };
+      moveTo(yes);
+      expect(document.activeElement).toBe(yes);
+      moveTo(stay);
+      expect(document.activeElement).toBe(stay);
+      expect(pulled, 'the sheet did not pull focus while the quit question was open').not.toHaveBeenCalled();
+      expect(allow).not.toHaveBeenCalled();
+      setQuit(false);
+      await Promise.resolve();
+      // With the question gone, the sheet keeps its own focus trap again.
+      const outside = document.createElement('button');
+      document.body.appendChild(outside);
+      outside.focus();
+      outside.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      expect(host.querySelector('[data-first-spend-scrim]')!.contains(document.activeElement)).toBe(true);
+      outside.remove();
+    } finally {
+      stop();
+      host.remove();
+    }
+  });
 });

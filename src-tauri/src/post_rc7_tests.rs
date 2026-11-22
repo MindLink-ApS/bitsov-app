@@ -443,7 +443,7 @@ async fn retained_node_requires_two_separate_consents_then_authenticates_normall
     std::fs::create_dir(seed.parent().unwrap()).unwrap();
     std::fs::write(&seed, "existing-identity").unwrap();
     let original = include_str!("../tests/fixtures/rc7-pricing.toml");
-    std::fs::write(&config, &original).unwrap();
+    std::fs::write(&config, original).unwrap();
     assert!(!local_owner::launch_enabled(true, &config).unwrap(),
         "a retained seed beside the config must not enable owner mode");
     std::fs::write(&program, format!(r#"#!/bin/sh
@@ -554,4 +554,301 @@ exec sleep 30
     assert_eq!(state.status_snapshot().initialization_repair, InitializationRepair::None);
     state.stop_for_restart(Duration::from_secs(2));
     server.join().unwrap();
+}
+
+/// A scripted stand-in for the node binary: it logs each call. `init` writes
+/// placeholder files where a real init would put the config, the recovery
+/// phrase and the wallet; `start` exits at once and never serves.
+#[cfg(unix)]
+fn scripted_first_run_node(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let calls = dir.join("calls");
+    let program = dir.join("scripted-node");
+    std::fs::write(&program, format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+if [ "$1" = init ]; then
+  mkdir -p "$3/identity" "$3/ldk"
+  printf placeholder > "$3/identity/mnemonic.txt"
+  printf placeholder > "$3/ldk/wallet"
+  printf '' > "$3/konsensus.toml"
+  exit 0
+fi
+exit 1
+"#, calls.display())).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (program, calls)
+}
+
+#[cfg(unix)]
+fn first_run_app(program: PathBuf) -> tauri::App<tauri::test::MockRuntime> {
+    // Nothing listens on port 1: a health probe is refused at once.
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    state.local_startup.store(true, Ordering::SeqCst);
+    *state.test_sidecar.lock().unwrap() = Some(program);
+    tauri::test::mock_builder()
+        .manage(state)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap()
+}
+
+#[cfg(unix)]
+fn created_node_files(app_data: &Path) -> Vec<&'static str> {
+    ["konsensus.toml", "identity", "identity/mnemonic.txt", "ldk", "ldk/wallet"]
+        .into_iter()
+        .filter(|name| app_data.join(name).exists())
+        .collect()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fresh_profile_startup_creates_nothing_until_the_owner_chooses_this_mac() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let (program, calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+
+    // First launch and a relaunch: no init, no start, no seed, no wallet.
+    for _ in 0..2 {
+        bootstrap_node_at(app.handle(), app_data.clone()).await;
+        assert!(!calls.exists(), "startup ran the node: {:?}", std::fs::read_to_string(&calls).ok());
+        assert!(state.child.lock().unwrap().is_none(), "startup spawned a node");
+        assert!(state.config.lock().unwrap().is_none());
+        assert!(created_node_files(&app_data).is_empty(), "{:?}", created_node_files(&app_data));
+        assert!(!local_setup_consent_path(&app_data).exists());
+        let status = state.status_snapshot();
+        assert!(status.local_setup_needed, "onboarding must be asked to show the choice");
+        assert_eq!(status.error, None, "a fresh profile is not an error");
+        assert!(!status.ready);
+        assert!(!state.local_startup.load(Ordering::SeqCst), "a remote link can still be used");
+    }
+
+    // Without the owner's agreement nothing is recorded or created.
+    let declined = node_setup_local_at(app.handle(), &state, &app_data, false).await;
+    assert!(declined.unwrap_err().contains("explicit agreement"));
+    assert!(!calls.exists());
+    assert!(!local_setup_consent_path(&app_data).exists());
+    assert!(state.status_snapshot().local_setup_needed);
+
+    // The explicit choice: recorded first, then the usual first-run init and start.
+    let chosen = node_setup_local_at(app.handle(), &state, &app_data, true).await;
+    assert!(chosen.is_err(), "the stand-in node never becomes healthy");
+    assert!(local_setup_consent_path(&app_data).exists());
+    let log = std::fs::read_to_string(&calls).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert_eq!(
+        lines[0],
+        format!("init --dir {} --non-interactive --tier full", app_data.display())
+    );
+    assert!(lines[1].starts_with("start --config "), "{log}");
+    assert_eq!(created_node_files(&app_data).len(), 5);
+    assert!(!state.status_snapshot().local_setup_needed);
+
+    // The choice is used once; a second call cannot run init again.
+    assert!(node_setup_local_at(app.handle(), &state, &app_data, true).await.is_err());
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), log);
+    state.stop_for_restart(Duration::from_secs(2));
+}
+
+/// The local owner flow creates its credential only for an empty node directory
+/// (`local_owner::may_create_password`). Recording the owner's choice must not
+/// make a fresh directory look used, or a fresh owner setup fails right after
+/// the owner said yes.
+#[test]
+fn recording_the_choice_keeps_a_fresh_node_directory_fresh_for_the_local_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().to_path_buf();
+    assert!(local_owner::may_create_password(&app_data).unwrap());
+    record_local_setup_consent(&app_data).unwrap();
+    assert!(local_setup_consent_path(&app_data).exists());
+    assert!(
+        local_owner::may_create_password(&app_data).unwrap(),
+        "the recorded choice made a fresh node directory look used"
+    );
+    // The recorded choice is still what lets startup proceed.
+    assert!(!local_setup_needed(&app_data, &app_data.join("konsensus.toml"), false).unwrap());
+    // Genuine node state still counts as used.
+    std::fs::write(app_data.join("node.db"), b"").unwrap();
+    assert!(!local_owner::may_create_password(&app_data).unwrap());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn existing_install_and_recorded_choice_start_without_asking() {
+    // An existing config: start only, no init and no new choice recorded.
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    std::fs::create_dir_all(&app_data).unwrap();
+    std::fs::write(app_data.join("konsensus.toml"), "").unwrap();
+    let (program, calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    bootstrap_node_at(app.handle(), app_data.clone()).await;
+    let log = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.starts_with("start --config "), "{log}");
+    assert!(!state.status_snapshot().local_setup_needed);
+    assert!(!local_setup_consent_path(&app_data).exists());
+    state.stop_for_restart(Duration::from_secs(2));
+
+    // A recorded choice whose first run did not finish: init resumes at startup.
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    record_local_setup_consent(&app_data).unwrap();
+    let (program, calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    bootstrap_node_at(app.handle(), app_data.clone()).await;
+    let log = std::fs::read_to_string(&calls).unwrap();
+    assert!(log.starts_with("init --dir "), "{log}");
+    assert!(!state.status_snapshot().local_setup_needed);
+    state.stop_for_restart(Duration::from_secs(2));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_setup_is_refused_once_a_remote_node_is_chosen() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let (program, calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    bootstrap_node_at(app.handle(), app_data.clone()).await;
+    assert!(state.status_snapshot().local_setup_needed);
+    state.remote_mode.store(true, Ordering::SeqCst);
+    let refused = node_setup_local_at(app.handle(), &state, &app_data, true).await;
+    assert!(refused.unwrap_err().contains("node at home"));
+    assert!(!calls.exists());
+    assert!(!local_setup_consent_path(&app_data).exists());
+}
+
+/// While this Mac's first node is being set up, a home-node link cannot be
+/// saved: the next launch would prefer that link and leave the new node behind.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_home_node_link_is_refused_while_this_macs_node_is_being_set_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let (program, _calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    bootstrap_node_at(app.handle(), app_data.clone()).await;
+    state.local_setup_running.store(true, Ordering::SeqCst);
+    let link = super::remote_connect_tests::ticket("127.0.0.1:5678".into(), false);
+    let refused = remote_access_import_at(app.handle(), &state, &app_data, &link).await;
+    assert!(refused.unwrap_err().contains("setting up a node on this Mac"));
+    assert!(remote_access::load_persisted(&app_data).unwrap().is_none(), "no home-node link was saved");
+}
+
+/// Saving a home-node link is the owner's choice of where the node runs, so
+/// the offer to create one on this Mac goes away.
+#[cfg(unix)]
+#[tokio::test]
+async fn saving_a_home_node_link_stops_offering_a_node_on_this_mac() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let (program, calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    bootstrap_node_at(app.handle(), app_data.clone()).await;
+    assert!(state.status_snapshot().local_setup_needed);
+    let link = super::remote_connect_tests::ticket("127.0.0.1:5678".into(), false);
+    remote_access_import_at(app.handle(), &state, &app_data, &link).await.unwrap();
+    assert!(!state.status_snapshot().local_setup_needed);
+    assert!(!calls.exists());
+    assert!(!local_setup_consent_path(&app_data).exists());
+}
+
+#[cfg(unix)]
+async fn paused_initial_setup_import(resume: bool) -> Result<RemoteImportView, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let entered = dir.path().join("init-entered");
+    let release = dir.path().join("init-release");
+    let program = dir.path().join("paused-node");
+    std::fs::write(&program, format!(r#"#!/bin/sh
+if [ "$1" = init ]; then
+  : > '{}'
+  while [ ! -f '{}' ]; do sleep 0.01; done
+  mkdir -p "$3"
+  : > "$3/konsensus.toml"
+  exit 0
+fi
+exit 1
+"#, entered.display(), release.display())).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    if resume {
+        record_local_setup_consent(&app_data).unwrap();
+    } else {
+        bootstrap_node_at(app.handle(), app_data.clone()).await;
+    }
+    let startup = async {
+        if resume {
+            bootstrap_node_at(app.handle(), app_data.clone()).await;
+        } else {
+            let _ = node_setup_local_at(app.handle(), &state, &app_data, true).await;
+        }
+    };
+    let import = async {
+        let started = tokio::time::timeout(Duration::from_secs(10), async {
+            while !entered.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await;
+        if started.is_err() {
+            std::fs::write(&release, b"").unwrap();
+            panic!("initialization did not reach the barrier");
+        }
+        let link = super::remote_connect_tests::ticket("127.0.0.1:5678".into(), false);
+        let result = tokio::time::timeout(Duration::from_secs(2),
+            remote_access_import_at(app.handle(), &state, &app_data, &link)).await;
+        std::fs::write(&release, b"").unwrap();
+        result.expect("import deadlocked behind initialization")
+    };
+    let (_, imported) = tokio::join!(startup, import);
+    assert!(app_data.join("konsensus.toml").exists(), "initialization must complete after release");
+    let saved = remote_access::load_persisted(&app_data).unwrap().is_some();
+    state.stop_for_restart(Duration::from_secs(2));
+    assert_eq!(saved, imported.is_ok(), "import result must match persistence");
+    imported
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_initial_setup_refuses_home_link() {
+    let imported = paused_initial_setup_import(false).await;
+    assert!(imported.unwrap_err().contains("setting up a node on this Mac"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resumed_initial_setup_refuses_home_link() {
+    let imported = paused_initial_setup_import(true).await;
+    assert!(imported.is_err(), "a home-node link was saved while the first initialization was paused");
+}
+
+/// Desktop import is serialized with local setup on `remote_change`: while the
+/// setup holds it, saving a home-node link waits instead of racing ahead.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_home_node_link_import_waits_for_the_setup_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let (program, _calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    let link = super::remote_connect_tests::ticket("127.0.0.1:5678".into(), false);
+    let held = state.remote_change.lock().await;
+    let waited = tokio::time::timeout(
+        Duration::from_millis(300),
+        remote_access_import_at(app.handle(), &state, &app_data, &link),
+    )
+    .await;
+    assert!(waited.is_err(), "import did not wait for the setup lock");
+    drop(held);
+    assert!(remote_access::load_persisted(&app_data).unwrap().is_none(), "nothing saved while it waited");
 }

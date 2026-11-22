@@ -2,9 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- The webview reports the OS language only for a language the bundle declares.
+       Without da here, a Danish Mac reads en-US and the app starts in English. -->
+  <key>CFBundleLocalizations</key>
+  <array><string>en</string><string>da</string></array>
   <key>NSMicrophoneUsageDescription</key>
   <string>BitSov uses the microphone only while you record a voice note or are on a call.</string>
   <key>NSCameraUsageDescription</key>
   <string>BitSov uses the camera only during a video call you place or accept, or while you scan a pairing QR code.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>BitSov needs access to your local network to connect to your box and call peers.</string>
 </dict>
 </plist>

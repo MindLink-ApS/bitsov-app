@@ -1,7 +1,15 @@
 # Remote-only test Mac bundle (DEV ONLY)
 
-This beta supports signet test nodes only. Verify your node's network before
-pairing and use test coins only; this profile does not itself enforce signet.
+This beta supports signet test nodes only. The host requires an explicit signet
+network report before becoming ready. A missing, unreadable or different
+network report refuses the connection and clears session authority. Use test
+coins only. The profile does not modify the node's files.
+
+First-run owner setup also requires a signet report from the bootstrap router.
+Older nodes that omit this report cannot be initialized from this test app.
+Provisional second-device enrollment is unavailable when its restricted session
+cannot report the network. Use a node and pairing flow that can confirm signet;
+the app does not relax this requirement for setup.
 
 Use this profile to pair a test Mac with a remote node without downloading or
 bundling a local `konsensus` sidecar. For a node already running on this Mac's

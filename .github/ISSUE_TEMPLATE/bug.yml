@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in BitSov does not work as described.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste a recovery phrase, private key, password, API token, pairing code or node configuration file here.**
+        This tracker is public. Redact node IDs, addresses and other people's details from logs and screenshots.
+        Security problems go through [SECURITY.md](https://github.com/MindLink-ApS/bitsov-app/blob/main/SECURITY.md), not an issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Tap …
+        3. See …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version or commit
+      placeholder: e.g. 0.0.1 (abc1234)
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS, iOS, Windows, Linux, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or screenshots
+      description: Optional. Check again that nothing secret or personal is left in them.
+      render: text
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Before you submit
+      options:
+        - label: This report contains no recovery phrase, key, password, token, pairing code or node configuration.
+          required: true

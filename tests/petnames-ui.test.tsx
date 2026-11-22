@@ -31,10 +31,10 @@ afterEach(() => {
 beforeEach(() => resetContactsForTests());
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => mount.querySelector<T>(s)!;
-const maya = SAMPLE_PEERS[0].node_id;
+const robin = SAMPLE_PEERS[0].node_id;
 const OLD = 'f'.repeat(64);
 
-async function openMaya() {
+async function openRobin() {
   const source = sampleSource({ firstLiveMs: 1e9 });
   mount = document.createElement('div');
   document.body.appendChild(mount);
@@ -42,19 +42,19 @@ async function openMaya() {
     () => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />,
     mount,
   );
-  await vi.waitFor(() => expect($(`[data-track="peer:${maya}"]`)).not.toBeNull());
-  $<HTMLButtonElement>(`[data-track="peer:${maya}"]`).click();
+  await vi.waitFor(() => expect($(`[data-track="peer:${robin}"]`)).not.toBeNull());
+  $<HTMLButtonElement>(`[data-track="peer:${robin}"]`).click();
   await vi.waitFor(() => expect($('[data-contact-open]')).not.toBeNull());
   return source;
 }
 
 it('opens contact sheet from the track title; petname is local; label is self-claimed', async () => {
-  await openMaya();
-  expect($('.track-head h1').textContent).toBe('Maya');
+  await openRobin();
+  expect($('.track-head h1').textContent).toBe('Robin');
   $<HTMLButtonElement>('[data-contact-open]').click();
   await vi.waitFor(() => expect($('[data-contact-panel="open"]')).not.toBeNull());
   expect($('[data-contact-claimed]')?.textContent).toMatch(/self-claimed/i);
-  expect($('[data-contact-claimed]')?.textContent).toContain('Maya');
+  expect($('[data-contact-claimed]')?.textContent).toContain('Robin');
   const input = $<HTMLInputElement>('[data-contact-petname]');
   input.value = 'Sister';
   input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -63,12 +63,12 @@ it('opens contact sheet from the track title; petname is local; label is self-cl
 });
 
 it('shows fingerprint + QR and marks verified locally', async () => {
-  await openMaya();
+  await openRobin();
   $<HTMLButtonElement>('[data-contact-open]').click();
   await vi.waitFor(() => expect($('[data-contact-fp]')).not.toBeNull());
-  expect($('[data-contact-fp]').textContent!.replace(/[^0-9a-f]/g, '')).toBe(maya);
+  expect($('[data-contact-fp]').textContent!.replace(/[^0-9a-f]/g, '')).toBe(robin);
   expect($('[data-contact-qr]')).not.toBeNull();
-  expect($('[data-contact-qr-text]').textContent).toBe(maya);
+  expect($('[data-contact-qr-text]').textContent).toBe(robin);
   $<HTMLButtonElement>('[data-contact-verify-start]').click();
   $<HTMLButtonElement>('[data-contact-verify-confirm]').click();
   await vi.waitFor(() => expect($('[data-contact-verified-badge]')).not.toBeNull());
@@ -76,12 +76,12 @@ it('shows fingerprint + QR and marks verified locally', async () => {
 });
 
 it('warns after an owner-confirmed key replacement, and the warning survives reopen', async () => {
-  setPetname(OLD, 'Maya');
+  setPetname(OLD, 'Robin');
   markVerified(OLD);
-  expect(replaceContactKey(OLD, maya)).toBe(true);
-  expect(verifyState(maya)).toBe('key-changed');
+  expect(replaceContactKey(OLD, robin)).toBe(true);
+  expect(verifyState(robin)).toBe('key-changed');
 
-  await openMaya();
+  await openRobin();
   await vi.waitFor(() => expect($('[data-contact-pill="key-changed"]')).not.toBeNull());
   $<HTMLButtonElement>('[data-contact-open]').click();
   await vi.waitFor(() => expect($('[data-contact-key-changed]')).not.toBeNull());
@@ -91,11 +91,11 @@ it('warns after an owner-confirmed key replacement, and the warning survives reo
   await vi.waitFor(() => expect($('[data-contact-panel="closed"]')).not.toBeNull());
   $<HTMLButtonElement>('[data-contact-open]').click();
   await vi.waitFor(() => expect($('[data-contact-key-changed]')).not.toBeNull());
-  expect(verifyState(maya)).toBe('key-changed');
+  expect(verifyState(robin)).toBe('key-changed');
 });
 
 it('keeps an unsaved petname draft and verify confirmation across a same-key peer refresh', async () => {
-  const peerA: Peer = { node_id: maya, addr: null, label: 'Maya', connected: true, fingerprint: 'aaaaaaaa' };
+  const peerA: Peer = { node_id: robin, addr: null, label: 'Robin', connected: true, fingerprint: 'aaaaaaaa' };
   const [peer, setPeer] = createSignal(peerA);
   const [open, setOpen] = createSignal(true);
   mount = document.createElement('div');
@@ -111,7 +111,7 @@ it('keeps an unsaved petname draft and verify confirmation across a same-key pee
   expect($('[data-contact-verify-confirm]')).not.toBeNull();
 
   // Same node_id, new object — as peers_list refresh does.
-  setPeer({ ...peerA, connected: false, label: 'Maya' });
+  setPeer({ ...peerA, connected: false, label: 'Robin' });
   await Promise.resolve();
   expect($<HTMLInputElement>('[data-contact-petname]').value).toBe('Unsaved local name');
   expect($('[data-contact-verify-confirm]')).not.toBeNull();
@@ -138,17 +138,17 @@ it('marks front-door display names as self-claimed suggestions', async () => {
 
 it.each(['en', 'da'] as const)('includes the visible verification state in the contact title name in %s', async locale => {
   setLanguagePref(locale);
-  await openMaya();
+  await openRobin();
   const name = () => $('[data-contact-open]').getAttribute('aria-label');
-  expect(name()).toBe(locale === 'en' ? 'Contact Maya' : 'Kontakt Maya');
-  markVerified(maya);
+  expect(name()).toBe(locale === 'en' ? 'Contact Robin' : 'Kontakt Robin');
+  markVerified(robin);
   await vi.waitFor(() => expect($('[data-contact-pill="verified"]')).not.toBeNull());
-  expect(name()).toBe(locale === 'en' ? 'Contact Maya, Verified' : 'Kontakt Maya, Bekræftet');
-  expect(replaceContactKey(maya, OLD)).toBe(true);
-  expect(replaceContactKey(OLD, maya)).toBe(true);
+  expect(name()).toBe(locale === 'en' ? 'Contact Robin, Verified' : 'Kontakt Robin, Bekræftet');
+  expect(replaceContactKey(robin, OLD)).toBe(true);
+  expect(replaceContactKey(OLD, robin)).toBe(true);
   await vi.waitFor(() => expect($('[data-contact-pill="key-changed"]')).not.toBeNull());
   expect($('[data-contact-pill="verified"]')).toBeNull();
-  expect(name()).toBe(locale === 'en' ? 'Contact Maya, Key changed' : 'Kontakt Maya, Nøgle ændret');
+  expect(name()).toBe(locale === 'en' ? 'Contact Robin, Key changed' : 'Kontakt Robin, Nøgle ændret');
   $('[data-contact-open]').click();
   await vi.waitFor(() => expect($('[data-contact-panel="open"]')).not.toBeNull());
 });

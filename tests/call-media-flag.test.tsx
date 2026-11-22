@@ -33,10 +33,10 @@ const paired: OnboardingPairingView = { state: 'paired', scopes: ['read', 'recei
 
 function stubHost() {
   resetContactsForTests();
-  setPetname(A, 'Maya');
+  setPetname(A, 'Robin');
   const calls: { cmd: string; args?: unknown }[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
-  let mediaIndex = 0;
+  const mediaIndices = new Map<number, number>();
   const spending: SpendView = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
   // M6 A2: the node reports the first minute paid, so it admits the media socket; ending the call closes the reservation.
   let ended = false;
@@ -51,7 +51,7 @@ function stubHost() {
     pairing_status: () => paired,
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: ['call_meeting_v1'] }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, meetings: true }],
     rooms_list: () => [],
     messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
@@ -60,7 +60,10 @@ function stubHost() {
     spend_status: () => spending,
     budget_status: () => null,
     call_quote: () => QUOTE,
-    call_signal: (args) => ({ message_id: 'sig', kind: (args as { kind: number }).kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+    call_signal: (args) => {
+      if (args?.kind === 400) ended = false;
+      return { message_id: 'sig', kind: (args as { kind: number }).kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    },
     call_status: (args) => status(args),
     call_hold: (args) => status(args),
     call_block: () => ({ message_id: 'blk', kind: 404, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
@@ -70,6 +73,9 @@ function stubHost() {
     call_media_open: () => null,
     call_media_send: () => null,
     call_media_close: () => null,
+    call_seal_offer: () => `a=x-bitsov-e2e:1 commit=${'ab'.repeat(32)} caps=00000001 sas=01`,
+    call_seal_accept: () => true,
+    call_seal_cancel: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
   };
@@ -91,11 +97,13 @@ function stubHost() {
     },
     /** Deliver a host media channel message in order (the renderer's Channel is the `on_frame` arg): link
      *  transitions arrive as parsed JSON objects, frames as ArrayBuffers, exactly as Tauri delivers them. */
-    media: (message: unknown) => {
+    media: (message: unknown, session = -1) => {
       const opens = calls.filter((c) => c.cmd === 'call_media_open');
-      const open = opens[opens.length - 1];
+      const open = opens[session < 0 ? opens.length + session : session];
       const channel = (open!.args as { on_frame: { id: number } }).on_frame;
-      callbacks.get(channel.id)!({ message, index: mediaIndex++ });
+      const index = mediaIndices.get(channel.id) ?? 0;
+      mediaIndices.set(channel.id, index + 1);
+      callbacks.get(channel.id)!({ message, index });
     },
   };
 }
@@ -198,8 +206,8 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
@@ -212,14 +220,37 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect($('[data-meeting-panel]')).toBeNull();
   });
 
+  it('before Ring, the minutes hold is one short plain promise; the full rules wait behind Details, in English and Danish', async () => {
+    const host = stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-reservation-max]')).not.toBeNull());
+    const hold = $('[data-call-reservation-max]')!.textContent!;
+    expect(hold).toMatch(/^Your node sets aside at most .+? for the minutes and gives back what is not used\. If it would need more, it does not ring and nothing is paid\. You confirm before the first minute is paid\.$/);
+    const amount = hold.match(/at most (.+?) for the minutes/)![1];
+    const detail = $<HTMLDetailsElement>('[data-call-reservation-detail]')!;
+    expect(detail.open).toBe(false);
+    // Nothing of the old paragraph is lost: it is behind Details, with the same amount.
+    expect(detail.querySelector('p')!.textContent).toContain(`a hold of at most ${amount} (4 hours, the most a node allows)`);
+    expect(detail.querySelector('p')!.textContent).toContain('nothing is paid');
+    try {
+      setLanguagePref('da');
+      expect($('[data-call-reservation-max]')!.textContent).toBe(`Din node reserverer højst ${amount} til minutterne og giver det ubrugte tilbage. Skulle den bruge mere, ringer den ikke op, og der betales intet. Du bekræfter, før det første minut betales.`);
+      expect(detail.querySelector('summary')!.textContent).toBe('Detaljer');
+    } finally { setLanguagePref('en'); }
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
   it('places a call through the host media socket: no RTCPeerConnection, the node label, live on the host’s open', async () => {
     const host = stubHost();
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
-    expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+    expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
     // The offer went out with the node-routed marker, so an M6 peer joins at its node.
     const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
     expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).toContain('a=x-bitsov-media:node-routed-v1');
@@ -235,6 +266,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
@@ -252,12 +284,169 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     expect($('[data-call-route="node"]')).not.toBeNull();
     expect(FakePc.made).toBe(0);
-    expect(FakeAudioContext.made).toHaveLength(1);
+    // The local ringback had its own context while ringing; it closed on the answer. One call audio graph is left.
+    await vi.waitFor(() => expect(FakeAudioContext.made.filter((c) => !c.closed)).toHaveLength(1));
+    const callAudio = FakeAudioContext.made.find((c) => !c.closed)!;
     // Hang up: the host ends the admission and the media socket closes with the call.
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect(host.used('call_media_close').length).toBeGreaterThan(0));
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    await vi.waitFor(() => expect(FakeAudioContext.made[0].closed).toBe(true));
+    await vi.waitFor(() => expect(callAudio.closed).toBe(true));
+  });
+
+  it('with sealing off, no seal command runs and the label and the offer are as they were', async () => {
+    const host = stubHost();
+    await routedLive(host);
+    for (const cmd of ['call_seal_offer', 'call_seal_answer', 'call_seal_accept', 'call_seal_cancel']) expect(host.used(cmd)).toHaveLength(0);
+    expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
+    expect($('[data-call-route="node"]')?.hasAttribute('data-call-seal')).toBe(false);
+    const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
+    expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).not.toContain('x-bitsov-e2e');
+    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
+  });
+
+  /** Rings Robin on a sealing build and delivers an answer with these extra SDP lines. */
+  async function sealedRing(host: ReturnType<typeof stubHost>, answerLines: string[]) {
+    vi.stubEnv('VITE_CALL_SEAL', 'sealed');
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('setting_up');
+    const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
+    const { call_id: callId, sdp } = JSON.parse((offer.args as { plaintext: string }).plaintext) as { call_id: string; sdp: string };
+    expect(sdp).toContain('a=x-bitsov-e2e:1 commit=');
+    const answer = nodeRoutedSdp('answer', callId) + answerLines.map((line) => `${line}\r\n`).join('');
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, sdp: answer }), payment_msat: null, status: 'delivered' } });
+    return callId;
+  }
+
+  it('with sealing on, the label says sealed only after the host reports an authenticated frame', async () => {
+    const host = stubHost();
+    const callId = await sealedRing(host, [`a=x-bitsov-e2e:1 key=${'cd'.repeat(32)} nonce=${'ef'.repeat(16)} caps=00000001`]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    expect(host.used('call_media_open')[0].args).toMatchObject({ call_id: callId, peer: A, sealed: true });
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('setting_up');
+    expect($('[data-call-route="node"]')?.textContent).toBe('Sealing this call. Nothing goes out unsealed.');
+    host.media({ link: 'sealed', detail: null });
+    await vi.waitFor(() => expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('sealed'));
+    expect($('[data-call-route="node"]')?.textContent).toMatch(/unless one of them is attacking the call/);
+    expect($('[data-call-route="node"]')?.textContent).not.toMatch(/so they could hear it|Both boxes can hear it/);
+  });
+
+  it('with sealing on, an answer that cannot be sealed ends the call before any audio, and blames no side', async () => {
+    const host = stubHost();
+    await sealedRing(host, []);
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe('This call could not be sealed, so it was ended. Nothing was said unsealed.');
+    expect(host.used('call_media_open')).toHaveLength(0);
+    expect(host.used('call_media_send')).toHaveLength(0);
+    expect(host.used('call_seal_cancel').length).toBeGreaterThan(0);
+    expect($('[data-call-words]')).toBeNull();
+  });
+
+  it('with sealing on, a call that cannot stay sealed ends and says so', async () => {
+    const host = stubHost();
+    await sealedRing(host, [`a=x-bitsov-e2e:1 key=${'cd'.repeat(32)} nonce=${'ef'.repeat(16)} caps=00000001`]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    host.media({ link: 'ended', detail: 'seal_no_authentic_frames' });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe('The call could not stay sealed, so it ended. Nothing was sent unsealed. A minute already issued may still settle.');
+  });
+
+  const comparisonWords = () => [...mount.querySelectorAll('[data-call-words] [data-pair-word]')].map(el => el.textContent);
+  const sealAnswer = `a=x-bitsov-e2e:1 key=${'cd'.repeat(32)} nonce=${'ef'.repeat(16)} caps=00000001`;
+
+  it('shows exactly four comparison words in host order outside Details, without logging them or enabling video', async () => {
+    const logs = ['log', 'info', 'warn', 'error', 'debug', 'trace'].map(method => vi.spyOn(console, method as 'log').mockImplementation(() => {}));
+    const host = stubHost();
+    await sealedRing(host, [sealAnswer]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'sealed', detail: null });
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    await vi.waitFor(() => expect(comparisonWords()).toEqual(['zebra', 'acoustic', 'velvet', 'anchor']));
+    expect($('[data-call-words] ol')?.getAttribute('aria-label')).toBe('Comparison words');
+    expect($('[data-call-words]')?.closest('details')).toBeNull();
+    expect($('[data-call-words] p')?.textContent).toMatch(/compare all four words in order.*separate trusted channel.*before speaking privately/i);
+    expect($('[data-call="video"]')).toBeNull();
+    expect($('[data-call-camera]')).toBeNull();
+    const logged = JSON.stringify(logs.flatMap(log => log.mock.calls));
+    for (const word of ['zebra', 'acoustic', 'velvet', 'anchor']) expect(logged).not.toContain(word);
+  });
+
+  it('clears ended words, ignores an old channel, and shows the next call’s words only after its seal', async () => {
+    const host = stubHost();
+    const firstId = await sealedRing(host, [sealAnswer]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'open', detail: null });
+    host.media({ link: 'sealed', detail: null });
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    await vi.waitFor(() => expect(comparisonWords()).toHaveLength(4));
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(comparisonWords()).toEqual([]);
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    const offers = host.used('call_signal').filter(c => (c.args as { kind: number }).kind === 400);
+    const offer = offers[offers.length - 1];
+    const { call_id: secondId } = JSON.parse((offer.args as { plaintext: string }).plaintext);
+    expect(secondId).not.toBe(firstId);
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] }, 0);
+    expect(comparisonWords()).toEqual([]);
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'next-answer', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: secondId, sdp: nodeRoutedSdp('answer', secondId, sealAnswer) }), payment_msat: null, status: 'delivered' } });
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(2));
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'sealed', detail: null });
+    host.media({ link: 'sealed_words', detail: null, words: ['yellow', 'orbit', 'timber', 'cactus'] });
+    await vi.waitFor(() => expect(comparisonWords()).toEqual(['yellow', 'orbit', 'timber', 'cactus']));
+    host.media({ link: 'ended', detail: 'seal_no_authentic_frames' });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    host.media({ link: 'sealed_words', detail: null, words: ['yellow', 'orbit', 'timber', 'cactus'] });
+    expect(comparisonWords()).toEqual([]);
+  });
+
+  it('shows no words when sealing is off or fails, even if a channel carries words', async () => {
+    const host = stubHost();
+    await routedLive(host);
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'ended', detail: 'seal_bad_reveal' });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(comparisonWords()).toEqual([]);
+  });
+
+  it('keeps the not-sealed label without words for an incoming call without sealing', async () => {
+    vi.stubEnv('VITE_CALL_SEAL', 'sealed');
+    const host = stubHost();
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'unsealed-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_msat: null, status: 'delivered' } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('not_sealed');
+    expect($('[data-call-route="node"]')?.textContent).toMatch(/^Not sealed:/);
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    expect(comparisonWords()).toEqual([]);
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('not_sealed');
   });
 
   it('a node refusal on the media socket ends the call instead of leaving it ringing', async () => {
@@ -265,6 +454,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
@@ -273,14 +463,17 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
     host.media({ link: 'ended', detail: 'the node refused the media socket (403)' });
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('The call audio link through your node closed.');
+    // Never connected: said as such, with the technical words under Details.
+    expect($('[data-call-ended]')?.textContent).toBe('The call to Robin could not connect.');
+    expect($('[data-call-end-detail]')!.textContent).toContain('The call audio link through your node closed.');
   });
 
-  /** Rings Maya and brings the call live through the host media socket. */
+  /** Rings Robin and brings the call live through the host media socket. */
   async function routedLive(host: ReturnType<typeof stubHost>, atRinging?: () => void) {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     atRinging?.();
@@ -299,7 +492,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect($('[data-call-pay]')).toBeNull();
     expect($('[data-call-panel]')!.textContent).not.toMatch(/Lightning payment address/);
     // The short card: name, timer, mute, hang up.
-    expect($('[data-call-panel] .who')?.textContent).toBe('Maya');
+    expect($('[data-call-panel] .who')?.textContent).toBe('Robin');
     expect($('[data-call-duration]')).not.toBeNull();
     expect($('[data-call-mute]')).not.toBeNull();
     expect($('[data-call-hangup]')).not.toBeNull();
@@ -318,7 +511,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect(details.open).toBe(false);
     expect(details.querySelector('summary')?.textContent).toBe('Details');
     expect(details.querySelector('[data-call-route="node"]')).toBeNull();
-    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
     expect($('[data-call-panel]')!.querySelectorAll('[data-call-route]')).toHaveLength(1);
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
@@ -333,7 +526,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     const details = $<HTMLDetailsElement>('[data-call-panel] [data-call-details]')!;
     expect(details.querySelector('summary')?.textContent).toBe('Detaljer');
     expect(details.querySelector('[data-call-route="node"]')).toBeNull();
-    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din boks og deres. Begge bokse kan høre det.');
+    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din egen boks og deres. De to bokse bærer lyden, så de kunne høre den.');
     expect($('[data-call-panel]')!.textContent).not.toMatch(/Betal|Lightning-betalingsadresse/);
   });
 
@@ -343,8 +536,9 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-route="node"]')).not.toBeNull());
-    expect($('[data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din boks og deres. Begge bokse kan høre det.');
+    expect($('[data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din egen boks og deres. De to bokse bærer lyden, så de kunne høre den.');
   });
 });

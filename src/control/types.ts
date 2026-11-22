@@ -20,6 +20,8 @@ export type Peer = {
   session?: boolean;
   /** Their node answers porch reads (connected, advertising `porch_read_v1`). */
   porch?: boolean;
+  /** Their node takes a free answer or declined hangup to its ringing call (connected, advertising `call_reply_free_v1`). */
+  free_replies?: boolean;
 };
 
 /** `rooms_list` — `GET /rooms`. */
@@ -197,6 +199,7 @@ export type NodeReadiness = {
 };
 
 export type NodeOverview = {
+  chain_view?: { explorer_default?: boolean; trust_level: string } | null;
   money_ready?: boolean | null;
   readiness?: NodeReadiness | null;
   node_id: string;
@@ -210,7 +213,7 @@ export type NodeOverview = {
   uptime_secs: number;
   lightning_backend: string | null;
   chain_backend: string | null;
-  /** Known node capabilities (`energy_v1`, `membrane_v1`, `call_meeting_v1`, `room_binding_v1`, `porch_read_v1`, `porch_quote_v1`, `front_door_v1`, `owner_device_approval_v1`, `owner_device_approval_breaker_reset_v1`); absent or empty on rc7. */
+  /** Known node capabilities (`energy_v1`, `membrane_v1`, `call_meeting_v1`, `room_binding_v1`, `porch_read_v1`, `porch_quote_v1`, `front_door_v1`, `owner_device_approval_v1`, `owner_device_approval_breaker_reset_v1`, `starter_channel_request_v1`, `call_continuity_v1`, `call_reply_free_v1`, `standing_allowance_v1`); absent or empty on rc7. */
   capabilities?: string[];
   /** UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off. */
   stun_port?: number | null;
@@ -471,7 +474,7 @@ export type ActionError = {
     | 'approval_rate_limited' | 'approval_invalid' | 'approval_unsaved' | 'approval_changed' | 'approval_self'
     // H2 call admissions: a new offer while an earlier one is still open; ending one the host never recorded;
     // a second hangup; the node refusing a call signal before payment.
-    | 'call_needs_node_upgrade'
+    | 'call_needs_node_upgrade' | 'call_unsupported'
     | 'call_admission_open' | 'call_not_found' | 'hangup_in_flight' | 'call_identity_changed'
     // M6 call minutes: the host or node refused a block or the call's reservation before paying.
     | 'call_block_not_due' | 'call_reservation_closed' | 'call_price_changed'
@@ -485,6 +488,10 @@ export type ActionError = {
     // `call_hangup_unpayable`: a lower signed limit the owner could raise;
     // `call_hangup_above_message_max`: above the most any message payment may carry.
     | 'call_hangup_unpayable' | 'call_hangup_above_message_max'
+    // No live price for an answer or hangup; a minute past the agreed hold. Nothing paid.
+    | 'call_price_unknown' | 'call_minutes_above_hold'
+    // A free call reply (zero cap): not free on this pair, refused by our node before sending, or its sending not known.
+    | 'call_reply_not_free' | 'call_reply_not_sent' | 'call_reply_unknown'
     | 'invalid'
     | 'node';
   message: string;
@@ -824,6 +831,8 @@ export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 
 /** A local, inline artifact in a track: the result of an action taken there. */
 export type Artifact =
   | { id: string; at: number; type: 'missed-call'; peer: string; media: 'audio' | 'video' }
+  /** One system line per call in the chat, from its call traffic (never the traffic itself). */
+  | { id: string; at: number; type: 'call-line'; callId: string; media: 'audio' | 'video'; minutes: number | null }
   | { id: string; at: number; type: 'invoice'; invoice: InvoiceView }
   /** `invoice`: the bolt11 an invoice payment paid, so a request card can show it paid. */
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt; invoice?: string }

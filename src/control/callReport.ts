@@ -20,12 +20,20 @@ const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
 const MIN_MS = Date.UTC(2020, 0, 1);
 const MAX_MS = Date.UTC(2100, 0, 1);
 const HANGUP_REASONS = new Set(['hangup', 'declined', 'busy', 'timeout', 'failed', 'unpaid']);
-const STOP_CODES = new Set(['unpaid', 'node_ended', 'payment_failed', 'payment_unknown', 'price_changed', 'hold_refused']);
-const PAYMENT_STOPS = new Set(['payment_failed', 'payment_unknown', 'price_changed', 'hold_refused']);
+const STOP_CODES = new Set(['unpaid', 'node_ended', 'payment_failed', 'budget_limit', 'payment_unknown', 'price_changed', 'hold_refused']);
+const PAYMENT_STOPS = new Set(['payment_failed', 'budget_limit', 'payment_unknown', 'price_changed', 'hold_refused']);
 
 const msat = (n: unknown) => (typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? String(n) : UNKNOWN);
 const count = msat;
 const time = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) && n >= MIN_MS && n < MAX_MS ? new Date(n).toISOString() : null);
+const CODECS = new Set(['opus', 'mulaw']);
+/** Codecs as a list in the order first used; "none" when the engine sent or heard no audio. */
+const codecs = (list: unknown) => {
+  if (!Array.isArray(list)) return UNKNOWN;
+  const named = list.filter((c): c is string => typeof c === 'string' && CODECS.has(c));
+  return named.length === list.length ? (named.length ? named.join(',') : 'none') : UNKNOWN;
+};
+const rate = (n: unknown) => (typeof n === 'number' && Number.isInteger(n) && n >= 8_000 && n <= 384_000 ? String(n) : UNKNOWN);
 const pick = (value: unknown, allowed: Set<string>) => (typeof value === 'string' && allowed.has(value) ? value : null);
 /** The peer's node id, shortened (first and last 8 hex), never the full key. */
 const shortNode = (id: unknown) => (typeof id === 'string' && NODE_ID.test(id) ? `${id.slice(0, 8)}…${id.slice(-8)}` : UNKNOWN);
@@ -78,6 +86,10 @@ export function callReportLines({ view, routed, endedAt, version }: CallReportIn
     `peer: ${shortNode(view.peer)}`,
     `media: ${view.media === 'audio' || view.media === 'video' ? view.media : UNKNOWN}`,
     `media_path: ${routed ? 'node-routed' : 'app-to-app'}`,
+    // Which codec carried the audio (Opus, or the mu-law fallback), and the audio context's rate.
+    `audio_codec_sent: ${view.audio ? codecs(view.audio.sent) : UNKNOWN}`,
+    `audio_codec_received: ${view.audio ? codecs(view.audio.received) : UNKNOWN}`,
+    `audio_context_hz: ${view.audio ? rate(view.audio.contextRate) : UNKNOWN}`,
     'clock: this device',
     `start_time: ${start ?? UNKNOWN}`,
     `end_time: ${end ?? UNKNOWN}`,

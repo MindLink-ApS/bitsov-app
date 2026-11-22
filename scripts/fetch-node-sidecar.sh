@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Fetch + VERIFY the pinned, signed BitSov node binary and place it as the Tauri
 # sidecar for this host. The node binary is NEVER committed (Gate G1: bundled binary,
-# fetched + verified, not vendored). v0.3.0-rc21 targets Linux, macOS and Windows node
+# fetched + verified, not vendored). v0.3.0-rc24 targets Linux, macOS and Windows node
 # binaries, so all three hosts can produce a sidecar. Release assets carry no .exe suffix
 # on any host; only the installed Windows sidecar is renamed to .exe (Tauri's resolver).
-# rc21 is signed and published. Fetch requires release access and
+# rc24 is signed and published. Fetch requires release access and
 # both SHA256SUMS and SHA256SUMS.asc; missing assets fail closed. Nothing here publishes it.
 #
 # Verification is fail-closed, in two steps:
@@ -28,18 +28,18 @@
 # verify_release_signature against local test keys, including every refusal class above.
 set -euo pipefail
 
-TAG="v0.3.0-rc21"
+TAG="v0.3.0-rc24"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
 
-# Binary pins copied from the verified, signed rc21 SHA256SUMS.
-# Manifest sha256: 6482d9cae263fe95f8b5c16bfed6bcaca8935652c70b1c509efddbbf05d4f7e0
+# Binary pins copied from the verified, signed rc24 SHA256SUMS.
+# Manifest sha256: b9ad18e24c005cd9942459e3de65598bc21145aeaa5cd3226d62ac210e9d3365
 # These are enforced pins, not illustrative hashes. No flag/environment bypass.
-EXPECTED_SHA256SUMS='f49b8070a3d560ddc27e875a73cc67219b9800ffef982728433c1845ead4638f  bitsov-darwin-aarch64
-3b22ddfbc2b0263ea5c84f3359cc96115bfa9e5e200a1808c14e6b09409ec132  bitsov-darwin-x86_64
-9eac007a98157fa3796019c6fe9510b48e58f2265cea51237c3b8135239e03e1  bitsov-linux-aarch64
-7780d39fb1774504172a67b93d6baa1276a4c8d32686d9a0bdecf669149bb10a  bitsov-linux-x86_64
-df0d95b7d94bf134a4e1c43b0a9074bd2c6a47d1a11812421d617353a3c288ac  bitsov-windows-x86_64'
+EXPECTED_SHA256SUMS='1c0cf1ac08d96460a91c1e820b17fead423cab623ded33b36823cee23db41937  bitsov-darwin-aarch64
+bcae78831d47f46233e5f5a028badc6498222740002ff30a2406dbfbbe76c2d4  bitsov-darwin-x86_64
+f82e16ab46b0d4395a5fd3b17d95b47f17d1c4597ec6ac6f3bada0829d63cdcb  bitsov-linux-aarch64
+6cb4c5961e86ed6575e616906de3664bbac6fb976ddb86b3005cb807e74f9536  bitsov-linux-x86_64
+c3770d102bd137bad045daf33eacfac04f259580586562e1f56356022bebcf68  bitsov-windows-x86_64'
 
 pinned_checksum() {
   printf '%s\n' "$EXPECTED_SHA256SUMS" | awk -v asset="$1" '

@@ -34,49 +34,6 @@ pub struct Pending {
     pub reject_message: Option<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn fixture() -> Pending {
-        serde_json::from_str(include_str!("../tests/fixtures/node356-pending.json")).unwrap()
-    }
-    #[test]
-    fn node_approval_bytes_words_and_context_are_verified_before_signing() {
-        let p = fixture();
-        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 1000).is_ok());
-        for field in ["op_id", "name", "public_key", "box_nonce", "node", "approver_client", "approver_key", "nonce", "client_pubkey", "device_key", "device_name", "noise_handshake_hash", "noise_client_static", "box_transport_pubkey", "ticket_id", "issuer", "sas_digest", "approval_message", "reject_message"] {
-            let mut v: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/node356-pending.json")).unwrap();
-            v[field] = "tampered".into();
-            let changed: Pending = serde_json::from_value(v).unwrap();
-            assert!(changed.validate(&p.node, "owner", 7, &p.approver_key, 1000).is_err(), "{field}");
-        }
-        let mut wrong = p.clone();
-        wrong.sas_words.swap(0, 1);
-        assert!(wrong.validate(&p.node, "owner", 7, &p.approver_key, 1000).is_err());
-        assert!(p.validate(&p.node, "non-owner", 7, &p.approver_key, 1000).is_err());
-        assert!(p.validate(&p.node, "owner", 8, &p.approver_key, 1000).is_err());
-        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 1330).is_err());
-        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 969).is_err());
-    }
-    #[test]
-    fn comparison_accepts_only_bounded_clock_skew() {
-        let p = fixture(); // Node issued at 1000, expires at 1300.
-        for (now, accepted) in [(969, false), (970, true), (999, true), (1000, true),
-            (1030, true), (1299, true), (1300, true), (1329, true), (1330, false)] {
-            assert_eq!(p.validate(&p.node, "owner", 7, &p.approver_key, now).is_ok(), accepted, "now={now}");
-        }
-    }
-    #[test]
-    fn approval_is_bound_to_current_qr_or_console() {
-        let mut p = fixture();
-        assert!(p.can_approve(None));
-        p.issuer = p.approver_key.clone();
-        assert!(!p.can_approve(None));
-        assert!(!p.can_approve(Some(&"00".repeat(16))));
-        assert!(p.can_approve(Some(&p.ticket_id)));
-    }
-}
-
 pub fn ticket_commitment(code: &str) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(b"bitsov-second-device-ticket-v1");
@@ -122,5 +79,48 @@ impl Pending {
             return Err(bad);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn fixture() -> Pending {
+        serde_json::from_str(include_str!("../tests/fixtures/node356-pending.json")).unwrap()
+    }
+    #[test]
+    fn node_approval_bytes_words_and_context_are_verified_before_signing() {
+        let p = fixture();
+        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 1000).is_ok());
+        for field in ["op_id", "name", "public_key", "box_nonce", "node", "approver_client", "approver_key", "nonce", "client_pubkey", "device_key", "device_name", "noise_handshake_hash", "noise_client_static", "box_transport_pubkey", "ticket_id", "issuer", "sas_digest", "approval_message", "reject_message"] {
+            let mut v: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/node356-pending.json")).unwrap();
+            v[field] = "tampered".into();
+            let changed: Pending = serde_json::from_value(v).unwrap();
+            assert!(changed.validate(&p.node, "owner", 7, &p.approver_key, 1000).is_err(), "{field}");
+        }
+        let mut wrong = p.clone();
+        wrong.sas_words.swap(0, 1);
+        assert!(wrong.validate(&p.node, "owner", 7, &p.approver_key, 1000).is_err());
+        assert!(p.validate(&p.node, "non-owner", 7, &p.approver_key, 1000).is_err());
+        assert!(p.validate(&p.node, "owner", 8, &p.approver_key, 1000).is_err());
+        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 1330).is_err());
+        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 969).is_err());
+    }
+    #[test]
+    fn comparison_accepts_only_bounded_clock_skew() {
+        let p = fixture(); // Node issued at 1000, expires at 1300.
+        for (now, accepted) in [(969, false), (970, true), (999, true), (1000, true),
+            (1030, true), (1299, true), (1300, true), (1329, true), (1330, false)] {
+            assert_eq!(p.validate(&p.node, "owner", 7, &p.approver_key, now).is_ok(), accepted, "now={now}");
+        }
+    }
+    #[test]
+    fn approval_is_bound_to_current_qr_or_console() {
+        let mut p = fixture();
+        assert!(p.can_approve(None));
+        p.issuer = p.approver_key.clone();
+        assert!(!p.can_approve(None));
+        assert!(!p.can_approve(Some(&"00".repeat(16))));
+        assert!(p.can_approve(Some(&p.ticket_id)));
     }
 }

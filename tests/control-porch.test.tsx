@@ -5,7 +5,7 @@ import { cleanText, parseInline, parseMarkdown, porchPath } from '../src/control
 import type { Source } from '../src/control/source';
 import type { ActionError, PaymentQuote, Peer, PorchCard, PorchRead, SpendView } from '../src/control/types';
 
-const MAYA = 'a'.repeat(64);
+const ROBIN = 'a'.repeat(64);
 const BEN = 'b'.repeat(64);
 const QUOTE: PaymentQuote = { principal_msat: 1000, max_routing_fee_msat: 5000, total_msat: 6000 };
 const OPEN: SpendView = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 } as SpendView;
@@ -20,9 +20,9 @@ function card(nodeId: string, cached: boolean): PorchCard {
     issued_at: Math.floor(Date.now() / 1000),
     expires_at: Math.floor(Date.now() / 1000) + 86_400,
     prices: { admission_msat: 10_000, message_msat: 1000, page_msat: 1000, price_epoch: 1 },
-    profile: { kind: 'person', display_name: 'Maya', tagline: 'Builder', about: '' },
+    profile: { kind: 'person', display_name: 'Robin', tagline: 'Builder', about: '' },
     media: [],
-    site: { index_path: 'index.md', page_count: 1, titles: ['Maya'] },
+    site: { index_path: 'index.md', page_count: 1, titles: ['Robin'] },
     links: [],
     link: 'bitsov://front-door#x',
     verified: true,
@@ -33,7 +33,7 @@ function card(nodeId: string, cached: boolean): PorchCard {
 }
 
 function page(path: string, kind: PorchRead['kind'], body: string, status: PorchRead['status'] = 'ok'): PorchRead {
-  return { node_id: MAYA, path, status, kind, body, card: null, amount_msat: 1000, total_msat: 6000, message_id: 'm1' };
+  return { node_id: ROBIN, path, status, kind, body, card: null, amount_msat: 1000, total_msat: 6000, message_id: 'm1' };
 }
 
 type Stub = { source: Source; quotes: [string, string][]; reads: [string, string, number][] };
@@ -58,7 +58,7 @@ function stub(read: (peer: string, path: string) => PorchRead | ActionError, hel
 }
 
 const PEERS: Peer[] = [
-  { node_id: MAYA, addr: '34.90.12.8:9735', label: 'Maya', connected: true, fingerprint: 'aaaaaaaa', porch: true },
+  { node_id: ROBIN, addr: '34.90.12.8:9735', label: 'Robin', connected: true, fingerprint: 'aaaaaaaa', porch: true },
   { node_id: BEN, addr: '35.1.2.3:9735', label: 'Ben', connected: true, fingerprint: 'bbbbbbbb', porch: false },
 ];
 
@@ -69,7 +69,7 @@ afterEach(() => {
   root?.remove();
 });
 
-function mount(s: Stub, opts: { nodeReads?: boolean; peers?: Peer[] } = {}) {
+function mount(s: Stub, opts: { known?: boolean; nodeReads?: boolean; peers?: Peer[] } = {}) {
   root = document.createElement('div');
   document.body.appendChild(root);
   dispose = render(
@@ -79,10 +79,11 @@ function mount(s: Stub, opts: { nodeReads?: boolean; peers?: Peer[] } = {}) {
         now={Date.now()}
         peers={opts.peers ?? PEERS}
         nodeReads={opts.nodeReads ?? true}
+        known={opts.known}
         moneyBlocked={false}
         spend={OPEN}
         spendGate={<span data-spend-gate />}
-        nameOf={(id) => (id === MAYA ? 'Maya' : 'Ben')}
+        nameOf={(id) => (id === ROBIN ? 'Robin' : 'Ben')}
       />
     ),
     root,
@@ -158,8 +159,17 @@ describe('PorchPanel', () => {
   it('offers reads only for connected contacts that advertise porch_read_v1, and only when this node reads', async () => {
     mount(stub(() => page('/index.md', 'markdown', '')));
     await tick();
-    expect($(`[data-porch-peer="${MAYA}"]`)).not.toBeNull();
+    expect($(`[data-porch-peer="${ROBIN}"]`)).not.toBeNull();
     expect($(`[data-porch-peer="${BEN}"]`)).toBeNull();
+    dispose?.();
+    root.remove();
+
+    // Not known yet: it never claims the node lacks this or that no contact offers it.
+    mount(stub(() => page('/index.md', 'markdown', '')), { nodeReads: false, known: false });
+    await tick();
+    expect($('[data-porch-waiting]')).not.toBeNull();
+    expect($('[data-porch-node-off]')).toBeNull();
+    expect($('[data-porch-none]')).toBeNull();
     dispose?.();
     root.remove();
 
@@ -176,7 +186,7 @@ describe('PorchPanel', () => {
   });
 
   it('quotes each chosen path before offering payment, and keeps sub-sat fees separate', async () => {
-    const s = stub(() => page('/notes.txt', 'text', 'hello'), [card(MAYA, true)]);
+    const s = stub(() => page('/notes.txt', 'text', 'hello'), [card(ROBIN, true)]);
     s.source.porchQuote = async (peer, path) => {
       s.quotes.push([peer, path]);
       return path === '/notes.txt'
@@ -191,18 +201,18 @@ describe('PorchPanel', () => {
     input.dispatchEvent(new Event('input', { bubbles: true }));
     click('[data-porch-path-read]');
     await tick();
-    expect(s.quotes[s.quotes.length - 1]).toEqual([MAYA, '/notes.txt']);
+    expect(s.quotes[s.quotes.length - 1]).toEqual([ROBIN, '/notes.txt']);
     expect(s.reads).toEqual([]);
     expect($('[data-review-amount]')?.textContent).toBe('1 sat');
-    expect($('[data-review-fee]')?.textContent).toBe('up to 1.25 sats');
-    expect($('[data-review-total]')?.textContent).toBe('2.25 sats');
+    expect($('[data-review-fee]')?.textContent).toBe('up to about 2 sats');
+    expect($('[data-review-total]')?.textContent).toBe('about 3 sats');
     click('[data-porch-confirm]');
     await tick();
-    expect(s.reads).toEqual([[MAYA, '/notes.txt', 2250]]);
+    expect(s.reads).toEqual([[ROBIN, '/notes.txt', 2250]]);
   });
 
   it('shows a missing or empty path without a payment review or read', async () => {
-    const s = stub(() => page('/empty.txt', 'text', ''), [card(MAYA, true)]);
+    const s = stub(() => page('/empty.txt', 'text', ''), [card(ROBIN, true)]);
     s.source.porchQuote = async (peer, path) => {
       s.quotes.push([peer, path]);
       if (path === '/empty.txt') throw { code: 'porch_not_found', message: 'Not found or empty. Nothing was paid.' };
@@ -243,7 +253,7 @@ describe('PorchPanel', () => {
   });
 
   it('shows the 1 sat cost before a read and pays it after one confirm, once', async () => {
-    const s = stub(() => ({ ...page('/front-door.json', 'card', ''), card: card(MAYA, false) }));
+    const s = stub(() => ({ ...page('/front-door.json', 'card', ''), card: card(ROBIN, false) }));
     mount(s);
     await tick();
     expect($('[data-porch-open-card]')!.textContent).toBe('Open profile card · page price 1 sat');
@@ -259,16 +269,16 @@ describe('PorchPanel', () => {
     confirm.click();
     confirm.click();
     await tick();
-    expect(s.quotes).toContainEqual([MAYA, '/front-door.json']);
-    expect(s.reads).toEqual([[MAYA, '/front-door.json', 6000]]);
+    expect(s.quotes).toContainEqual([ROBIN, '/front-door.json']);
+    expect(s.reads).toEqual([[ROBIN, '/front-door.json', 6000]]);
     expect($('[data-porch-review]')).toBeNull();
-    expect($('[data-fd-name]')!.textContent).toBe('Maya');
+    expect($('[data-fd-name]')!.textContent).toBe('Robin');
     expect($('[data-porch-cached]')).toBeNull();
 
     click('[data-porch-page-read="/index.md"]');
     await tick();
     expect(s.reads.length).toBe(1);
-    expect($('[data-porch-review-what]')!.textContent).toBe('Read /index.md from Maya');
+    expect($('[data-porch-review-what]')!.textContent).toBe('Read /index.md from Robin');
     click('[data-porch-back]');
     await tick();
     expect($('[data-porch-review]')).toBeNull();
@@ -277,7 +287,7 @@ describe('PorchPanel', () => {
 
   it('renders a markdown page as text: tags, scripts and links never become elements', async () => {
     const body = '# Hi\n\n<script>alert(1)</script> <img src=x onerror="alert(1)"> [go](javascript:alert`1`) ![p](http://x.invalid/a.png)';
-    const s = stub((_, path) => (path === '/front-door.json' ? { ...page(path, 'card', ''), card: card(MAYA, false) } : page(path, 'markdown', body)));
+    const s = stub((_, path) => (path === '/front-door.json' ? { ...page(path, 'card', ''), card: card(ROBIN, false) } : page(path, 'markdown', body)));
     mount(s);
     await tick();
     await confirmRead('[data-porch-open-card]');
@@ -295,7 +305,7 @@ describe('PorchPanel', () => {
   it('shows a text page in a preformatted block, and a missing page as paid', async () => {
     const s = stub((_, path) =>
       path === '/front-door.json'
-        ? { ...page(path, 'card', ''), card: card(MAYA, false) }
+        ? { ...page(path, 'card', ''), card: card(ROBIN, false) }
         : path === '/notes.txt'
           ? page(path, 'text', '<b>x</b>\u202E')
           : page(path, 'none', '', 'not_found'),
@@ -323,10 +333,10 @@ describe('PorchPanel', () => {
   });
 
   it('opens held cards as cached for free, and refreshing one is a paid, confirmed read', async () => {
-    const s = stub(() => ({ ...page('/front-door.json', 'card', ''), card: card(MAYA, false) }), [card(MAYA, true)]);
+    const s = stub(() => ({ ...page('/front-door.json', 'card', ''), card: card(ROBIN, false) }), [card(ROBIN, true)]);
     mount(s);
     await tick();
-    expect($(`[data-porch-held-card="${MAYA}"]`)!.textContent).toContain('Cached');
+    expect($(`[data-porch-held-card="${ROBIN}"]`)!.textContent).toContain('Cached');
     click('[data-porch-held-open]');
     await tick();
     expect(s.reads).toEqual([]);
@@ -339,8 +349,8 @@ describe('PorchPanel', () => {
     expect($('[data-review-total]')!.textContent).toBe('6 sats');
     click('[data-porch-confirm]');
     await tick();
-    expect(s.quotes).toContainEqual([MAYA, '/front-door.json']);
-    expect(s.reads).toEqual([[MAYA, '/front-door.json', 6000]]);
+    expect(s.quotes).toContainEqual([ROBIN, '/front-door.json']);
+    expect(s.reads).toEqual([[ROBIN, '/front-door.json', 6000]]);
     expect($('[data-porch-cached]')).toBeNull();
   });
 
