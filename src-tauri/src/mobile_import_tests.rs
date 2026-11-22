@@ -38,7 +38,7 @@ async fn noise_auth_reply_with(listener: &tokio::net::TcpListener, accept: bool)
     let (mut stream, _) = listener.accept().await.unwrap();
     let secret = [43; 32];
     let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
-        .local_private_key(&secret).build_responder().unwrap();
+        .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
     let mut output = [0; 1024];
     for step in 0..2 {
         let length = stream.read_u32().await.unwrap();

@@ -47,7 +47,7 @@ async fn enrollment_node(finalize_status: u16, first_name: Option<&'static str>)
     let server = tokio::spawn(async move {
         for first in [true, false] {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).build_responder().unwrap();
+            let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
             let mut out = vec![0;MAX_HANDSHAKE_FRAME];
             let msg = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await.unwrap();
             hs.read_message(&msg, &mut out).unwrap();

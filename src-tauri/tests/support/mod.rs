@@ -23,7 +23,7 @@ pub struct NodeCrypto;
 
 impl PairCrypto for NodeCrypto {
     fn random(&self, out: &mut [u8]) {
-        getrandom::getrandom(out).expect("getrandom");
+        getrandom::fill(out).expect("getrandom");
     }
 
     fn verify(&self, pubkey_hex: &str, message: &[u8], signature_hex: &str) -> bool {

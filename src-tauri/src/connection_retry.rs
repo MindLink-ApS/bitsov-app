@@ -167,7 +167,7 @@ impl RemoteRetry {
         // Additive jitter never shortens the server's minimum or permits a burst.
         // A randomness failure still retains the full backoff.
         let mut random = [0u8; 2];
-        let _ = getrandom::getrandom(&mut random);
+        let _ = getrandom::fill(&mut random);
         let delay = Duration::from_secs(base)
             + Duration::from_millis(u64::from(u16::from_le_bytes(random)) % 1001);
         let next = tokio::time::Instant::now() + delay;

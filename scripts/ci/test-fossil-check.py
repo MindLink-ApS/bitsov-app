@@ -16,6 +16,10 @@ SESSION = "claude.ai/" + "code/session/fixture"
 HOME_PATH = "/".join(("", "Users", "example", "project"))
 PRIVATE_NAME = "fixture-confidential-repository"
 PLANNING_PATH = "/".join(("docs", "private", "plan.md"))
+# Private IPv4 fixtures, assembled so the literals never appear in this file.
+PRIVATE_V4 = tuple(".".join(map(str, parts)) for parts in (
+    (10, 1, 2, 3), (172, 20, 0, 5), (192, 168, 1, 20), (127, 0, 0, 1), (169, 254, 10, 1),
+))
 
 RESERVED = tuple("".join(map(chr, codes)) for codes in (
     (99, 111, 100, 101, 120),
@@ -65,7 +69,7 @@ class FossilCheckTests(unittest.TestCase):
 
     def git(self, *args):
         return subprocess.check_output(
-            ["git", "-c", "user.name=Sample Author", "-c", "user.email=tests@example.invalid",
+            ["git", "-c", "user.name=Test Author", "-c", "user.email=tests@example.invalid",
              "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
             cwd=self.repo, env=self.env, text=True, stderr=subprocess.PIPE,
         ).strip()
@@ -80,7 +84,7 @@ class FossilCheckTests(unittest.TestCase):
 
     def commit(self, message="Update sample", author=None):
         self.git("add", "--all")
-        extra = ("--author", author) if author else ()
+        extra = ["--author", author] if author else []
         self.git("commit", "-q", "--allow-empty", *extra, "-m", message)
 
     def check(self, expected, base=None, env=None):
@@ -91,6 +95,50 @@ class FossilCheckTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
+
+    def test_commit_messages_are_checked_without_echoing_them(self):
+        private_ips = PRIVATE_V4 + ("fd12:3456::1", "fe80::1")
+        values = [HOME_PATH, SESSION, PLANNING_PATH, PRIVATE_NAME, "ssh fixture@host.local",
+                  "fixture@localhost", "fixture@dev.localhost", "fixture@a.b.localhost"] + [f"reach the node at {ip}" for ip in private_ips]
+        for value in values:
+            with self.subTest(value=value):
+                self.git("reset", "-q", "--hard", self.base)
+                self.commit("Update sample\n\nNote: " + value)
+                result = self.check(1)
+                self.assertNotIn(value, result.stdout + result.stderr)
+                self.assertRegex(result.stderr, r"in commit [0-9a-f]{12} message\.")
+
+    def test_public_addresses_and_plain_messages_pass(self):
+        for value in ("see 8.8.8.8 and 172.32.0.1", "bump 10.1.2 to 10.2.0", "user@example.org",
+                      "version 192.168"):
+            with self.subTest(value=value):
+                self.git("reset", "-q", "--hard", self.base)
+                self.commit("Update sample\n\n" + value)
+                self.check(0)
+
+    def test_commit_identities_are_checked(self):
+        for author in ("Fixture <fixture@mac.local>", "Fixture <fixture@localhost>", "Fixture <fixture@dev.localhost>",
+                       "Fixture <fixture@[" + PRIVATE_V4[2] + "]>", "Fixture <fixture@nohost>",
+                       "Fixture " + PRIVATE_NAME + " <fixture@example.org>"):
+            with self.subTest(author=author):
+                self.git("reset", "-q", "--hard", self.base)
+                self.commit(author=author)
+                result = self.check(1)
+                self.assertRegex(result.stderr, r"in commit [0-9a-f]{12} identity\.")
+                self.assertNotIn(author, result.stdout + result.stderr)
+
+    def test_attribution_trailers_are_not_judged_in_commit_metadata(self):
+        # Whether such trailers are allowed is not decided; only content checks apply to them.
+        self.commit("Update sample\n\nCo-authored-by: " + RESERVED[4].title()
+                    + " <noreply@example.org>")
+        self.check(0)
+
+    def test_only_commits_of_the_change_are_checked(self):
+        self.commit("Old note: " + HOME_PATH)
+        base = self.git("rev-parse", "HEAD")
+        self.write("notes.txt", "public text\n")
+        self.commit()
+        self.check(0, base=base)
 
     def test_clean_addition_ignores_unchanged_fossils(self):
         self.write("notes.txt", SESSION + "\nnew public text\n")

@@ -20408,7 +20408,7 @@ mod control_act_tests {
         async fn serve(stream: tokio::net::TcpStream, secret: [u8; 32], node: std::net::SocketAddr) -> std::io::Result<()> {
             let (mut from_app, mut to_app) = stream.into_split();
             let mut noise = snow::Builder::new(remote_access::NOISE_PROTOCOL.parse().unwrap())
-                .local_private_key(&secret).build_responder().unwrap();
+                .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
             let mut scratch = vec![0u8; 65_535];
             let message = read_frame(&mut from_app).await?;
             noise.read_message(&message, &mut scratch).unwrap();

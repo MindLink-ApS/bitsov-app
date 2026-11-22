@@ -6,7 +6,7 @@ build and pairing instructions.
 
 ## Build and test
 
-From the repository root, using Node.js 22:
+From the repository root, using Node.js 22.12 or newer (see `.nvmrc`):
 
 ```sh
 npm ci --ignore-scripts
