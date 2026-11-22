@@ -288,7 +288,7 @@ pub fn clean_text(text: &str) -> String {
         .chars()
         .map(|c| if matches!(c, '\r' | '\u{2028}' | '\u{2029}') { '\n' } else { c })
         .filter(|c| {
-            !(c.is_control() && !matches!(c, '\n' | '\t'))
+            (!c.is_control() || matches!(c, '\n' | '\t'))
                 && !matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
         })
         .collect()
@@ -366,7 +366,7 @@ mod tests {
             prices: FrontDoorPrices { admission_msat: 100_000, message_msat: 10_000, page_msat: 1_000, price_epoch: 0 },
             profile: FrontDoorProfile {
                 kind: ProfileKind::Person,
-                display_name: "Maya".into(),
+                display_name: "Robin".into(),
                 tagline: String::new(),
                 about: String::new(),
                 avatar: None,
@@ -475,9 +475,9 @@ mod tests {
     #[test]
     fn a_card_read_shows_only_a_card_that_verifies_for_that_node() {
         let key = SigningKey::from_bytes(&[7u8; 32]);
-        let maya = card(&key, 3);
-        let peer = maya.node_id.clone();
-        let read = project(&reply(Some(&maya), CARD_PATH, "Ok", "application/json", "{…}", &peer), &peer, CARD_PATH, 6_000, NOW + 5).unwrap();
+        let robin = card(&key, 3);
+        let peer = robin.node_id.clone();
+        let read = project(&reply(Some(&robin), CARD_PATH, "Ok", "application/json", "{…}", &peer), &peer, CARD_PATH, 6_000, NOW + 5).unwrap();
         assert_eq!((read.status, read.kind, read.body.as_str(), read.total_msat), ("ok", "card", "", 6_000));
         let shown = read.card.unwrap();
         assert_eq!((shown.view.seq, shown.cached, shown.stale, shown.view.verified), (3, false, false, true));
@@ -487,20 +487,20 @@ mod tests {
         let theirs = card(&other, 1);
         assert!(project(&reply(Some(&theirs), CARD_PATH, "Ok", "application/json", "", &peer), &peer, CARD_PATH, 6_000, NOW).is_err());
         // Tampered after signing.
-        let mut forged = maya.clone();
+        let mut forged = robin.clone();
         forged.profile.display_name = "Mallory".into();
         assert!(project(&reply(Some(&forged), CARD_PATH, "Ok", "application/json", "", &peer), &peer, CARD_PATH, 6_000, NOW).is_err());
         // An answer for another page or node.
-        assert!(project(&reply(Some(&maya), CARD_PATH, "Ok", "", "", &peer), &peer, "/index.md", 6_000, NOW).is_err());
+        assert!(project(&reply(Some(&robin), CARD_PATH, "Ok", "", "", &peer), &peer, "/index.md", 6_000, NOW).is_err());
         assert!(project(&reply(None, "/index.md", "Ok", "text/plain", "x", &"cd".repeat(32)), &peer, "/index.md", 6_000, NOW).is_err());
     }
 
     #[test]
     fn a_page_is_cleaned_text_and_a_missing_one_has_no_body() {
         let peer = "ab".repeat(32);
-        let page = "# Maya\r\n\u{202E}evil\u{200B} <script>x</script>\u{7}\n\tok";
+        let page = "# Robin\r\n\u{202E}evil\u{200B} <script>x</script>\u{7}\n\tok";
         let read = project(&reply(None, "/index.md", "Ok", "text/markdown", page, &peer), &peer, "/index.md", 6_000, NOW).unwrap();
-        assert_eq!((read.kind, read.body.as_str()), ("markdown", "# Maya\nevil <script>x</script>\n\tok"));
+        assert_eq!((read.kind, read.body.as_str()), ("markdown", "# Robin\nevil <script>x</script>\n\tok"));
         let text = project(&reply(None, "/a.txt", "Ok", "text/html", "<b>", &peer), &peer, "/a.txt", 6_000, NOW).unwrap();
         assert_eq!(text.kind, "text", "never anything but text");
         let missing = project(&reply(None, "/gone.md", "NotFound", "", "Not found", &peer), &peer, "/gone.md", 6_000, NOW).unwrap();
@@ -511,11 +511,11 @@ mod tests {
 
     #[test]
     fn held_cards_are_shown_as_cached_and_a_bad_one_is_dropped() {
-        let maya = card(&SigningKey::from_bytes(&[7u8; 32]), 2);
+        let robin = card(&SigningKey::from_bytes(&[7u8; 32]), 2);
         let mut forged = card(&SigningKey::from_bytes(&[9u8; 32]), 1);
         forged.seq = 5;
         let cards = serde_json::json!({"cards": [
-            {"card": maya, "link": maya.to_link().unwrap(), "fresh": true},
+            {"card": robin, "link": robin.to_link().unwrap(), "fresh": true},
             {"card": forged, "link": forged.to_link().unwrap(), "fresh": true},
         ]})
         .to_string();

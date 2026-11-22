@@ -117,7 +117,7 @@ Not in this walk: the Tauri host, the iOS/Android shells as native apps (the pho
 
 - **Screen:** Rail, node pill and peer dots
 - **Severity:** Low
-- **Screenshot:** `docs/qa/screenshots/chat-maya-dark.png`
+- **Screenshot:** `docs/qa/screenshots/chat-robin-dark.png`
 - **What:** The glow was `rgba(79, 191, 123, …)`. `--ok` in dark mode is `#5bc98a` (91, 201, 138).
 - **Fix:** `color-mix` with `var(--ok)`.
 
@@ -157,7 +157,7 @@ Not in this walk: the Tauri host, the iOS/Android shells as native apps (the pho
 
 - **Screen:** Failed send artifact, refused door card
 - **Severity:** Low
-- **Screenshot:** `docs/qa/screenshots/chat-maya-dark.png` (token; the refused state is on the organism view)
+- **Screenshot:** `docs/qa/screenshots/chat-robin-dark.png` (token; the refused state is on the organism view)
 - **What:** Hardcoded `rgba(217, 96, 63, …)`. `--err` is `#ec7356` / light `#c0391f`.
 - **Fix:** `color-mix` with `var(--err)`.
 
@@ -165,7 +165,7 @@ Not in this walk: the Tauri host, the iOS/Android shells as native apps (the pho
 
 - **Screen:** Ask your node, local server running but no models yet
 - **Severity:** Low
-- **Screenshot:** `docs/qa/screenshots/chat-maya-dark.png` (the assistant track; the empty list is the same control)
+- **Screenshot:** `docs/qa/screenshots/chat-robin-dark.png` (the assistant track; the empty list is the same control)
 - **What:** `role="listbox"` while `models` is empty fails `aria-required-children`.
 - **Fix:** `role="group"` until there is at least one option.
 
@@ -189,7 +189,7 @@ Not in this walk: the Tauri host, the iOS/Android shells as native apps (the pho
 
 - **Screen:** Inbox rail
 - **Severity:** Medium
-- **Screenshot:** `docs/qa/screenshots/chat-maya-dark.png`
+- **Screenshot:** `docs/qa/screenshots/chat-robin-dark.png`
 - **What:** `peerName` is `Unnamed contact (cccccccc…cccccccc)`. The rail ellipsizes the end, which is the id. Two unnamed contacts can look the same. The name is intentional (`tests/petnames.test.ts`).
 - **Fix:** Not changed. Splitting the id into the meta slot would change the control’s name on every surface that uses `peerName`.
 
@@ -219,7 +219,7 @@ Not in this walk: the Tauri host, the iOS/Android shells as native apps (the pho
 
 ### 26. Disabled controls drop to 50% opacity
 
-- **Screen:** Chat when the price is unknown (Josh); welcome actions that are unavailable
+- **Screen:** Chat when the price is unknown (Kim); welcome actions that are unavailable
 - **Severity:** Low
 - **Screenshot:** `docs/qa/screenshots/chat-price-unavailable-dark.png`
 - **What:** `button:disabled { opacity: 0.5 }` makes Send and other disabled actions faint. WCAG contrast does not apply to disabled text.
@@ -235,7 +235,7 @@ Not in this walk: the Tauri host, the iOS/Android shells as native apps (the pho
 
 ## States that were walked and looked consistent
 
-QR ticket, four comparison words (amber / cinder / harbor / quartz in the stub), Touch ID approve on that screen, offline node (remote, with retry), pairing failure, price-unavailable chat (Josh, Send disabled), empty thread (“Nothing here yet”), welcome empty inbox, wallet activity / channels / receive / send, settings tabs, light and dark chat. Terms for units in the thread were `sat` / `sats` via `amount()`, not `SAT`. “This Mac” vs “this device” follows the desktop vs phone copy already in those screens.
+QR ticket, four comparison words (amber / cinder / harbor / quartz in the stub), Touch ID approve on that screen, offline node (remote, with retry), pairing failure, price-unavailable chat (Kim, Send disabled), empty thread (“Nothing here yet”), welcome empty inbox, wallet activity / channels / receive / send, settings tabs, light and dark chat. Terms for units in the thread were `sat` / `sats` via `amount()`, not `SAT`. “This Mac” vs “this device” follows the desktop vs phone copy already in those screens.
 
 ## Local check
 

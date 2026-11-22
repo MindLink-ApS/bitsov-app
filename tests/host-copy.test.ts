@@ -62,6 +62,14 @@ describe('host refusals in Danish', () => {
     const fill = (t: string) => t.replace(/\{\d*\}/g, '5');
     for (const [en, da] of HOST_COPY_DA) if (softenError(fill(en)).money) expect(softenError(fill(da)).money, en).toBe(true);
   });
+  it('reads the offline refusal as its own sentence, not the general one', () => {
+    expect(hostText('Not sent - nothing was paid. Recipient is offline.', 'da')).toBe('Ikke sendt – intet blev betalt. Modtageren er offline.');
+  });
+  it('reads every row as that row: a general row never hides a specific one below it', () => {
+    const fill = (t: string) => t.replace(/\{\d*\}/g, '5');
+    const hidden = HOST_COPY_DA.filter(([en, da]) => hostText(fill(en), 'da') !== fill(da)).map(([en]) => en);
+    expect(hidden).toEqual([]);
+  });
   it('translates the exact refusal, with its values, only in Danish', () => {
     const refusal = 'This is more than the 50 sats per payment your node allows. Nothing was sent.';
     expect(hostText(refusal, 'en')).toBe(refusal);

@@ -1,5 +1,5 @@
 import { t, language } from '../i18n';
-// Display helpers. Keep msat precision in the selected denomination.
+// Display helpers. Sats show whole numbers (rounded up); BTC keeps msat precision.
 // Denomination (sats vs BTC) follows the settings toggle — amounts stay msat.
 // Call sites must use amount() (or sats()+satUnit()); never append a unit literal.
 
@@ -19,9 +19,46 @@ const groupAmount = (value: string, nowrap = false) => {
 /** 1 BTC = 1e8 sats = 1e11 msat. */
 const MSAT_PER_BTC = 100_000_000_000;
 
-/** Number only (no unit). BTC mode keeps every msat digit (up to 11 fractional places). */
-export function sats(msat: number, nowrap = false): string {
+/**
+ * Which way a whole-sat display rounds. Every display site picks one:
+ * - 'up' for a cost, a price, a ceiling or a limit: never shown smaller than what may be paid;
+ * - 'down' for money received or returned, a balance, what is left to spend, and an existing
+ *   limit, budget or grant cap: never shown larger than what is there or allowed, so a payment
+ *   never looks possible when it is not. (An amount being approved now is a cost: 'up'.)
+ */
+export type Rounding = 'up' | 'down';
+
+/** Whole sats for display only; amounts stay msat everywhere else. */
+export function wholeSats(msat: number, round: Rounding): { sats: number; rounded: boolean } {
+  const absolute = Math.abs(msat);
+  const whole = round === 'up' ? Math.ceil(absolute / 1000) : Math.floor(absolute / 1000);
+  return { sats: msat < 0 ? -whole : whole, rounded: whole * 1000 !== absolute };
+}
+
+const wholeText = (msat: number, round: Rounding, nowrap: boolean) => {
+  const shown = wholeSats(msat, round);
+  return `${shown.sats < 0 ? '-' : ''}${groupDigits(String(Math.abs(shown.sats)), nowrap)}`;
+};
+
+/** Number only (no unit). Sats show whole numbers ("about"/"ca." when rounded); BTC mode keeps every msat digit. */
+export function sats(msat: number, round: Rounding, nowrap = false): string {
   if (denom() === 'btc') return btc(msat, nowrap);
+  const shown = wholeSats(msat, round);
+  // Rounding a small incoming amount down to 0 would hide it: say "less than 1".
+  if (shown.sats === 0 && msat > 0) return t('amountUnderOne', '1');
+  const number = wholeText(msat, round, nowrap);
+  return shown.rounded ? t('amountAbout', number) : number;
+}
+
+/** An estimate's figure: "≈ 10" (the sign already says it is rounded), otherwise sats(). */
+export function estimatedSats(msat: number, estimate: boolean, round: Rounding, nowrap = false): string {
+  if (!estimate) return sats(msat, round, nowrap);
+  if (denom() === 'btc') return `≈ ${btc(msat, nowrap)}`;
+  return `≈ ${wholeText(msat, round, nowrap)}`;
+}
+
+/** Exact sats with msat decimals, for technical details only. */
+export function exactSats(msat: number, nowrap = false): string {
   if (!Number.isSafeInteger(msat)) return groupAmount((msat / 1000).toFixed(3).replace(/\.?0+$/, ''), nowrap);
   const absolute = Math.abs(msat);
   const whole = Math.floor(absolute / 1000);
@@ -45,14 +82,42 @@ export function btc(msat: number, nowrap = false): string {
   return `${sign}${groupDigits(String(whole), nowrap)}.${frac}`;
 }
 
-/** `sat` / `sats` / `BTC`, matching the number returned by sats(). */
-export const satUnit = (msat: number) => {
+/** `sat` / `sats` / `BTC`, matching the number returned by sats() with the same rounding. */
+export const satUnit = (msat: number, round: Rounding) => {
   if (denom() === 'btc') return 'BTC';
-  return msat === 1000 ? 'sat' : 'sats';
+  const shown = Math.abs(wholeSats(msat, round).sats);
+  return shown === 1 || (shown === 0 && msat > 0) ? 'sat' : 'sats';
 };
 
 /** Number and unit together. Prefer this at every display site. */
-export const amount = (msat: number, nowrap = false) => `${sats(msat, nowrap)} ${satUnit(msat)}`;
+export const amount = (msat: number, round: Rounding, nowrap = false) => `${sats(msat, round, nowrap)} ${satUnit(msat, round)}`;
+
+/**
+ * A total shown beside its parts. Each part rounds up on its own, so the total
+ * shown is the sum of the parts as shown: the figures visibly add up and the
+ * total is never smaller than the real one. When the parts do not add up to the
+ * total exactly, the total is shown on its own (rounded up).
+ */
+export function shownTotal(total: number, parts: number[]): string {
+  const { figure, unit } = shownTotalFigure(total, parts, false);
+  return `${figure} ${unit}`;
+}
+
+/** shownTotal() as a figure and its unit, for a headline that styles the unit apart; an estimate shows "≈". */
+export function shownTotalFigure(total: number, parts: number[], estimate: boolean, nowrap = false): { figure: string; unit: string } {
+  if (denom() === 'btc' || parts.reduce((a, b) => a + b, 0) !== total) {
+    return { figure: estimatedSats(total, estimate, 'up', nowrap), unit: satUnit(total, 'up') };
+  }
+  const shown = parts.map((m) => wholeSats(m, 'up'));
+  const sum = shown.reduce((a, b) => a + b.sats, 0);
+  const number = groupDigits(String(sum), nowrap);
+  const figure = estimate ? `≈ ${number}` : shown.some((p) => p.rounded) ? t('amountAbout', number) : number;
+  return { figure, unit: sum === 1 ? 'sat' : 'sats' };
+}
+
+/** Number and unit with every msat digit, for a Details disclosure (where parts must add up exactly). */
+export const exactAmount = (msat: number, nowrap = false) =>
+  denom() === 'btc' ? `${btc(msat, nowrap)} BTC` : `${exactSats(msat, nowrap)} ${msat === 1000 ? 'sat' : 'sats'}`;
 
 export const satsWhole = (value: number, nowrap = false) => groupAmount(String(value), nowrap);
 
@@ -93,25 +158,25 @@ export function routingFee(msat: number): number {
   return msat === 0 ? 0 : Math.min(Math.max(5000, Math.floor(msat / 100)), 10000);
 }
 export const allIn = (msat: number) => msat + routingFee(msat);
-export const feeCeiling = (msat: number) => t('uiUpToNetworkFee', amount(msat));
+export const feeCeiling = (msat: number) => t('uiUpToNetworkFee', amount(msat, 'up'));
 
 /** Settled principal is known even when an older node cannot report its fee. */
 export function paidAmount(principal: number, fee?: number): string {
   const known = fee !== undefined && Number.isSafeInteger(fee) && fee >= 0;
   const total = principal + (known ? fee : 0);
   if (!Number.isSafeInteger(total) || total < 0) return t('uiPaidAmountUnknown');
-  return t('uiPaid498', amount(total), known ? '' : t('uiNetworkFeeNotReported'));
+  return t('uiPaid498', amount(total, 'up'), known ? '' : t('uiNetworkFeeNotReported'));
 }
 
 /** Additional liabilities never masquerade as paid amounts. */
 export function budgetNote(b?: import('./types').BudgetAccounting): string {
   if (!b) return '';
   const notes: string[] = [];
-  if (b.unsettled_msat) notes.push(t('uiReserved', amount(b.unsettled_msat)));
+  if (b.unsettled_msat) notes.push(t('uiReserved', amount(b.unsettled_msat, 'up')));
   if (b.fee_unknown) {
     notes.push(t('uiNetworkFeeNotReported502'));
     const held = (b.accounted_msat ?? b.spent_msat) - b.spent_msat - (b.unsettled_msat ?? 0);
-    if (held > 0) notes.push(t('uiUpToHeldForUnreportedCosts', amount(held)));
+    if (held > 0) notes.push(t('uiUpToHeldForUnreportedCosts', amount(held, 'up')));
   }
   return notes.join(' · ');
 }

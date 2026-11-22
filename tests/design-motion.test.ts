@@ -31,6 +31,10 @@ describe('motion', () => {
     expect(reduced).toMatch(/transition-duration:\s*0\.01ms !important/);
   });
 
+  it('jumps reduced transitions to their end value, so inherited visibility is never briefly hidden', () => {
+    expect(reduced).toMatch(/\*,\s*\*::before,\s*\*::after\s*\{[^}]*transition-timing-function:\s*step-start !important/);
+  });
+
   it('turns off every infinite (ambient) animation explicitly', () => {
     const looping = [...css.matchAll(/([^{}]+)\{[^{}]*\binfinite\b[^{}]*\}/g)].map((m) => m[1].trim().split(',').map((s) => s.trim()));
     expect(looping.length).toBeGreaterThan(0);

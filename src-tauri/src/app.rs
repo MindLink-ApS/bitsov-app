@@ -96,6 +96,10 @@ mod local_owner;
 mod owner_password;
 #[path = "home_keychain.rs"]
 mod home_keychain;
+/// Windows: public home-node records on the private-file layer.
+#[cfg(windows)]
+#[path = "home_keychain_windows.rs"]
+mod home_keychain_windows;
 #[cfg(all(desktop, not(feature = "mobile")))]
 #[path = "remote_owner.rs"]
 mod remote_owner;
@@ -117,7 +121,7 @@ mod owner_contact;
 /// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
-/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc23`): the funding
+/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc24`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
 const FUNDING_SEEN: &str = "funding-seen";
@@ -162,13 +166,111 @@ struct PairingCtx {
     data_dir: PathBuf,
 }
 
+/// The active node's identity. Every change of it, back to a node active before
+/// included, counts once, so a read asked of one node can tell whether that node
+/// stayed the active one throughout: the value alone cannot.
+struct NodeIdCell {
+    id: Mutex<Option<String>>,
+    changes: std::sync::atomic::AtomicU64,
+}
+
+/// Read and written as the `Mutex` it wraps. A write that leaves a different
+/// value is counted when the guard is dropped, still under the lock.
+struct NodeIdGuard<'a> {
+    id: std::sync::MutexGuard<'a, Option<String>>,
+    changes: &'a std::sync::atomic::AtomicU64,
+    before: Option<Option<String>>,
+}
+
+impl NodeIdCell {
+    fn new() -> Self {
+        Self { id: Mutex::new(None), changes: std::sync::atomic::AtomicU64::new(0) }
+    }
+
+    fn lock(&self) -> std::sync::LockResult<NodeIdGuard<'_>> {
+        let guard = |id| NodeIdGuard { id, changes: &self.changes, before: None };
+        self.id.lock().map(guard).map_err(|poisoned| std::sync::PoisonError::new(guard(poisoned.into_inner())))
+    }
+}
+
+impl NodeIdGuard<'_> {
+    /// How many times the identity has changed, as of this guard.
+    fn changes(&self) -> u64 { self.changes.load(Ordering::SeqCst) }
+}
+
+impl std::ops::Deref for NodeIdGuard<'_> {
+    type Target = Option<String>;
+    fn deref(&self) -> &Option<String> { &self.id }
+}
+
+impl std::ops::DerefMut for NodeIdGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Option<String> {
+        if self.before.is_none() { self.before = Some(self.id.clone()); }
+        &mut self.id
+    }
+}
+
+impl Drop for NodeIdGuard<'_> {
+    fn drop(&mut self) {
+        if self.before.as_ref().is_some_and(|before| *before != *self.id) {
+            self.changes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// The node a read is asked of, and the connection it goes over: the node's
+/// identity and how often it has changed, the remote connection and the network
+/// authority. A read bound to it is refused as soon as any of them moves on,
+/// before each request goes out (a retry after a new token included), when its
+/// answer arrives and when that answer is read. `until`: the answer is of no use
+/// from then on, and no request goes out at or after it.
+struct NodeBound {
+    node_id: String,
+    changes: u64,
+    remote: u64,
+    network: u64,
+    until: Option<tokio::time::Instant>,
+}
+
+impl NodeBound {
+    /// Bound to `node_id` as it is now. None when it is not the active node.
+    fn now(state: &NodeState, node_id: &str, until: Option<tokio::time::Instant>) -> Option<Self> {
+        // One lock at a time: other paths take these in either order.
+        let network = *state.network_auth_epoch.lock().unwrap();
+        let remote = *state.remote_connect_generation.borrow();
+        let id = state.node_id.lock().unwrap();
+        (id.as_deref() == Some(node_id)).then(|| Self { node_id: node_id.into(), changes: id.changes(), remote, network, until })
+    }
+
+    /// Still this node over this connection, and still in time. Taking the
+    /// snapshot can block, so the time is read after it, not before.
+    fn holds(&self, state: &NodeState) -> bool {
+        let same = NodeBound::now(state, &self.node_id, None)
+            .is_some_and(|now| (now.changes, now.remote, now.network) == (self.changes, self.remote, self.network));
+        same && self.until.is_none_or(|until| tokio::time::Instant::now() < until)
+    }
+
+    fn refusal(&self, route: &str) -> String {
+        format!("{route}: the active node or its connection changed, or the time for this read ran out")
+    }
+}
+
 struct NodeState {
     /// Fixed by the bundled identifier, never by an environment variable or pairing state.
     remote_only: bool,
+    signet_only: bool,
+    network_refusal: Mutex<crate::network_policy::NetworkRefusal>,
+    network_auth_epoch: Mutex<u64>,
+    /// The epoch whose credential passed its checks: identity (when the node
+    /// has one), then a signet report. Signet-only builds send ordinary
+    /// requests only under it; a new credential or any epoch change ends it.
+    network_verified: Mutex<Option<u64>>,
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    test_init_network_support: Mutex<Option<bool>>,
     #[cfg(all(desktop, not(feature = "mobile")))]
     owner: local_owner::OwnerState,
     ready: Mutex<bool>,
-    node_id: Mutex<Option<String>>,
+    node_id: NodeIdCell,
     error: Mutex<Option<String>>,
     /// Supervised node process; killed on app exit so no orphan node is left running.
     /// The supervised node, owned through `SharedChild` so signalling stays
@@ -253,6 +355,18 @@ struct NodeState {
     /// Config/external_node are still empty while first-run init is awaiting.
     #[cfg(all(desktop, not(feature = "mobile")))]
     local_startup: AtomicBool,
+    /// A fresh profile: startup created nothing and waits for the owner to
+    /// choose this Mac (`node_setup_local`) or a node at home.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    local_setup_needed: AtomicBool,
+    /// The owner chose this Mac and its first node is being set up. Set and
+    /// cleared by `node_setup_local` under `remote_change`; a home-node link
+    /// cannot be saved meanwhile.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    local_setup_running: AtomicBool,
+    /// Tests only: a scripted stand-in for the node binary.
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    test_sidecar: Mutex<Option<PathBuf>>,
     add_device: tokio::sync::Mutex<add_device::Setup>,
     /// Enrollment is complete only after token refresh and identity validation.
     second_join_complete: AtomicBool,
@@ -302,6 +416,19 @@ struct NodeState {
     trust_write: Mutex<()>,
     /// A pending console approval saved by an earlier run was loaded once.
     approvals_restored: AtomicBool,
+    /// A pairing link was just imported: ask the node once for the day's
+    /// budget as soon as this pairing is signed in (see `ask_budget_after_pairing`).
+    budget_after_pairing: AtomicBool,
+    /// Serializes creating an elevation request, for the automatic pairing ask
+    /// and every explicit ask alike: one POST at a time, each after a fresh
+    /// look at the pending request. Never held while waiting for `money`.
+    elevation_create: tokio::sync::Mutex<()>,
+    /// This node's call limit (`max_call_minutes`) as last seen on one of its
+    /// holds, for the call-window check before a paid offer or answer.
+    call_limit_seen: Mutex<Option<(String, u16)>>,
+    /// Desktop: the file that carries the budget ask across the restart that
+    /// follows an imported link, removed once the ask is sent or not needed.
+    budget_ask_marker: Mutex<Option<PathBuf>>,
     /// M6 A1: the open node-routed media session, if a call has one. The host
     /// owns its socket; the renderer only pushes payloads and reads frames.
     media: Mutex<Option<MediaSession>>,
@@ -320,6 +447,15 @@ struct NodeState {
     /// (whose guard lives through the whole body), and nothing else is locked,
     /// awaited or written while either is held.
     call_consents: Mutex<CallConsents>,
+    /// Bumped by every explicit stop of spending: the owner's lock or pause,
+    /// a token the node refused, a new connection or identity. Never by an
+    /// approval or grant simply running out. A call's minutes may outlive
+    /// its approval only while this is what it was when the call was offered.
+    spend_stops: std::sync::atomic::AtomicU64,
+    /// Calls that may still send their own hangup and reconnect request after
+    /// the owner's approval ran out (`held_call_plan`). A leaf lock, like
+    /// `call_consents`.
+    held_calls: Mutex<HeldCalls>,
 }
 
 /// M6 A2: one outgoing call's agreed minutes, bound to the node identity,
@@ -348,6 +484,8 @@ struct CallConsent {
     /// closed (or it held none and the call ended). Never set on the app's
     /// own say-so (a refusal, a hangup that failed or was not seen through).
     node_closed: bool,
+    /// `NodeState::spend_stops` when this call was offered.
+    stops: u64,
 }
 
 impl CallConsent {
@@ -410,7 +548,7 @@ impl CallConsents {
     /// Take the consent for a call id once. The same terms for a call that is
     /// still open are a no-op (the same offer again); different terms, or any
     /// terms for a call that was refused or ended, are refused.
-    fn register(&mut self, node_id: String, peer: &str, call_id: &str, consent: control::MinutesConsent) -> Result<(), ActionError> {
+    fn register(&mut self, node_id: String, peer: &str, call_id: &str, consent: control::MinutesConsent, stops: u64) -> Result<(), ActionError> {
         if let Some(existing) = self.find(&node_id, peer, call_id) {
             return match &existing.phase {
                 phase if phase.open() && existing.consent == consent => Ok(()),
@@ -430,7 +568,7 @@ impl CallConsents {
         }
         self.entries.push(CallConsent {
             node_id, peer: peer.into(), call_id: call_id.into(), consent,
-            confirmed_msat: None, phase: ConsentPhase::Offering, offering: false, dispatched: false, node_closed: false,
+            confirmed_msat: None, phase: ConsentPhase::Offering, offering: false, dispatched: false, node_closed: false, stops,
         });
         Ok(())
     }
@@ -491,6 +629,57 @@ impl CallConsents {
     }
 }
 
+/// `call_continuity_v1`: one call this app took part in while it could
+/// spend. An outgoing call is kept once the owner confirmed its hold, an
+/// incoming one once its answer went out, each with `NodeState::spend_stops`
+/// as it was then. After the owner's approval runs out, such a call may still
+/// send its own hangup and reconnect request (`held_call_plan`), at most
+/// `HELD_CALL_SIGNALS` of them. Memory only: after a restart nothing is kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeldCall {
+    node_id: String,
+    peer: String,
+    call_id: String,
+    stops: u64,
+    signals: u8,
+}
+
+#[derive(Debug, Default)]
+struct HeldCalls {
+    entries: Vec<HeldCall>,
+}
+
+/// Calls kept at once; the oldest goes first.
+const HELD_CALLS_KEPT: usize = 16;
+/// Signals one call may send on its own authority after the approval ran
+/// out: its reconnect request and its hangup, each once more should the first
+/// be refused before payment.
+const HELD_CALL_SIGNALS: u8 = 4;
+
+impl HeldCalls {
+    /// Keep a call. A call already kept stays as it was.
+    fn keep(&mut self, node_id: &str, peer: &str, call_id: &str, stops: u64) {
+        if self.entries.iter().any(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id) { return; }
+        if self.entries.len() >= HELD_CALLS_KEPT { self.entries.remove(0); }
+        self.entries.push(HeldCall { node_id: node_id.into(), peer: peer.into(), call_id: call_id.into(), stops, signals: 0 });
+    }
+
+    /// The kept call may send one more signal: it began under `stops`, which
+    /// is still current, and has signals left.
+    fn can_send(&self, node_id: &str, peer: &str, call_id: &str, stops: u64) -> bool {
+        self.entries.iter().any(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id
+            && c.stops == stops && c.signals < HELD_CALL_SIGNALS)
+    }
+
+    /// `can_send`, and count the signal.
+    fn take(&mut self, node_id: &str, peer: &str, call_id: &str, stops: u64) -> bool {
+        let Some(c) = self.entries.iter_mut().find(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id
+            && c.stops == stops && c.signals < HELD_CALL_SIGNALS) else { return false };
+        c.signals += 1;
+        true
+    }
+}
+
 /// The owner asked for these while an elevation request is pending.
 /// A contact's signed re-admission quote shown to the owner. A send of exactly
 /// its total to exactly that contact, before it expires, is the owner's OK for
@@ -533,8 +722,11 @@ impl Default for NodeState {
 
 impl NodeState {
     fn for_identifier(identifier: &str) -> Self {
-        let mut state = Self::default();
-        state.remote_only = crate::profile::AppProfile::for_identifier(identifier).remote_only();
+        Self::for_profile(crate::profile::AppProfile::for_identifier(identifier))
+    }
+
+    fn for_profile(profile: crate::profile::AppProfile) -> Self {
+        let state = Self { remote_only: profile.remote_only(), signet_only: profile.signet_only(), ..Self::default() };
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
         #[cfg(all(desktop, not(feature = "mobile")))]
         state.local_startup.store(!state.remote_only, Ordering::SeqCst);
@@ -545,6 +737,87 @@ impl NodeState {
     fn require_local_node(&self) -> Result<(), String> {
         if self.remote_only {
             return Err("BitSov Remote Test is remote pairing only; local nodes are disabled.".into());
+        }
+        Ok(())
+    }
+
+    fn refuse_network(&self, refusal: crate::network_policy::NetworkRefusal) -> String {
+        let mut epoch = self.network_auth_epoch.lock().unwrap();
+        self.refuse_network_at_epoch(&mut epoch, refusal)
+    }
+
+    fn refuse_network_at_epoch(&self, epoch: &mut u64, refusal: crate::network_policy::NetworkRefusal) -> String {
+        *epoch = epoch.wrapping_add(1);
+        *self.network_refusal.lock().unwrap() = refusal;
+        *self.ready.lock().unwrap() = false;
+        *self.token.lock().unwrap() = None;
+        *self.auth.lock().unwrap() = AuthMode::Unauthenticated;
+        drop_grant(self);
+        let error = refusal.message().to_owned();
+        *self.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(PairError::Local(error.clone())));
+        set_error(self, error.clone());
+        error
+    }
+
+    fn reset_network_policy(&self) {
+        let mut epoch = self.network_auth_epoch.lock().unwrap();
+        *epoch = epoch.wrapping_add(1);
+        *self.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    }
+
+    /// Until the network check passes, only the checks themselves may run.
+    fn require_network_authority(&self, method: &reqwest::Method, path: &str) -> Result<(), String> {
+        self.under_network_check(method, path, || ())
+    }
+
+    /// Reads the credential under the lock that replaces it, so a signet-only
+    /// build sends exactly the credential whose network check passed.
+    fn under_network_check<T>(&self, method: &reqwest::Method, path: &str, read: impl FnOnce() -> T) -> Result<T, String> {
+        if !self.signet_only { return Ok(read()); }
+        let epoch = self.network_auth_epoch.lock().unwrap();
+        let check_route = *method == reqwest::Method::GET && NETWORK_CHECK_ROUTES.contains(&path);
+        if !check_route && *self.network_verified.lock().unwrap() != Some(*epoch) {
+            return Err(NETWORK_UNCHECKED.into());
+        }
+        Ok(read())
+    }
+
+    fn checked_token(&self, method: &reqwest::Method, path: &str) -> Result<Option<String>, String> {
+        self.under_network_check(method, path, || self.token.lock().unwrap().clone())
+    }
+
+    /// The credential for an ordinary request, or a refusal before its check.
+    fn ordinary_token(&self) -> Result<Option<String>, String> {
+        self.checked_token(&reqwest::Method::POST, "")
+    }
+
+    fn require_local_peer(&self) -> Result<(), String> {
+        if self.signet_only && !self.remote_mode.load(Ordering::SeqCst)
+            && self.external_node.lock().unwrap().is_none() && !verified_local_node(self)
+        {
+            return Err(self.refuse_network(crate::network_policy::NetworkRefusal::Unknown));
+        }
+        Ok(())
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn require_signet_config(&self, config: &Path) -> Result<(), String> {
+        if !self.signet_only { return Ok(()); }
+        crate::network_policy::check_config(config).map_err(|refusal| self.refuse_network(refusal))
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn init_network_supported(&self) -> bool {
+        #[cfg(all(test, desktop, not(feature = "mobile")))]
+        if let Some(supported) = *self.test_init_network_support.lock().unwrap() { return supported; }
+        local_owner::BUNDLED_NODE_SUPPORTS_INIT_NETWORK
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn require_local_setup(&self) -> Result<(), String> {
+        self.require_local_node()?;
+        if self.signet_only && !self.init_network_supported() {
+            return Err(self.refuse_network(crate::network_policy::NetworkRefusal::LocalUnavailable));
         }
         Ok(())
     }
@@ -602,6 +875,10 @@ impl NodeState {
         );
         #[cfg(any(mobile, feature = "mobile"))]
         let (local_owner, owner_warning) = (false, None);
+        #[cfg(all(desktop, not(feature = "mobile")))]
+        let local_setup_needed = self.local_setup_needed.load(Ordering::SeqCst);
+        #[cfg(any(mobile, feature = "mobile"))]
+        let local_setup_needed = false;
         let (unlock_state, pending_device) = home_unlock::locked_view(self);
         Status {
             phone_setup: *self.phone_setup.lock().unwrap(),
@@ -613,7 +890,9 @@ impl NodeState {
             locked: self.home_locked.load(Ordering::SeqCst),
             local_owner,
             owner_warning,
+            local_setup_needed,
             initialization_repair: *self.initialization_repair.lock().unwrap(),
+            network_refusal: *self.network_refusal.lock().unwrap(),
             retry_after_secs,
             // A transport cooldown pauses reads; it does not revoke pairing.
             ready: *self.ready.lock().unwrap(),
@@ -636,6 +915,12 @@ impl NodeState {
         );
         Self {
             remote_only: false,
+            signet_only: false,
+            network_refusal: Mutex::new(crate::network_policy::NetworkRefusal::None),
+            network_auth_epoch: Mutex::new(0),
+            network_verified: Mutex::new(None),
+            #[cfg(all(test, desktop, not(feature = "mobile")))]
+            test_init_network_support: Mutex::new(None),
             api_base: api_base.into(),
             auth: Mutex::new(AuthMode::Unauthenticated),
             pairing: Mutex::new(None),
@@ -659,6 +944,12 @@ impl NodeState {
             remote_connect_generation: tokio::sync::watch::channel(0).0,
             #[cfg(all(desktop, not(feature = "mobile")))]
             local_startup: AtomicBool::new(false),
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            local_setup_needed: AtomicBool::new(false),
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            local_setup_running: AtomicBool::new(false),
+            #[cfg(all(test, desktop, not(feature = "mobile")))]
+            test_sidecar: Mutex::new(None),
             add_device: tokio::sync::Mutex::new(add_device::Setup::default()),
             second_join_complete: AtomicBool::new(false),
             #[cfg(all(desktop, not(feature = "mobile")))]
@@ -679,17 +970,23 @@ impl NodeState {
             device_lifecycle: Mutex::new(()),
             trust_write: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
+            budget_after_pairing: AtomicBool::new(false),
+            elevation_create: tokio::sync::Mutex::new(()),
+            call_limit_seen: Mutex::new(None),
+            budget_ask_marker: Mutex::new(None),
             media: Mutex::new(None),
             #[cfg(feature = "call-seal")]
             call_seal: Mutex::new(None),
             call_consents: Mutex::new(CallConsents::default()),
+            spend_stops: std::sync::atomic::AtomicU64::new(0),
+            held_calls: Mutex::new(HeldCalls::default()),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             readmission_ask: Mutex::new(None),
             budget_io: Mutex::new(()),
             money: tokio::sync::Mutex::new(()),
             ready: Mutex::new(false),
-            node_id: Mutex::new(None),
+            node_id: NodeIdCell::new(),
             error: Mutex::new(None),
             #[cfg(all(desktop, not(feature = "mobile")))]
             child: Mutex::new(None),
@@ -732,7 +1029,10 @@ struct Status {
     locked: bool,
     local_owner: bool,
     owner_warning: Option<String>,
+    /// Nothing was created yet: onboarding asks where BitSov should run.
+    local_setup_needed: bool,
     initialization_repair: InitializationRepair,
+    network_refusal: crate::network_policy::NetworkRefusal,
     retry_after_secs: Option<u64>,
     ready: bool,
     node_id: Option<String>,
@@ -904,13 +1204,36 @@ fn repair_price_floor_files(state: &NodeState, confirmed: bool) -> Result<PathBu
 // ---- node supervision -----------------------------------------------------
 
 /// First run only: `konsensus init` generates identity + config (tier full = fund-your-node).
+/// It creates the recovery phrase and wallet, so startup reaches it only for a
+/// dev node or after the owner chose this Mac (`local_setup_needed`).
 #[cfg(all(desktop, not(feature = "mobile")))]
 async fn init_node(
-    app: &AppHandle,
+    app: &AppHandle<impl tauri::Runtime>,
     data_dir: &Path,
     dev_sidecar: Option<&Path>,
 ) -> Result<(), String> {
-    app.state::<NodeState>().require_local_node()?;
+    let state = app.state::<NodeState>();
+    state.require_local_setup()?;
+    let data_dir = data_dir.to_string_lossy();
+    let mut args = vec!["init", "--dir", &data_dir, "--non-interactive", "--tier", "full"];
+    if state.signet_only { args.extend(["--network", "signet"]); }
+    // Tests run a scripted stand-in; never a real node.
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    let test_sidecar = state.test_sidecar.lock().unwrap().clone();
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    if let Some(program) = test_sidecar {
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let out = tauri::async_runtime::spawn_blocking(move || {
+            std::process::Command::new(program).args(args).output()
+        })
+        .await
+        .map_err(|e| format!("node init could not run: {e}"))?;
+        return match out {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(format!("node init failed (exit {:?})", out.status.code())),
+            Err(e) => Err(format!("node init could not run: {e}")),
+        };
+    }
     let cmd = match dev_sidecar {
         Some(program) => app.shell().command(program),
         None => app
@@ -918,14 +1241,7 @@ async fn init_node(
             .sidecar("konsensus")
             .map_err(|e| format!("cannot resolve node sidecar: {e}"))?,
     };
-    let cmd = cmd.args([
-            "init",
-            "--dir",
-            &data_dir.to_string_lossy(),
-            "--non-interactive",
-            "--tier",
-            "full",
-        ]);
+    let cmd = cmd.args(args);
     match cmd.output().await {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format!(
@@ -935,6 +1251,63 @@ async fn init_node(
         )),
         Err(e) => Err(format!("node init could not run: {e}")),
     }
+}
+
+/// Recorded when the owner chose "set up a node on this Mac" in onboarding.
+/// Holds no key material: only that the choice was made.
+#[cfg(all(desktop, not(feature = "mobile")))]
+const LOCAL_SETUP_CONSENT: &str = "local-node-setup.json";
+
+/// The recorded choice lives in the app's own directory, which node freshness
+/// checks already ignore (`local_owner::may_create_password`), so recording it
+/// never makes a fresh node directory look used.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn local_setup_consent_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(PAIRING_STORE_DIR).join(LOCAL_SETUP_CONSENT)
+}
+
+/// A fresh desktop profile (no node config, no recorded choice) must wait for
+/// the owner: startup then neither runs `init` nor starts a node. An existing
+/// config is an existing install. A dev node is the developer's own choice.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn local_setup_needed(app_data_dir: &Path, config: &Path, dev_node: bool) -> Result<bool, String> {
+    if dev_node || config.try_exists().map_err(|_| "Cannot inspect the node config")? {
+        return Ok(false);
+    }
+    let consent = local_setup_consent_path(app_data_dir);
+    Ok(!consent.try_exists().map_err(|_| "Cannot inspect the local node setup choice")?)
+}
+
+/// A home-node link is live or saved for the next start. Unreadable counts as saved.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn home_link_chosen(state: &NodeState, app_data_dir: &Path) -> bool {
+    state.remote_mode.load(Ordering::SeqCst)
+        || remote_access::load_persisted(app_data_dir).map(|saved| saved.is_some()).unwrap_or(true)
+}
+
+/// Durably record the owner's choice before anything is created.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn record_local_setup_consent(app_data_dir: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let failed = |_| "Could not save your choice; nothing was created.".to_string();
+    let path = local_setup_consent_path(app_data_dir);
+    let dir = path.parent().unwrap_or(app_data_dir).to_path_buf();
+    std::fs::create_dir_all(&dir).map_err(failed)?;
+    let chosen_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let body = serde_json::json!({ "version": 1, "local_node": true, "chosen_at": chosen_at });
+    let temp = dir.join(format!("{LOCAL_SETUP_CONSENT}.tmp"));
+    let mut file = std::fs::File::create(&temp).map_err(failed)?;
+    file.write_all(body.to_string().as_bytes()).map_err(failed)?;
+    file.sync_all().map_err(failed)?;
+    drop(file);
+    std::fs::rename(&temp, &path).map_err(failed)?;
+    if let Ok(handle) = std::fs::File::open(&dir) {
+        let _ = handle.sync_all();
+    }
+    Ok(())
 }
 
 /// Resolve the bundled sidecar exactly as `tauri-plugin-shell` does, so the path is
@@ -972,16 +1345,29 @@ fn sidecar_path(name: &str) -> Result<PathBuf, String> {
 #[cfg(all(desktop, not(feature = "mobile")))]
 fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(), String> {
     let state = app.state::<NodeState>();
+    let local_owner = state.owner.active.load(Ordering::SeqCst);
+    if state.signet_only && local_owner && !config.try_exists().unwrap_or(true) {
+        state.require_local_setup()?;
+    } else {
+        state.require_signet_config(config)?;
+    }
     let dev_sidecar = state.dev_sidecar.lock().unwrap().clone();
     let dev = dev_sidecar.is_some();
     let program = match dev_sidecar {
         Some(program) => program,
         None => sidecar_path(SIDECAR_BIN)?,
     };
-    let local_owner = state.owner.active.load(Ordering::SeqCst);
+    // Tests run a scripted stand-in; never a real node.
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    let program = state.test_sidecar.lock().unwrap().clone().unwrap_or(program);
     let password = if local_owner {
-        Some(local_owner::prepare_launch(config, owner_password::load)?)
+        Some(if state.signet_only {
+            local_owner::prepare_launch_for_network(config, "signet", owner_password::load)?
+        } else {
+            local_owner::prepare_launch(config, owner_password::load)?
+        })
     } else { None };
+    state.require_signet_config(config)?;
     let mut cmd = std::process::Command::new(&program);
     cmd.args(local_owner::start_args(config, dev, local_owner))
         .stdout(std::process::Stdio::piped())
@@ -1367,6 +1753,7 @@ async fn adopt_matching_identity(
     state: &NodeState,
     expected_node_id: &str,
 ) -> Result<bool, String> {
+    state.require_local_peer()?;
     if !health_ok(state).await {
         return Ok(false);
     }
@@ -1376,6 +1763,9 @@ async fn adopt_matching_identity(
         *state.token.lock().unwrap() = None;
         return Ok(false);
     }
+    let network_epoch = require_signet_report(state, false).await?;
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != network_epoch { return Err("The connection changed during its network check.".into()); }
     *state.node_id.lock().unwrap() = Some(live);
     // The restored node is live. Reflect the refreshed token's scopes in the
     // view and leave bootstrap, otherwise the renderer can never finish setup.
@@ -1409,6 +1799,7 @@ async fn restart_node(
     *state.all_in_caps_node.lock().unwrap() = None;
     *state.readmission_ask.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
+    *state.network_verified.lock().unwrap() = None;
 
     if state.stop_for_restart(NODE_SHUTDOWN_BUDGET) {
         for _ in 0..4 {
@@ -1471,8 +1862,9 @@ fn refuse_external(state: &NodeState) -> Result<(), String> {
 /// initialised, started or supervised. App files go under the app's own data dir;
 /// the node's data dir is only read.
 #[cfg(all(desktop, not(feature = "mobile")))]
-async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::ExternalNode) {
+async fn attach_external(app: &AppHandle<impl tauri::Runtime>, app_data_dir: &Path, node: dev_node::ExternalNode) {
     let state = app.state::<NodeState>();
+    if state.require_signet_config(&node.config).is_err() { return; }
     eprintln!(
         "[dev-node] EXTERNAL node on {}, data dir {} (not started or stopped by the app)",
         state.api_base,
@@ -1592,6 +1984,7 @@ async fn attach_remote_with(
     descriptor: remote_access::RemoteDescriptor,
     interaction: Interaction,
 ) {
+    state.reset_network_policy();
     #[cfg(any(mobile, feature = "mobile"))]
     if descriptor.bootstrap_box_key().is_some() && descriptor.node_id().is_empty() {
         *state.pairing_view.lock().unwrap() = PairingView::starting();
@@ -1608,14 +2001,14 @@ async fn attach_remote_with(
         // No passcode: say so as its own kind, so the phone can open Settings.
         Err(error) if error.to_string() == remote_access::PASSCODE_REQUIRED => {
             state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
-            return set_error(&state, error.to_string());
+            return set_error(state, error.to_string());
         }
         // A background attempt leaves any earlier, more specific error in place.
         Err(_) if interaction == Interaction::Background => {
             if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }
             return;
         }
-        Err(error) => return set_error(&state, error.to_string()),
+        Err(error) => return set_error(state, error.to_string()),
     };
     let ctx = Arc::new(PairingCtx {
         client: PairingClient::new(state.http.clone(), state.api_base.clone()),
@@ -1693,21 +2086,48 @@ async fn attach_remote_with(
 /// wait for /health, pair (or fall back to /auth/local on rc7), and read /identity.
 #[cfg(all(desktop, not(feature = "mobile"), not(unix)))]
 async fn bootstrap_node(app: AppHandle) {
-    set_error(&app.state::<NodeState>(), "BitSov is not supported on this platform");
+    let state = app.state::<NodeState>();
+    if state.signet_only {
+        let dir = match app.path().app_data_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                state.local_startup.store(false, Ordering::SeqCst);
+                return set_error(&state, format!("no app data dir: {error}"));
+            }
+        };
+        if let Err(error) = bootstrap_remote_desktop_at(&state, &dir).await { set_error(&state, error); }
+        return;
+    }
+    set_error(&state, "BitSov is not supported on this platform");
+}
+
+#[cfg(all(desktop, not(feature = "mobile"), any(not(unix), test)))]
+async fn bootstrap_remote_desktop_at(state: &NodeState, dir: &Path) -> Result<(), String> {
+    let _startup = StartupFinished(&state.local_startup);
+    connect_remote_at(state, dir, true).await?;
+    if !state.remote_only && state.remote_proxy.lock().unwrap().is_none() {
+        return Err(state.refuse_network(crate::network_policy::NetworkRefusal::LocalUnavailable));
+    }
+    Ok(())
 }
 
 #[cfg(all(desktop, not(feature = "mobile"), unix))]
 async fn bootstrap_node(app: AppHandle) {
-    let state = app.state::<NodeState>();
-    struct StartupFinished<'a>(&'a AtomicBool);
-    impl Drop for StartupFinished<'_> {
-        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
-    }
-    let _startup = StartupFinished(&state.local_startup);
     let app_data_dir: PathBuf = match app.path().app_data_dir() {
         Ok(d) => d,
-        Err(e) => return set_error(&state, format!("no app data dir: {e}")),
+        Err(e) => {
+            let state = app.state::<NodeState>();
+            state.local_startup.store(false, Ordering::SeqCst);
+            return set_error(&state, format!("no app data dir: {e}"));
+        }
     };
+    bootstrap_node_at(&app, app_data_dir).await
+}
+
+#[cfg(all(desktop, not(feature = "mobile"), unix))]
+async fn bootstrap_node_at(app: &AppHandle<impl tauri::Runtime>, app_data_dir: PathBuf) {
+    let state = app.state::<NodeState>();
+    let _startup = StartupFinished(&state.local_startup);
     match remote_access::load_persisted(&app_data_dir) {
         Ok(Some(_)) => {
             if let Err(error) = connect_remote_at(&state, &app_data_dir, true).await {
@@ -1728,12 +2148,12 @@ async fn bootstrap_node(app: AppHandle) {
     }
     // Release builds: always `Ok(None)` (see `dev_node`).
     match dev_node::resolve_external(&app_data_dir) {
-        Ok(Some(node)) => return attach_external(&app, &app_data_dir, node).await,
+        Ok(Some(node)) => return attach_external(app, &app_data_dir, node).await,
         Ok(None) => {}
         Err(e) => return set_error(&state, format!("external node: {e}")),
     }
     let (data_dir, dev_sidecar) = match dev_node::resolve(&app_data_dir) {
-        Ok(None) => (app_data_dir, None),
+        Ok(None) => (app_data_dir.clone(), None),
         Ok(Some(dev)) => {
             eprintln!(
                 "[dev-node] UNVERIFIED node binary {} on data dir {} (dev only, sidecar verification bypassed)",
@@ -1747,32 +2167,99 @@ async fn bootstrap_node(app: AppHandle) {
         }
         Err(e) => return set_error(&state, format!("dev node: {e}")),
     };
+    start_local_node(app, &app_data_dir, &data_dir, dev_sidecar, false).await
+}
+
+/// Clears `local_startup` on every exit from a local startup attempt.
+#[cfg(all(desktop, not(feature = "mobile")))]
+struct StartupFinished<'a>(&'a AtomicBool);
+#[cfg(all(desktop, not(feature = "mobile")))]
+impl Drop for StartupFinished<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+}
+
+/// The local node: init on first run, then start, health and pairing.
+/// `chosen` is true only from `node_setup_local`, after the owner's explicit
+/// choice was recorded. Without it a fresh profile stops before anything is
+/// created and reports `local_setup_needed` for onboarding to show.
+#[cfg(all(desktop, not(feature = "mobile"), unix))]
+async fn start_local_node(
+    app: &AppHandle<impl tauri::Runtime>,
+    app_data_dir: &Path,
+    data_dir: &Path,
+    dev_sidecar: Option<PathBuf>,
+    chosen: bool,
+) {
+    let state = app.state::<NodeState>();
     *state.dev_sidecar.lock().unwrap() = dev_sidecar.clone();
-    let _ = std::fs::create_dir_all(&data_dir);
     let config = data_dir.join("konsensus.toml");
+    if !config.try_exists().unwrap_or(true) && state.require_local_setup().is_err() { return; }
+    if !chosen {
+        match local_setup_needed(app_data_dir, &config, dev_sidecar.is_some()) {
+            Ok(false) => {}
+            Ok(true) => {
+                // Serialized with home-node link import: never offer this Mac
+                // once a home-node link was saved.
+                let _change = state.remote_change.lock().await;
+                if !home_link_chosen(&state, app_data_dir) {
+                    state.local_setup_needed.store(true, Ordering::SeqCst);
+                }
+                return;
+            }
+            Err(error) => return set_error(&state, error),
+        }
+    }
+    // First initialization (no config yet), explicit or resumed after a recorded
+    // choice: claim it against a home-node link under `remote_change`, so a link
+    // cannot be saved while this Mac's first node is being created.
+    let first_init = !config.try_exists().unwrap_or(false);
+    if first_init {
+        let _change = state.remote_change.lock().await;
+        if home_link_chosen(&state, app_data_dir) {
+            state.local_setup_running.store(false, Ordering::SeqCst);
+            return set_error(&state, "BitSov is set to use your node at home. Forget that link first.");
+        }
+        state.local_setup_running.store(true, Ordering::SeqCst);
+    }
+    run_local_node(app, &state, data_dir, &config, dev_sidecar).await;
+    if first_init {
+        let _change = state.remote_change.lock().await;
+        state.local_setup_running.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(all(desktop, not(feature = "mobile"), unix))]
+async fn run_local_node(
+    app: &AppHandle<impl tauri::Runtime>,
+    state: &NodeState,
+    data_dir: &Path,
+    config: &Path,
+    dev_sidecar: Option<PathBuf>,
+) {
+    let _ = std::fs::create_dir_all(data_dir);
 
     let owner_enabled = match local_owner::launch_enabled(
-        local_owner::enabled(dev_sidecar.is_some()), &config,
+        local_owner::enabled(dev_sidecar.is_some()), config,
     ) {
         Ok(enabled) => enabled,
-        Err(error) => return set_error(&state, error),
+        Err(error) => return set_error(state, error),
     };
     state.owner.active.store(owner_enabled, Ordering::SeqCst);
     if !owner_enabled && !config.exists() {
-        if let Err(e) = init_node(&app, &data_dir, dev_sidecar.as_deref()).await {
-            return set_error(&state, e);
+        if let Err(e) = init_node(app, data_dir, dev_sidecar.as_deref()).await {
+            return set_error(state, e);
         }
     }
 
-    *state.config.lock().unwrap() = Some(config.clone());
+    *state.config.lock().unwrap() = Some(config.to_path_buf());
 
-    if let Err(e) = spawn_node(&app, &config) {
-        return set_error(&state, e);
+    if let Err(e) = spawn_node(app, config) {
+        return set_error(state, e);
     }
-    if let Err(e) = wait_for_health(&state).await {
-        return set_error(&state, e);
+    if let Err(e) = wait_for_health(state).await {
+        return set_error(state, e);
     }
-    finish_auth(&state, &data_dir).await;
+    finish_auth(state, data_dir).await;
 }
 
 /// A phone is a pure client: startup either attaches to the persisted, pinned
@@ -1799,15 +2286,22 @@ async fn prepare_operation_history(data_dir: &Path) -> Result<(), ActionError> {
 /// Pair, then read /identity. A pairing failure stays in the pairing view (the
 /// onboarding screen shows it with a retry); it is not a node-start error.
 async fn finish_auth(state: &NodeState, data_dir: &Path) {
+    if state.signet_only { *state.ready.lock().unwrap() = false; }
+    if state.require_local_peer().is_err() { return; }
     if let Err(error) = prepare_operation_history(data_dir).await {
         return set_error(state, error.message);
     }
     if authenticate(state, data_dir).await.is_err() {
         return;
     }
+    let credential_epoch = *state.network_auth_epoch.lock().unwrap();
     // The signed descriptor pins identity; provisional tokens can only enroll.
     // No identity/status probe or normal authority is granted before approval.
     if add_device::is_second_join(state) {
+        if state.signet_only {
+            state.refuse_network(crate::network_policy::NetworkRefusal::Unknown);
+            return;
+        }
         *state.node_id.lock().unwrap() = state.expected_remote_node_id.lock().unwrap().clone();
         *state.ready.lock().unwrap() = true;
         *state.error.lock().unwrap() = None;
@@ -1816,6 +2310,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     // An identity-free node has no live /identity route. Keep it paired so
     // the user can restore through the bootstrap router.
     if state.pairing_view.lock().unwrap().bootstrap.is_some() {
+        let _ = require_signet_report(state, true).await;
         return;
     }
     match fetch_node_id(state).await {
@@ -1838,6 +2333,13 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                     "remote node identity does not match the signed pairing descriptor",
                 );
             }
+            let network_epoch = match require_signet_report_for(state, false, credential_epoch).await {
+                Ok(epoch) => epoch,
+                Err(_) => return,
+            };
+            {
+            let authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return; }
             if let Err(error) = home_unlock::remember_binding(state, &node_id) {
                 *state.token.lock().unwrap() = None;
                 *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
@@ -1850,6 +2352,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
             *state.node_id.lock().unwrap() = Some(node_id.clone());
             *state.error.lock().unwrap() = None;
             *state.ready.lock().unwrap() = true;
+            }
             #[cfg(all(desktop, not(feature = "mobile")))]
             if state.owner.active.load(Ordering::SeqCst) {
                 let warning = match local_owner::verify_device(state).await {
@@ -1861,6 +2364,65 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
         }
         Err(e) => set_error(state, e),
     }
+}
+
+/// The reads that identify a node and report its network. They are the only
+/// requests a signet-only build sends before that report is checked.
+const NETWORK_CHECK_ROUTES: [&str; 3] = ["/identity", "/status", "/bootstrap/state"];
+const NETWORK_UNCHECKED: &str = "The node's network is not checked yet. Nothing was sent.";
+
+/// Called under the network authority as a new credential is published: no
+/// report or identity read taken for an earlier credential can approve it.
+fn new_credential_epoch(state: &NodeState, authority: &mut u64) {
+    if state.signet_only { *authority = authority.wrapping_add(1); }
+}
+
+async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64, String> {
+    let epoch = *state.network_auth_epoch.lock().unwrap();
+    require_signet_report_for(state, bootstrap, epoch).await
+}
+
+/// The report approves only the credential of `epoch`. A credential published
+/// after it waits for its own identity and network checks.
+async fn require_signet_report_for(state: &NodeState, bootstrap: bool, epoch: u64) -> Result<u64, String> {
+    if !state.signet_only { return Ok(*state.network_auth_epoch.lock().unwrap()); }
+    let report = if bootstrap {
+        get_json::<serde_json::Value>(state, "/bootstrap/state").await
+            .map(|value| value.get("network").and_then(|v| v.as_str()).map(str::to_owned))
+    } else {
+        read_node_overview(state).await.map(|overview| overview.network)
+    };
+    let result = report.map_err(|_| crate::network_policy::NetworkRefusal::Unknown)
+        .and_then(|network| crate::network_policy::NetworkRefusal::reported(network.as_deref()));
+    if let Err(refusal) = result { return Err(state.refuse_network(refusal)); }
+    if cfg!(test) { pause_points::at(&state.api_base, "before_report_accept").await; }
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != epoch { return Err("The connection changed during its network check.".into()); }
+    *state.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    *state.network_verified.lock().unwrap() = Some(epoch);
+    Ok(epoch)
+}
+
+// Candidate checks use the supplied credential without refreshing or retrying.
+async fn require_signet_candidate_report(state: &NodeState, token: &str) -> Result<(), crate::network_policy::NetworkRefusal> {
+    if !state.signet_only { return Ok(()); }
+    let report = async {
+        state.http.get(format!("{}/status", state.api_base))
+            .bearer_auth(token)
+            .timeout(Duration::from_secs(5))
+            .send().await?.error_for_status()?
+            .json::<control::NodeStatusResponse>().await
+    }.await.map_err(|_| crate::network_policy::NetworkRefusal::Unknown)?;
+    let network = control::NodeOverview::from_status(report, now_ms()).network;
+    crate::network_policy::NetworkRefusal::reported(network.as_deref())
+}
+
+// The caller holds the current connection and epoch through publication.
+fn accept_signet_candidate_report(state: &NodeState, epoch: &mut u64, report: Result<(), crate::network_policy::NetworkRefusal>) -> Result<(), String> {
+    if !state.signet_only { return Ok(()); }
+    report.map_err(|refusal| state.refuse_network_at_epoch(epoch, refusal))?;
+    *state.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    Ok(())
 }
 
 /// Retry transport outages without restarting the proxy or discarding durable
@@ -1965,14 +2527,15 @@ async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool,
                 };
                 state.phone_setup.lock().unwrap().get_or_insert_with(|| saved.as_ref().is_none_or(|d|
                     d.pending_phone_enrollment()));
-                match saved {
-                    Some(descriptor) => attach_remote_with(state, app_data_dir, descriptor, interaction).await,
-                    None => {
-                        #[cfg(any(mobile, feature = "mobile"))]
-                        {
-                            *state.pairing_view.lock().unwrap() = PairingView::starting();
-                            set_error(state, "Pair this phone with your home node to continue.");
-                        }
+                if let Some(descriptor) = saved {
+                    // Every startup with a saved link (desktop, phone, any OS) picks up an ask left due.
+                    restore_budget_ask(state, app_data_dir);
+                    attach_remote_with(state, app_data_dir, descriptor, interaction).await
+                } else {
+                    #[cfg(any(mobile, feature = "mobile"))]
+                    {
+                        *state.pairing_view.lock().unwrap() = PairingView::starting();
+                        set_error(state, "Pair this phone with your home node to continue.");
                     }
                 }
             } else if !wait || !*state.ready.lock().unwrap() {
@@ -2085,6 +2648,7 @@ fn check_first_run_session(state: &NodeState, session: &PairedSession) -> Result
 /// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
 /// is 404 — mint via `/auth/local`. Records the outcome in the pairing view.
 async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> {
+    let network_epoch = *state.network_auth_epoch.lock().unwrap();
     let established_remote = state.remote_mode.load(Ordering::SeqCst)
         && matches!(*state.auth.lock().unwrap(), AuthMode::Paired(_));
     // Keep a warm session usable while reauthenticating. A transport failure is
@@ -2114,16 +2678,25 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
     match outcome {
         Ok(Established::Paired { session, .. }) => {
             check_first_run_session(state, &session)?;
-            *state.token.lock().unwrap() = Some(session.token.clone());
-            *state.auth.lock().unwrap() = AuthMode::Paired(session);
             let ctx = state.pairing.lock().unwrap().clone();
             if let Some(ctx) = ctx {
                 view.bootstrap = pairing::bootstrap_state(&ctx.client).await.ok().flatten();
             }
+            let mut authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            // A new credential is checked again before ordinary requests.
+            new_credential_epoch(state, &mut authority);
+            *state.network_verified.lock().unwrap() = None;
+            *state.token.lock().unwrap() = Some(session.token.clone());
+            *state.auth.lock().unwrap() = AuthMode::Paired(session);
             *state.pairing_view.lock().unwrap() = view;
             Ok(())
         }
         Ok(Established::LocalFallback { token }) => {
+            let mut authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            new_credential_epoch(state, &mut authority);
+            *state.network_verified.lock().unwrap() = None;
             *state.token.lock().unwrap() = Some(token);
             *state.auth.lock().unwrap() = AuthMode::Local;
             *state.pairing_view.lock().unwrap() = view;
@@ -2163,6 +2736,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
 
 /// Mint a fresh paired token and install it. No fallback on failure.
 async fn refresh_paired(state: &NodeState) -> Result<(), String> {
+    let network_epoch = *state.network_auth_epoch.lock().unwrap();
     if hold_refused(state) {
         return Err(remote_access::RemoteError::Refused(remote_access::REFUSED_PAIRING_MESSAGE.into()).to_string());
     }
@@ -2185,10 +2759,22 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
     } else {
         pairing::refresh(&mut session, &ctx.client, &ctx.key).await
     };
+    let network_report = if state.signet_only && result.is_ok() {
+        {
+            let current = state.remote_connect_generation.borrow();
+            if *current != generation { return Err("the remote connection changed".into()); }
+            let authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            check_first_run_session(state, &session)?;
+        }
+        require_signet_candidate_report(state, &session.token).await
+    } else { Ok(()) };
     // A buffered old-node reply cannot restore credentials after replacement
     // or Forget. Keep this guard through publication so invalidation is atomic.
     let current = state.remote_connect_generation.borrow();
     if *current != generation { return Err("the remote connection changed".into()); }
+    let mut authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
     if let Err(error) = result {
         let message = error.to_string();
         if !remote && matches!(error, PairError::Refused { step: "/pair/challenge", status: 401, .. }) {
@@ -2210,6 +2796,7 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
         return Err(message);
     }
     check_first_run_session(state, &session)?;
+    accept_signet_candidate_report(state, &mut authority, network_report)?;
     *state.token.lock().unwrap() = Some(session.token.clone());
     *state.auth.lock().unwrap() = AuthMode::Paired(session);
     let node = state.node_id.lock().unwrap().clone();
@@ -2277,6 +2864,8 @@ async fn reauthenticate(state: &NodeState) -> Result<(), String> {
 /// POST /auth/local (loopback, no signature) -> JWT, stored in the host state.
 /// Reached only on a node without pairing routes (rc7); see `authenticate`.
 async fn mint_token(state: &NodeState) -> Result<(), String> {
+    let network_epoch = *state.network_auth_epoch.lock().unwrap();
+    let generation = state.signet_only.then(|| *state.remote_connect_generation.borrow());
     let token = state
         .http
         .post(format!("{}/auth/local", state.api_base))
@@ -2291,6 +2880,16 @@ async fn mint_token(state: &NodeState) -> Result<(), String> {
         .and_then(|t| t.as_str())
         .map(str::to_owned)
         .ok_or_else(|| "auth/local returned no token".to_string())?;
+    let network_report = if state.signet_only {
+        require_signet_candidate_report(state, &token).await
+    } else { Ok(()) };
+    let current = generation.map(|_| state.remote_connect_generation.borrow());
+    if current.as_ref().is_some_and(|current| Some(**current) != generation) {
+        return Err("the remote connection changed".into());
+    }
+    let mut authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+    accept_signet_candidate_report(state, &mut authority, network_report)?;
     *state.token.lock().unwrap() = Some(token);
     Ok(())
 }
@@ -2321,21 +2920,40 @@ async fn call_api(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<(reqwest::StatusCode, String), String> {
+    call_api_on(state, None, method, path, body).await
+}
+
+/// `call_api`, for a read that only `bound`'s node may answer. Each step that
+/// could cross to another node is checked: before the token is refreshed, before
+/// each request goes out, when the answer arrives (a refusal of the token
+/// included, so no new token is asked for and nothing is retried on another
+/// node) and once the answer is read.
+async fn call_api_on(
+    state: &NodeState,
+    bound: Option<&NodeBound>,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<(reqwest::StatusCode, String), String> {
     // This channel holds the app's delegated (or legacy loopback) credential,
     // never independent owner authority. Do not send it to an owner-only route,
     // including after a refresh or an elevation to budget-scoped spend.
     if path == "/pair/first-contact-grant" {
         return Err("First-contact approval requires independent owner authority at the node. This app cannot issue it with its paired spend grant.".into());
     }
+    state.require_network_authority(&method, path)?;
+    let route = path.split('?').next().unwrap_or(path);
+    let still = || bound.is_none_or(|bound| bound.holds(state));
+    let changed = || bound.map(|bound| bound.refusal(route)).unwrap_or_default();
+    if !still() { return Err(changed()); }
     ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
+        if !still() { return Err(changed()); }
         let token = state
-            .token
-            .lock()
-            .unwrap()
-            .clone()
+            .checked_token(&method, path)?
             .ok_or_else(|| "the node is not authenticated yet".to_string())?;
+        if cfg!(test) { pause_points::at(&state.api_base, "after_network_check").await; }
         let mut request = state
             .http
             .request(method.clone(), format!("{}{path}", state.api_base))
@@ -2343,10 +2961,15 @@ async fn call_api(
         if let Some(ref json) = body {
             request = request.json(json);
         }
+        // Taking the credential can block. Check the binding and its deadline again
+        // after that, with nothing awaited between this check and the send, so a read
+        // that waited never reaches a node it no longer belongs to, or arrives late.
+        if !still() { return Err(changed()); }
         let response = request
             .send()
             .await
             .map_err(|e| format!("{path} request failed: {e}"))?;
+        if !still() { return Err(changed()); }
         let status = response.status();
 
         // A token is good for 24h and the app may outlive it; refresh once.
@@ -2360,6 +2983,7 @@ async fn call_api(
             .text()
             .await
             .map_err(|e| format!("{path} response read failed: {e}"))?;
+        if !still() { return Err(changed()); }
         return Ok((status, text));
     }
 }
@@ -2823,6 +3447,96 @@ async fn node_repair_initialized(
     start_after_repair(&app, state.inner(), &config).await
 }
 
+/// The owner chose to run a new node on this Mac. The only path that creates a
+/// local node (recovery phrase and wallet) on a fresh profile: it records the
+/// choice, then runs the usual first-run init and start.
+#[tauri::command]
+#[cfg(all(desktop, not(feature = "mobile")))]
+async fn node_setup_local(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    confirmed: bool,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let app_data_dir = app.path().app_data_dir().map_err(|e| format!("no app data dir: {e}"))?;
+    node_setup_local_at(&app, state.inner(), &app_data_dir, confirmed).await
+}
+
+#[cfg(all(desktop, not(feature = "mobile")))]
+async fn node_setup_local_at(
+    app: &AppHandle<impl tauri::Runtime>,
+    state: &NodeState,
+    app_data_dir: &Path,
+    confirmed: bool,
+) -> Result<(), String> {
+    if !confirmed {
+        return Err("Setting up a node on this Mac requires your explicit agreement.".into());
+    }
+    state.require_local_setup()?;
+    {
+        // Serialized with remote link changes: a saved or live remote node wins.
+        let _change = state.remote_change.lock().await;
+        if state.remote_mode.load(Ordering::SeqCst)
+            || remote_access::load_persisted(app_data_dir).map_err(|e| e.to_string())?.is_some()
+        {
+            return Err("BitSov is set to use your node at home. Forget that link first.".into());
+        }
+        if state.local_startup.load(Ordering::SeqCst)
+            || !state.local_setup_needed.load(Ordering::SeqCst)
+        {
+            return Err("BitSov is not waiting for a node choice.".into());
+        }
+        record_local_setup_consent(app_data_dir)?;
+        state.local_startup.store(true, Ordering::SeqCst);
+        state.local_setup_running.store(true, Ordering::SeqCst);
+        state.local_setup_needed.store(false, Ordering::SeqCst);
+        *state.error.lock().unwrap() = None;
+    }
+    #[cfg(unix)]
+    {
+        let _startup = StartupFinished(&state.local_startup);
+        start_local_node(app, app_data_dir, app_data_dir, None, true).await;
+        let error = state.error.lock().unwrap().clone();
+        // Settle completion under `remote_change`, so a home-node link import
+        // cannot interleave with re-offering this Mac.
+        let _change = state.remote_change.lock().await;
+        state.local_setup_running.store(false, Ordering::SeqCst);
+        match error {
+            Some(error) => {
+                // Setup failed before a node config existed on disk (the owner
+                // path fills `state.config` before it spawns), and no home-node
+                // link was saved meanwhile: the same choice can be retried.
+                if !app_data_dir.join("konsensus.toml").try_exists().unwrap_or(true)
+                    && !home_link_chosen(state, app_data_dir)
+                {
+                    state.local_setup_needed.store(true, Ordering::SeqCst);
+                }
+                Err(error)
+            }
+            None => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = app;
+        state.local_startup.store(false, Ordering::SeqCst);
+        Err("BitSov is not supported on this platform".into())
+    }
+}
+
+#[cfg(any(mobile, feature = "mobile"))]
+#[tauri::command]
+async fn node_setup_local(
+    window: WebviewWindow<impl tauri::Runtime>,
+    confirmed: bool,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    let _ = confirmed;
+    Err("A phone connects to your node; it cannot run one.".into())
+}
+
 #[tauri::command]
 #[cfg(all(desktop, not(feature = "mobile")))]
 async fn node_repair_price_floor(
@@ -3020,6 +3734,7 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
         *state.token.lock().unwrap() = None;
         *state.node_id.lock().unwrap() = None;
     });
+    stop_spending(state);
     state.spend.lock().unwrap().lock();
     state.autopay.lock().unwrap().lock();
     *state.wants.lock().unwrap() = Wants::default();
@@ -3032,6 +3747,7 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     *state.front_door_ask.lock().unwrap() = None;
     // Config fallbacks describe the old node; the remint cooldown also gates
     // paired auth. Neither its policy/network nor its cooldown transfers.
+    state.reset_network_policy();
     *state.room_routing_policy.lock().unwrap() = None;
     *state.configured_network.lock().unwrap() = None;
     *state.last_remint.lock().unwrap() = None;
@@ -3054,8 +3770,12 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     // A new link is the owner's action: it may dial even after a refusal.
     state.remote_retry.clear_refusal();
     state.remote_mode.store(true, Ordering::SeqCst);
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    state.local_setup_needed.store(false, Ordering::SeqCst);
     *state.error.lock().unwrap() = None;
     state.remote_retry.clear_connection_error();
+    // The owner's one budget step comes right after this link, not at a call.
+    pairing_imported_at(state, dir);
     // Subscribe while holding remote_change: Forget must invalidate even a
     // spawned task that has not been polled yet.
     spawn_remote_connect(app, dir, true);
@@ -3088,6 +3808,14 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())?;
     #[cfg(any(mobile, feature = "mobile"))]
     let _change = state.remote_change.lock().await;
+    // Serialized with `node_setup_local`: while this Mac's first node is being
+    // set up, saving a home-node link would leave that node behind.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    let _change = state.remote_change.lock().await;
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    if state.local_setup_running.load(Ordering::SeqCst) {
+        return Err("BitSov is setting up a node on this Mac. Wait until it is ready before linking a node at home.".into());
+    }
     // Reject a live trust-boundary switch without cancelling its recovery.
     if state.remote_proxy.lock().unwrap().is_some() {
         return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
@@ -3116,9 +3844,16 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     #[cfg(any(mobile, feature = "mobile"))]
     {
         *state.error.lock().unwrap() = None;
+        pairing_imported_at(state, app_data_dir);
         spawn_remote_connect(_app, app_data_dir, true);
-        return Ok(RemoteImportView { restart_required: false, ..result });
+        Ok(RemoteImportView { restart_required: false, ..result })
     }
+    // The owner chose a node at home: stop offering to create one here.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    state.local_setup_needed.store(false, Ordering::SeqCst);
+    // The saved link is used on the next start: carry the budget ask there.
+    #[cfg(not(any(mobile, feature = "mobile")))]
+    save_budget_ask(app_data_dir);
     #[cfg(not(any(mobile, feature = "mobile")))]
     Ok(result)
 }
@@ -3160,6 +3895,11 @@ async fn remote_access_forget_at(state: &NodeState, app_data_dir: &Path) -> Resu
     state.remote_connect_generation.send_modify(|generation| *generation = generation.wrapping_add(1));
     let _recovery = state.remote_recovery.lock().await;
     remote_access::forget_persisted(app_data_dir).map_err(|error| error.to_string())?;
+    state.budget_after_pairing.store(false, Ordering::SeqCst);
+    *state.budget_ask_marker.lock().unwrap() = None;
+    if let Err(error) = remove_budget_ask(&budget_ask_path(app_data_dir)) {
+        eprintln!("[spend] could not clear the budget ask: {error}");
+    }
     state.remote_retry.clear_refusal();
     // Preserve established connections (Forget still selects the next startup).
     // An unfinished attach, however, must leave no stale remote onboarding state.
@@ -3475,7 +4215,11 @@ fn now_ms() -> u64 {
 }
 
 async fn get_json<T: serde::de::DeserializeOwned>(state: &NodeState, path: &str) -> Result<T, String> {
-    let (status, body) = call_api(state, reqwest::Method::GET, path, None).await?;
+    get_json_on(state, None, path).await
+}
+
+async fn get_json_on<T: serde::de::DeserializeOwned>(state: &NodeState, bound: Option<&NodeBound>, path: &str) -> Result<T, String> {
+    let (status, body) = call_api_on(state, bound, reqwest::Method::GET, path, None).await?;
     // Error text names the route, never the query (which may carry a peer id).
     let route = path.split('?').next().unwrap_or(path);
     decode(route, status, &body)
@@ -3490,7 +4234,7 @@ async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, 
     overview.custody_mode =
         control::custody_mode(overview.custody_mode, verified_local_node(state));
     // Only while the node answering is the LDK node that config started.
-    if !network_reported && overview.lightning_backend.as_deref() == Some("ldk") {
+    if !state.signet_only && !network_reported && overview.lightning_backend.as_deref() == Some("ldk") {
         overview.network = state.configured_network.lock().unwrap().clone();
     }
     Ok(overview)
@@ -4094,13 +4838,6 @@ async fn put_front_door(state: &NodeState, body: serde_json::Value) -> Result<St
     Ok(text)
 }
 
-/// The node's `konsensus.toml` when this app knows it: an attached external
-/// node's, else the one it started. Only ever shown in an owner command.
-fn owner_config(state: &NodeState) -> Option<PathBuf> {
-    let external = state.external_node.lock().unwrap().as_ref().map(|dir| dir.join("konsensus.toml"));
-    external.or_else(|| state.config.lock().unwrap().clone())
-}
-
 /// Whether the node still waits on this request. A request the node reports
 /// over (expired, or lost to a restart) is not reused; an unreadable status
 /// keeps the request, since the owner may be approving it right now.
@@ -4128,7 +4865,7 @@ async fn ask_front_door_owner(state: &NodeState) -> String {
             let ask = serde_json::json!({ "scopes": ["front_door"] });
             match call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await {
                 Ok((code, body)) if code.is_success() => decode_act::<act::ElevationReply>("/pair/elevation-request", &body)
-                    .and_then(|r| r.into_elevation(owner_config(state).as_deref()))
+                    .and_then(|r| r.into_elevation())
                     .map_err(|e| e.message),
                 Ok((code, body)) => Err(api_error("/pair/elevation-request", code, &body)),
                 Err(e) => Err(e),
@@ -4756,7 +5493,7 @@ async fn gated_post_auth(
     if act::is_scope_refusal(status.as_u16()) {
         return Err(ActionError::new(
                 "owner_only",
-                "Your node allows this only from the owner's own terminal, not from a paired app.",
+                "Your box allows this only from its owner, not from a paired app. Ask the person who set it up.",
             ));
     }
     if !status.is_success() {
@@ -4861,6 +5598,12 @@ fn no_pending_spend(state: &NodeState) -> Result<(), ActionError> {
 enum Auth {
     Window(u64),
     Budget(u64),
+    /// A live call's own payment after the owner's approval ran out, on a
+    /// node that keeps the call (`call_continuity_v1`): its next minute,
+    /// drawn on the hold pinned at admission ([`do_call_block`]), or its
+    /// hangup or reconnect request ([`held_call_plan`]). Carries the call's
+    /// `spend_stops` from when it began; any explicit stop since ends it.
+    CallHold(u64),
 }
 
 /// A cooldown is a proven pre-dispatch refusal, before journal or reservation I/O.
@@ -4887,7 +5630,26 @@ fn check_auth(state: &NodeState, auth: Auth) -> Result<(), ActionError> {
     match auth {
         Auth::Window(g) => state.spend.lock().unwrap().check_generation(g, now_ms()),
         Auth::Budget(g) => state.autopay.lock().unwrap().check_generation(g, now_ms()),
+        Auth::CallHold(stops) if spend_stops(state) == stops => Ok(()),
+        Auth::CallHold(_) => Err(ActionError::new("spend_locked", "Sending spends from your node. Approve spending first.")),
     }
+}
+
+fn spend_stops(state: &NodeState) -> u64 {
+    state.spend_stops.load(Ordering::SeqCst)
+}
+
+/// An explicit stop of spending (see `NodeState::spend_stops`).
+fn stop_spending(state: &NodeState) {
+    state.spend_stops.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The node refused this app's token: nothing may spend, held call minutes included.
+fn refuse_spend(state: &NodeState) -> ActionError {
+    stop_spending(state);
+    state.autopay.lock().unwrap().lock();
+    *state.node_grant.lock().unwrap() = None;
+    state.spend.lock().unwrap().refused()
 }
 
 /// A message send's line in the budget ledger.
@@ -4907,6 +5669,9 @@ struct Charge {
     envelope_ids: Option<bool>,
     /// `final_failure_node` of this send's status; None for a send with no operation.
     failure_final_on: Option<String>,
+    /// A node-routed paid offer or a paid answer: the grant read under the
+    /// money lock must also outlast this node's call limit (`call_window_fits`).
+    call_window: bool,
 }
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
@@ -4985,6 +5750,7 @@ fn plan_manual_charge(state: &NodeState, target: &str, max_msat: u64) -> Result<
     Ok(Charge {
         target: target.into(), room: false, confirm: None,
         readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None,
+        call_window: false,
     })
 }
 
@@ -4993,9 +5759,16 @@ fn reserve(state: &NodeState, auth: Auth, charge: &Charge, id: &str, max_msat: u
     let now = now_ms();
     let ceiling = match auth {
         Auth::Budget(_) => state.autopay.lock().unwrap().ceiling(now),
-        Auth::Window(_) => None,
+        Auth::Window(_) | Auth::CallHold(_) => None,
     };
     with_book(state, true, |book| {
+        // Reserve each charge once. An unsettled row under this id is this same
+        // charge from an attempt whose reservation landed but was reported
+        // failed: re-plan without it and hold it once. A settled row with this
+        // id is an earlier identical send and stays.
+        if let Some(i) = book.ledger.iter().rposition(|e| e.id == id && !e.settled) {
+            book.ledger.remove(i);
+        }
         let plan = budget::plan(book, budget::Ask {
             target: &charge.target,
             room: charge.room,
@@ -5123,7 +5896,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
     if cfg!(test) { pause_points::at(&state.api_base, "after_token").await; }
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let token = state.ordinary_token().map_err(|e| ActionError::new("app_not_ready", &e))?
+        .ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     if body["host_expected_node_id"].as_str().is_some_and(|expected| expected != node_id) {
         return act::with_op(Active(body["host_admission_op"].as_str()), Err(ActionError::new(
@@ -5134,6 +5908,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // came while this minute waited here issues nothing.
     if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
         if let Some(refused) = block_consent_refusal(state, &node_id, &body) { return Err(refused); }
+        if cfg!(test) { pause_points::at(&state.api_base, "between_block_checks").await; }
         if minute_past_journaled_hold(state, &journal, &node_id, &body, max_msat)? {
             return Err(ActionError::new(MINUTE_PAST_HOLD, MINUTE_PAST_HOLD_WORDS));
         }
@@ -5222,6 +5997,12 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         check_node_grant_with_envelope_ids(state, path, &body, max_msat,
             charge.as_ref().and_then(|c| c.envelope_ids), cap).await?
     };
+    // A node-routed paid offer or a paid answer must fit inside the grant read
+    // here, under the money lock, before anything is reserved or sent: a grant
+    // replaced by a short one after the earlier checks still refuses it.
+    if charge.as_ref().is_some_and(|c| c.call_window) {
+        if let Some(g) = &node_grant { call_window_fits(state, g.expires_at_ms())?; }
+    }
     let reserve_msat = match (&charge, &node_grant) {
         // A zero cap: the node pays nothing, re-admission included.
         _ if max_msat == 0 => 0,
@@ -5374,9 +6155,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
         abandon(&journal)?;
         release(state)?;
-        state.autopay.lock().unwrap().lock();
-        *state.node_grant.lock().unwrap() = None;
-        return Err(state.spend.lock().unwrap().refused());
+        return Err(refuse_spend(state));
     }
     let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
     if act::readiness_refusal(status.as_u16(), &text) {
@@ -5536,6 +6315,24 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         }
         if let Some(id) = &charged { close_charge(state, id, Some(accounted), pending.target.as_ref())?; }
         return Err(ActionError::undelivered(paid, retry_safe).for_pending(&pending.id));
+    }
+    // A minute only: their node is catching up, and this node's own reply says the
+    // attempt holds no payment. A later try is a new operation.
+    if fresh_attempt && block
+        && operation_id.as_deref().is_some_and(|id| act::peer_not_ready_unpaid(status.as_u16(), &text, id)) {
+        // Release first: the record of the reservation goes only once the book
+        // no longer holds it.
+        release(state)?;
+        abandon(&journal)?;
+        return Err(ActionError::new("peer_not_ready", act::PEER_NOT_READY_MINUTE));
+    }
+    // The node answered this attempt with its own proof that nothing was paid
+    // (a recipient gone offline, no call price): nothing to wait for, no fence.
+    if fresh_attempt && !status.is_success()
+        && operation_id.as_deref().is_some_and(|id| act::released_without_payment(&text, id)) {
+        abandon(&journal)?;
+        release(state)?;
+        return Err(ActionError::new("not_dispatched", act::released_refusal_message(&text)));
     }
     if !status.is_success() {
         if op_error.as_ref().is_some_and(|e| spend_journal::outcome(e.state.as_deref().unwrap_or_default()) == spend_journal::Outcome::PaymentUnknown) {
@@ -5820,7 +6617,8 @@ async fn replay_direct_payment(state: &NodeState, journal: &Journal, pending: &m
     if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
     ensure_fresh_token(state).await;
     if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
-    let token = state.token.lock().unwrap().clone()
+    let token = state.ordinary_token()
+        .map_err(|_| spend_journal::unknown("The node's network is not checked yet. Nothing was dispatched again."))?
         .ok_or_else(|| spend_journal::unknown("The node is not authenticated yet. Nothing was dispatched again."))?;
     // One attempt, no re-authentication loop: a refused sign-in sends nothing.
     let response = state.http.post(format!("{}{}", state.api_base, direct.path))
@@ -6352,11 +7150,13 @@ async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body:
 }
 
 /// The G1 `budget` proposal for an elevation request. Only a suggestion.
-fn budget_proposal(state: &NodeState, want: Want) -> Option<serde_json::Value> {
+fn budget_proposal(state: &NodeState, want: Want, minimum: Option<u64>) -> Option<serde_json::Value> {
     let book = with_book(state, false, |b| Ok(b.clone())).ok()?;
     Some(match want {
         Want::Budget(ceiling) => grant::proposal(ceiling, grant::MAX_TTL_SECS, &book.contacts),
-        Want::Window => grant::proposal(book.ceiling_msat, act::SPEND_WINDOW_MS / 1000, &Default::default()),
+        // A whole day, as the node allows: the app's own ten-minute lock
+        // (`act::SPEND_WINDOW_MS`) still closes payments here by itself.
+        Want::Window => grant::proposal(book.ceiling_msat.max(minimum.unwrap_or(0)), grant::MAX_TTL_SECS, &Default::default()),
     })
 }
 
@@ -6365,6 +7165,30 @@ fn budget_proposal(state: &NodeState, want: Want) -> Option<serde_json::Value> {
 /// or asks the node for one. Without `ask`, only polls a pending request.
 async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, ActionError> {
     Ok(spend_advance_for(state, ask.then_some(Want::Window)).await?.view)
+}
+
+/// A call proposal covers the reservation and signals; an explicit replacement
+/// still needs the node owner's approval.
+async fn do_spend_request(state: &NodeState, budget_msat: Option<u64>, call_peer: Option<&str>) -> Result<act::SpendView, ActionError> {
+    if let Some(amount) = budget_msat {
+        if amount == 0 || amount > budget::MAX_DAILY_MSAT {
+            return Err(ActionError::invalid("the requested budget must be positive and within the app total limit"));
+        }
+        if !matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+            return Err(ActionError::invalid("this node does not support a replacement budget request"));
+        }
+        return Ok(spend_advance_with_proposal(state, Some(Want::Window), Some(amount), None).await?.view);
+    }
+    let Some(peer) = call_peer else { return spend_advance(state, true).await };
+    refuse_if_paused(state)?;
+    let fence = approval_fence(state);
+    let quote = read_call_quote_with_blocks(state, peer).await.map_err(ActionError::node)?;
+    if approval_fence(state) != fence { return Err(fence_broken()); }
+    let minimum = quote.reservation_max_msat.zip(quote.call_total_msat)
+        .and_then(|(hold, signals)| hold.checked_add(signals))
+        .filter(|total| *total <= control::MAX_SAFE_MSAT)
+        .ok_or_else(|| ActionError::new("call_price_unknown", "The call price is unavailable. Read it again before requesting a call budget."))?;
+    Ok(spend_advance_with_proposal(state, Some(Want::Window), None, Some(minimum)).await?.view)
 }
 
 /// Separate the current view from the window this invocation actually armed.
@@ -6377,6 +7201,10 @@ struct SpendAdvance {
 /// approval. On a paired node without `spend`, both go through one elevation
 /// request, and a grant opens only what was asked.
 async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<SpendAdvance, ActionError> {
+    spend_advance_with_proposal(state, want, None, None).await
+}
+
+async fn spend_advance_with_proposal(state: &NodeState, want: Option<Want>, budget_msat: Option<u64>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
     // The shell polls spend before budget at startup. Read current authority
     // before a saved request changes the pristine approval generations. The
     // request may already have been granted, with a much longer grant expiry.
@@ -6386,7 +7214,7 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<Spen
         do_budget_status(state).await?;
     }
     restore_spend_pending(state);
-    let out = spend_advance_for_inner(state, want).await;
+    let out = spend_advance_for_inner(state, want, budget_msat, minimum).await;
     save_spend_pending(state);
     out
 }
@@ -6415,21 +7243,21 @@ fn restore_spend_pending(state: &NodeState) {
     if state.approvals_restored.swap(true, Ordering::SeqCst) {
         return;
     }
-    // The node's current grant supersedes a saved elevation request. Do not
-    // restore stale pending state over the budget just reconciled from it.
-    if state.node_grant.lock().unwrap().as_ref().is_some_and(|g| g.live(now_ms())) {
-        return;
-    }
     let Some(path) = approvals_file(state) else { return };
     let Some(saved) = device::load_pending(&path, now_ms()) else { return };
+    // A grant completes only its own request. A distinct saved replacement
+    // still needs polling even while an older grant remains live.
+    if state.node_grant.lock().unwrap().as_ref()
+        .is_some_and(|g| g.live(now_ms()) && g.op_id == saved.op_id) {
+        return;
+    }
     let mut gate = state.spend.lock().unwrap();
-    let view = gate.view(now_ms());
-    if view.pending.is_none() && view.open_until_ms.is_none() {
-        gate.set_pending(saved);
+    if gate.pending().is_none() {
+        gate.set_replacement_pending(saved, now_ms());
     }
 }
 
-async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Result<SpendAdvance, ActionError> {
+async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, budget_msat: Option<u64>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
     if want.is_some() && budget_paused(state)? {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them first."));
     }
@@ -6453,6 +7281,18 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
             spend: session.scopes.iter().any(|s| s == "spend"),
         },
     };
+    if let Some(amount) = budget_msat {
+        if !node_has_g1(state).await? {
+            return Err(ActionError::invalid("this node does not support a replacement budget request"));
+        }
+        // Recheck before posting: a completed grant can arrive before the
+        // renderer dismisses the form. Returning the view opens no authority.
+        let current = read_grant(state).await?;
+        if approval_fence(state) != fence { return Err(fence_broken()); }
+        if current.as_ref().is_some_and(|g| g.live(now_ms()) && g.remaining_msat >= amount) {
+            return Ok(SpendAdvance { view: state.spend.lock().unwrap().view(now_ms()), armed_granted_op: None });
+        }
+    }
     // A token that already claims `spend` opens only over a live G1 grant; with
     // none left on the node, ask again as if it had no `spend`.
     let mut held: Option<NodeGrant> = None;
@@ -6463,6 +7303,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
         // approval. Finish the pending request, including its original wants,
         // regardless of token scope.
         (Mode::Paired { .. }, _) if pending => Mode::Paired { spend: false },
+        (Mode::Paired { .. }, Some(_)) if budget_msat.is_some() => Mode::Paired { spend: false },
         (Mode::Paired { spend: true }, Some(_)) => match grant_for_open(state).await {
             Ok(g) => {
                 held = g;
@@ -6492,6 +7333,9 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                 (gate.generation(), gate.pending().cloned())
             };
             let budget_generation = state.autopay.lock().unwrap().generation();
+            if budget_msat.is_some() && (generation, budget_generation) != fence {
+                return Err(fence_broken());
+            }
             if let Some(want) = want {
                 let mut wants = state.wants.lock().unwrap();
                 // A new request carries only this ask; a pending one gathers them.
@@ -6529,6 +7373,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                         let wants = std::mem::take(&mut *state.wants.lock().unwrap());
                         let node = match node {
                             None => {
+                                stop_spending(state);
                                 state.autopay.lock().unwrap().lock();
                                 return Err(gate.refused());
                             }
@@ -6579,25 +7424,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                     },
                 }
             } else if let Some(want) = want {
-                let mut ask = serde_json::json!({ "scopes": ["spend"] });
-                // A G1 node shows the owner a budget to approve; the owner's
-                // flags override it. Older nodes get the pre-G1 body.
-                if node_has_g1(state).await.unwrap_or(false) {
-                    if let Some(budget) = budget_proposal(state, want) {
-                        ask["budget"] = budget;
-                    }
-                }
-                let (status, body) = call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await?;
-                if !status.is_success() {
-                    return Err(ActionError::node(api_error("/pair/elevation-request", status, &body)));
-                }
-                let reply: act::ElevationReply = decode_act("/pair/elevation-request", &body)?;
-                let pending = reply.into_elevation(owner_config(state).as_deref())?;
-                request_id = Some(pending.op_id.clone());
-                let mut gate = state.spend.lock().unwrap();
-                if gate.generation() == generation && pending.expires_at_ms > now_ms() {
-                    gate.set_pending(pending);
-                }
+                request_id = post_elevation_request(state, want, budget_msat, minimum, generation).await?;
             }
         }
     }
@@ -6605,6 +7432,54 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
         view: act::SpendView { request_id, ..state.spend.lock().unwrap().view(now_ms()) },
         armed_granted_op,
     })
+}
+
+/// Ask the node for spend (`POST /pair/elevation-request`) and remember the
+/// pending request when the window's generation is still `generation`.
+/// Returns the node's request id. Never obtains anything by itself.
+async fn post_elevation_request(state: &NodeState, want: Want, budget_msat: Option<u64>, minimum: Option<u64>, generation: u64) -> Result<Option<String>, ActionError> {
+    // One request at a time, shared with the automatic pairing ask; a request
+    // that appeared meanwhile is followed, not repeated (a replacement still asks).
+    let _create = state.elevation_create.lock().await;
+    if budget_msat.is_none() {
+        let live = state.spend.lock().unwrap().pending()
+            .filter(|p| p.expires_at_ms > now_ms()).map(|p| p.op_id.clone());
+        if let Some(op_id) = live {
+            return Ok(Some(op_id));
+        }
+    }
+    let mut ask = serde_json::json!({ "scopes": ["spend"] });
+    // A G1 node shows the owner a budget to approve; the owner's
+    // flags override it. Older nodes get the pre-G1 body.
+    if let Some(amount) = budget_msat {
+        ask["budget"] = grant::proposal(amount, grant::MAX_TTL_SECS, &Default::default());
+    } else if node_has_g1(state).await.unwrap_or(false) {
+        if let Some(budget) = budget_proposal(state, want, minimum) {
+            ask["budget"] = budget;
+        }
+    }
+    dispatch_elevation_request(state, ask, budget_msat, generation).await
+}
+
+/// POST one prepared elevation request and track it when the window's
+/// generation is still `generation`. Callers hold `elevation_create`.
+async fn dispatch_elevation_request(state: &NodeState, ask: serde_json::Value, budget_msat: Option<u64>, generation: u64) -> Result<Option<String>, ActionError> {
+    let (status, body) = call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await?;
+    if !status.is_success() {
+        return Err(ActionError::node(api_error("/pair/elevation-request", status, &body)));
+    }
+    let reply: act::ElevationReply = decode_act("/pair/elevation-request", &body)?;
+    let pending = reply.into_elevation()?;
+    let request_id = Some(pending.op_id.clone());
+    let mut gate = state.spend.lock().unwrap();
+    if gate.generation() == generation && pending.expires_at_ms > now_ms() {
+        if budget_msat.is_some() {
+            gate.set_replacement_pending(pending, now_ms());
+        } else {
+            gate.set_pending(pending);
+        }
+    }
+    Ok(request_id)
 }
 
 /// Read only the policy and backend from the SAME config passed to node start.
@@ -6848,7 +7723,8 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     refuse_if_connection_busy(state)?;
     refuse_if_paused(state)?;
     ensure_fresh_token(state).await;
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let token = state.ordinary_token().map_err(|e| ActionError::new("app_not_ready", &e))?
+        .ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     check_node_grant(state, "/messages/compose", &body, max_msat).await?;
     // Restore the original reservation in place. The whole-operation answer
     // settles this same entry, including its already-paid admission.
@@ -6917,6 +7793,7 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     Ok(MoneyReply { text, operation_id: Some(id) })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_message_send_inner(
     state: &NodeState,
     recipient: &str,
@@ -6996,7 +7873,7 @@ async fn do_message_send_inner(
             body["max_routing_fee_msat"] = serde_json::json!(ask.max_routing_fee_msat);
         }
     }
-    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids), failure_final_on: final_failure_node(&caps.status) };
+    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids), failure_final_on: final_failure_node(&caps.status), call_window: false };
     let sent = money_post(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge)).await;
     let sent = match sent {
         // After a reconnect or restart the contact asks for admission again,
@@ -7153,7 +8030,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         confirm_first_contact(state, &target, cap, contact_budget, caps.readmission_possible).await?;
     }
     // Nothing can be paid under a zero cap, re-admission included.
-    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids), failure_final_on: None };
+    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids), failure_final_on: None, call_window: false };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
         // The node pays re-admission under a cap that fits the contact's signed
         // quote: Retry delivery (zero cap) asks the owner for that price.
@@ -7305,6 +8182,52 @@ async fn do_invite_redeem(state: &NodeState, invite: &str) -> Result<act::Redeem
     decode_act("/invites/accept", &text)
 }
 
+/// GET one stored file with a limit on what is read into memory: stops at
+/// [`act::FILE_BODY_MAX`] whatever the response declares, then checks the
+/// declared and decoded sizes. Read-only, and separate from [`call_api`], which
+/// keeps its behaviour for every other route.
+async fn read_file_blob(state: &NodeState, id: &str) -> Result<act::FileBlob, String> {
+    let path = format!("/files/{id}");
+    ensure_fresh_token(state).await;
+    let mut refreshed = false;
+    loop {
+        let token = state
+            .ordinary_token()?
+            .ok_or_else(|| "the node is not authenticated yet".to_string())?;
+        let mut response = state
+            .http
+            .get(format!("{}{path}", state.api_base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("{path} request failed: {e}"))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
+            refreshed = true;
+            if remint_throttled(state).await.is_ok() {
+                continue;
+            }
+        }
+        if response.content_length().is_some_and(|n| n > act::FILE_BODY_MAX as u64) {
+            return Err(act::FILE_RESPONSE_TOO_LARGE.into());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| format!("{path} response read failed: {e}"))?
+        {
+            if body.len() + chunk.len() > act::FILE_BODY_MAX {
+                return Err(act::FILE_RESPONSE_TOO_LARGE.into());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let blob: act::FileBlob = decode(&path, status, &String::from_utf8_lossy(&body))?;
+        act::blob_within_cap(&blob)?;
+        return Ok(blob);
+    }
+}
+
 /// A received voice note's bytes, for the inline player. Read-only: two GETs,
 /// never a payment. Anything that is not an audio file is refused.
 async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act::FileBlob, String> {
@@ -7322,8 +8245,8 @@ async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act:
     }
     let row = found.ok_or_else(|| act::VOICE_NOT_STORED.to_string())?;
     let id = control::room_id(&row).map_err(|_| "the node returned an unexpected file id".to_string())?;
-    let blob: act::FileBlob = get_json(state, &format!("/files/{id}")).await?;
-    if !act::is_voice_mime(&blob.mime_type) {
+    let blob = read_file_blob(state, &id).await?;
+    if !act::is_voice_file(&blob.filename, &blob.mime_type) {
         return Err(act::NOT_A_VOICE_NOTE.into());
     }
     Ok(blob)
@@ -7344,9 +8267,7 @@ async fn do_file_fetch(state: &NodeState, message_id: &str) -> Result<act::FileB
     }
     let row = found.ok_or_else(|| act::FILE_NOT_STORED.to_string())?;
     let id = control::room_id(&row).map_err(|_| "the node returned an unexpected file id".to_string())?;
-    let blob: act::FileBlob = get_json(state, &format!("/files/{id}")).await?;
-    act::blob_within_cap(&blob)?;
-    Ok(blob)
+    read_file_blob(state, &id).await
 }
 
 /// One native save dialog at a time (N6): a second Save click while the first
@@ -7442,7 +8363,7 @@ fn spend_settled(state: &NodeState) -> bool {
 /// (`CallConsents::node_reported`). A failed read proves nothing: the call
 /// stays pinned. Returns whether the node shows it closed.
 async fn verify_call_closed(state: &NodeState, node_id: &str, peer: &str, call_id: &str) -> bool {
-    let Ok(status) = read_call_status(state, peer, call_id).await else { return false };
+    let Ok(status) = read_call_status_on(state, node_id, peer, call_id).await else { return false };
     let settled = spend_settled(state);
     state.call_consents.lock().unwrap().node_reported(node_id, peer, call_id, status.as_ref(), settled)
 }
@@ -7491,6 +8412,7 @@ async fn do_call_offer_with_minutes(
 ///   (defence in depth). Until a check passes the call is `Offering` and no
 ///   minute is payable; a hold above the consent is `Refused` for good (set
 ///   before the hangup), so it is never paid, and the call is hung up.
+///
 /// An offer that did not go through ends the call's consent for good: its
 /// terms can never be admitted later, under these or wider ones.
 async fn offer_within_consent(
@@ -7509,7 +8431,7 @@ async fn offer_within_consent(
     }
     {
         let mut kept = state.call_consents.lock().unwrap();
-        kept.register(node_id.clone(), &target, &call_id, consent)?;
+        kept.register(node_id.clone(), &target, &call_id, consent, spend_stops(state))?;
         let entry = kept.find_mut(&node_id, &target, &call_id)
             .ok_or_else(|| ActionError::new("call_no_consent", "Nothing was paid."))?;
         if entry.phase != ConsentPhase::Offering || entry.offering || entry.dispatched {
@@ -7609,7 +8531,7 @@ async fn checked_call_hold(state: &NodeState, peer: &str, call_id: &str)
             kept.end(&node_id, Some(&target), call_id);
         }
     };
-    let Some(status) = read_call_status(state, &target, call_id).await? else {
+    let Some(status) = read_call_status_on(state, &node_id, &target, call_id).await? else {
         // The node accepted the offer and lists the call no more: it is over.
         reported(state, None);
         return Err(ActionError::new("call_not_live", "Your node no longer lists this call. Nothing more was paid."));
@@ -7679,7 +8601,7 @@ mod pause_points {
     static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
 
     /// One pause at `point` for this node: (arrived, release). Tests only.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(any(not(test), feature = "mobile"), allow(dead_code))]
     pub fn arm(api_base: &str, point: &'static str) -> (Arc<Notify>, Arc<Notify>) {
         let (arrived, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
         GATES.lock().unwrap().push(Gate { api_base: api_base.into(), point, arrived: arrived.clone(), release: release.clone() });
@@ -7730,8 +8652,14 @@ const MINUTE_PAST_HOLD_WORDS: &str = "The next minute of this call would go past
 /// yet does. A journal that cannot be read pays nothing.
 fn minute_past_journaled_hold(state: &NodeState, journal: &Journal, node_id: &str, body: &serde_json::Value, cap: u64) -> Result<bool, ActionError> {
     let (peer, call_id) = block_identity(body);
-    let limit = state.call_consents.lock().unwrap().find(node_id, &peer, &call_id)
-        .and_then(|c| Some(c.confirmed_msat?.min(c.consent.max_hold_msat)));
+    // Ended or refused since `block_consent_refusal` (End takes no money lock):
+    // that refusal is the answer, not "past the hold".
+    let limit = {
+        let kept = state.call_consents.lock().unwrap();
+        let Some(c) = kept.find(node_id, &peer, &call_id) else { return Err(ActionError::new("call_no_consent", NO_CONSENT)) };
+        if let Some(error) = consent_closed(&c.phase) { return Err(error); }
+        c.confirmed_msat.map(|m| m.min(c.consent.max_hold_msat))
+    };
     let Some(limit) = limit else { return Ok(true) };
     let records = journal.call_operations_for(node_id, Some(&peer), Some(&call_id))?;
     let journaled = records.iter().filter(|r| r.kind == "call_block" && r.state != spend_journal::OperationState::Unpaid)
@@ -7754,6 +8682,7 @@ async fn end_call_past_hold(state: &NodeState, consent: &CallConsent) -> ActionE
 /// paid. Pays nothing itself (a refused hold is hung up).
 async fn do_call_hold(state: &NodeState, peer: &str, call_id: &str, confirm_reserved_msat: Option<u64>) -> Result<control::CallStatus, ActionError> {
     let (status, hold, consent) = checked_call_hold(state, peer, call_id).await?;
+    *state.call_limit_seen.lock().unwrap() = Some((consent.node_id.clone(), hold.max_call_minutes));
     if let Some(shown) = confirm_reserved_msat {
         if shown != hold.reserved_msat {
             return Err(ActionError::new("call_hold_changed",
@@ -7764,6 +8693,9 @@ async fn do_call_hold(state: &NodeState, peer: &str, call_id: &str, confirm_rese
             .ok_or_else(|| ActionError::new("call_no_consent", NO_CONSENT))?;
         if let Some(error) = consent_closed(&entry.phase) { return Err(error); }
         entry.confirmed_msat = Some(hold.reserved_msat);
+        let stops = entry.stops;
+        drop(kept);
+        state.held_calls.lock().unwrap().keep(&consent.node_id, &consent.peer, &consent.call_id, stops);
     }
     Ok(status)
 }
@@ -7772,11 +8704,22 @@ async fn do_call_hold(state: &NodeState, peer: &str, call_id: &str, confirm_rese
 /// them (`GET /calls?peer=`). Read-only: never pays, releases or settles.
 /// `None`: the node no longer lists the call (ended with nothing pending).
 async fn read_call_status(state: &NodeState, peer: &str, call_id: &str) -> Result<Option<control::CallStatus>, ActionError> {
+    read_call_status_from(state, None, peer, call_id).await
+}
+
+/// `read_call_status`, asked of `node_id` only: a failed read if another node
+/// is active, or becomes active at any point of it, even for a moment.
+async fn read_call_status_on(state: &NodeState, node_id: &str, peer: &str, call_id: &str) -> Result<Option<control::CallStatus>, ActionError> {
+    let bound = NodeBound::now(state, node_id, None).ok_or_else(|| ActionError::node("/calls: another node is active"))?;
+    read_call_status_from(state, Some(&bound), peer, call_id).await
+}
+
+async fn read_call_status_from(state: &NodeState, bound: Option<&NodeBound>, peer: &str, call_id: &str) -> Result<Option<control::CallStatus>, ActionError> {
     let peer = control::node_id(peer).map_err(ActionError::invalid)?;
     if !act::is_call_id(call_id) {
         return Err(ActionError::invalid("invalid call id"));
     }
-    let calls: Vec<control::CallStatus> = get_json(state, &format!("/calls?peer={peer}")).await.map_err(ActionError::node)?;
+    let calls: Vec<control::CallStatus> = get_json_on(state, bound, &format!("/calls?peer={peer}")).await.map_err(ActionError::node)?;
     Ok(calls.into_iter().find(|c| c.id == call_id))
 }
 
@@ -7818,12 +8761,26 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
         }
         let mut body = act::call_block_body(&target, call_id, seq)?;
         let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
-        let (auth, plan) = plan_message(state, &target, false, cap, None)
-            .map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?;
+        let caps = require_price_caps(state, false).await?;
+        let (auth, plan) = match plan_message(state, &target, false, cap, None) {
+            // The approval ran out during this admitted call (by time, or the
+            // grant left the node's list): a node that keeps the call draws
+            // this minute on its pinned hold, as the owner confirmed it, unless
+            // spending was explicitly stopped since the call was offered. The
+            // book's limits still apply.
+            Err(e) if matches!(e.code, "spend_expired" | "spend_locked")
+                && status_lists(&caps.status, CALL_CONTINUITY_CAPABILITY) && spend_stops(state) == consent.stops => {
+                let plan = with_book(state, false, |book| budget::plan(book, budget::Ask {
+                    target: &target, room: false, max_msat: cap, first_contact_msat: None,
+                    autopay: None, window: Ok(()), now_ms: now_ms(),
+                }))?;
+                (Auth::CallHold(consent.stops), plan)
+            }
+            planned => planned.map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?,
+        };
         if plan.confirm.is_some() {
             return Err(needs_contact());
         }
-        let caps = require_price_caps(state, false).await?;
         if !caps.operations {
             return Err(ActionError::new("call_needs_node_upgrade",
                 "Upgrade your node before making calls: it cannot track call payments and admission safely. Nothing was paid."));
@@ -7839,6 +8796,7 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
             operation: caps.operations,
             envelope_ids: Some(caps.envelope_ids),
             failure_final_on: final_failure_node(&caps.status),
+            call_window: false,
         };
         // Refused or ended while this minute was prepared: nothing is sent.
         consent_payable(state, &consent, hold.reserved_msat)?;
@@ -7862,19 +8820,63 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
     act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
-/// One paid call signal (offer, answer, ICE or hangup) to one contact.
-/// Same authority as a 1:1 message: the owner's budget or the ten-minute
-/// window, one journaled spend at a time, a durable operation id when the
-/// node keeps them. Calls go to contacts already in the book: a first
-/// contact is a message, never a ring.
-async fn do_call_signal(
-    state: &NodeState,
-    peer: &str,
-    kind: u16,
-    plaintext: &str,
-    max_msat: u64,
-) -> Result<act::CallReceipt, ActionError> {
-    do_call_signal_for_admission(state, peer, kind, plaintext, max_msat, None).await
+/// Spending is open right now: the owner's window, or a budget approval, and
+/// payments are not paused. Fails closed on a book that cannot be read.
+fn spending_open(state: &NodeState) -> bool {
+    let now = now_ms();
+    let window = state.spend.lock().unwrap().check(now).is_ok();
+    let budget = state.autopay.lock().unwrap().ceiling(now).is_some();
+    (window || budget) && budget_paused(state).is_ok_and(|paused| !paused)
+}
+
+/// An incoming call whose answer went out: kept for `held_call_plan`.
+fn keep_answered_call(state: &NodeState, node_id: &str, peer: &str, plaintext: &str, stops: u64) {
+    let call_id = serde_json::from_str::<serde_json::Value>(plaintext).ok()
+        .and_then(|v| v["call_id"].as_str().filter(|id| act::is_call_id(id)).map(str::to_string));
+    if let (Some(call_id), false) = (call_id, node_id.is_empty()) {
+        state.held_calls.lock().unwrap().keep(node_id, peer, &call_id, stops);
+    }
+}
+
+const HELD_GRANT_ENDED: &str = "call_grant_ended";
+const HELD_GRANT_ENDED_WORDS: &str = "Your node's spend budget has ended, so this call signal could not be sent. Your node ends the call when its paid time runs out. Nothing was sent or paid.";
+
+/// `call_continuity_v1`: the owner's approval ran out (by time, or the grant
+/// left the node's list) during a call this node keeps. That call may still
+/// send its own hangup, so End can always reach the other side, and the
+/// reconnect request it needs: kinds 402 and 403 only. An offer or an answer
+/// starts or takes a call and still needs an approval. Only for a call kept
+/// in `NodeState::held_calls` whose `spend_stops` is still current (no lock,
+/// pause, refused token or new connection since it began), at most
+/// `HELD_CALL_SIGNALS` per call, each within the book's limits. On a node
+/// with grants, only while the node still holds a live grant: a token
+/// without `spend` is never asked to send, so a refusal cannot stop the
+/// call's minutes. The caller then checks the live price and the message
+/// cap as for any signal. `None`: not such a call; the lapse is the answer.
+async fn held_call_plan(state: &NodeState, target: &str, kind: u16, plaintext: &str, max_msat: u64) -> Result<Option<(Auth, budget::Plan)>, ActionError> {
+    if !matches!(kind, act::KIND_CALL_ICE | act::KIND_CALL_HANGUP) { return Ok(None); }
+    let Some(call_id) = serde_json::from_str::<serde_json::Value>(plaintext).ok()
+        .and_then(|v| v["call_id"].as_str().filter(|id| act::is_call_id(id)).map(str::to_string)) else { return Ok(None) };
+    let node_id = state.node_id.lock().unwrap().clone();
+    let Some(node_id) = node_id else { return Ok(None) };
+    let stops = spend_stops(state);
+    let kept = state.held_calls.lock().unwrap().can_send(&node_id, target, &call_id, stops);
+    if !kept { return Ok(None); }
+    let caps = require_price_caps(state, false).await?;
+    if !status_lists(&caps.status, CALL_CONTINUITY_CAPABILITY) { return Ok(None); }
+    let paired = matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_));
+    if paired && status_lists(&caps.status, grant::CAPABILITY) {
+        match read_grant(state).await? {
+            Some(g) if g.live(now_ms()) => { *state.node_grant.lock().unwrap() = Some(g); }
+            _ => return Err(ActionError::new(HELD_GRANT_ENDED, HELD_GRANT_ENDED_WORDS)),
+        }
+    }
+    let plan = with_book(state, false, |book| budget::plan(book, budget::Ask {
+        target, room: false, max_msat, first_contact_msat: None,
+        autopay: None, window: Ok(()), now_ms: now_ms(),
+    }))?;
+    let taken = state.held_calls.lock().unwrap().take(&node_id, target, &call_id, stops);
+    Ok(taken.then_some((Auth::CallHold(stops), plan)))
 }
 
 async fn do_call_signal_for_admission(
@@ -7901,6 +8903,8 @@ async fn do_call_signal_bounded(
     if (minutes.is_some() || shown_hangup.is_some()) && kind != act::KIND_CALL_OFFER {
         return Err(ActionError::invalid("agreed minutes and a shown hangup ceiling go with an offer only"));
     }
+    // An answer keeps its call for `held_call_plan` under the stops it began with.
+    let stops = spend_stops(state);
     // A hangup ends the call's minutes as it begins, whatever its outcome.
     if kind == act::KIND_CALL_HANGUP {
         if let Some(call_id) = serde_json::from_str::<serde_json::Value>(plaintext).ok()
@@ -7931,8 +8935,15 @@ async fn do_call_signal_bounded(
         body["host_admission_op"] = serde_json::json!(admission.op_id);
     }
     let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
-    let (auth, plan) = plan_message(state, &target, false, max_msat, None)
-        .map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?;
+    let (auth, plan) = match plan_message(state, &target, false, max_msat, None) {
+        // The approval ran out during a call this node keeps: that call's own
+        // hangup or reconnect request still goes, on the call's authority.
+        Err(e) if matches!(e.code, "spend_expired" | "spend_locked") => match held_call_plan(state, &target, kind, plaintext, max_msat).await? {
+            Some(held) => held,
+            None => return Err(e),
+        },
+        planned => planned.map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?,
+    };
     if plan.confirm.is_some() {
         return Err(needs_contact());
     }
@@ -7942,6 +8953,9 @@ async fn do_call_signal_bounded(
         return Err(ActionError::new("call_needs_node_upgrade",
             "Upgrade your node before making calls: it cannot track call payments and admission safely. Nothing was paid."));
     }
+    // `call_continuity_v1`: this node keeps an admitted call through its
+    // grant's expiry or renewal, so the grant need not outlast the call.
+    let continuity = status_lists(&caps.status, CALL_CONTINUITY_CAPABILITY);
     let quote = read_call_quote(state, &target).await.map_err(ActionError::node)?;
     let unsupported = || ActionError::new(
         "call_unsupported", "Their node does not take calls yet (no call price advertised). Nothing was paid.");
@@ -7992,6 +9006,11 @@ async fn do_call_signal_bounded(
                 }
                 error
             })?;
+        // A node-routed call must fit inside the grant the node holds now,
+        // unless the node keeps an admitted call past that grant's end.
+        if minutes.is_some() && !continuity {
+            if let Some(g) = &checked { call_window_fits(state, g.expires_at_ms())?; }
+        }
         // A hangup is bounded like a message (the 6-sat cap). A call that
         // could not be ended is never started.
         if let Some(g) = checked {
@@ -8031,9 +9050,11 @@ async fn do_call_signal_bounded(
         operation: caps.operations,
         envelope_ids: Some(caps.envelope_ids),
         failure_final_on: final_failure_node(&caps.status),
+        call_window: !continuity && (kind == act::KIND_CALL_ANSWER || (kind == act::KIND_CALL_OFFER && minutes.is_some())),
     };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
     let reply: act::SendReply = text.decode("/messages/compose")?;
+    if kind == act::KIND_CALL_ANSWER { keep_answered_call(state, &signal_node_id, &target, plaintext, stops); }
     Ok(act::CallReceipt {
         operation_id: reply.operation_id.clone(),
         total_msat: act::with_op(Active(text.operation_id.as_deref()), reply.total_msat())?,
@@ -8084,6 +9105,79 @@ async fn do_op_end_call_with_limit(state: &NodeState, call_id: &str, max_msat: O
     // hangup is even prepared, so a minute being prepared finds it ended.
     end_minutes(state, call_id);
     end_call_admission(state, call_id, max_msat).await
+}
+
+/// How often, and for how long, End asks the node whether it has ended a call.
+/// A live call ends at its paid time plus ten seconds of grace, and a minute buys
+/// at most eighty seconds from the moment it is paid.
+const END_WAIT_POLL: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(2) };
+const END_WAIT_MAX: Duration = if cfg!(test) { Duration::from_secs(5) } else { Duration::from_secs(100) };
+
+/// The owner's End. A hangup refused before any payment (the callee is offline,
+/// say), or one that cannot be sent because a kept call's grant has ended
+/// (`HELD_GRANT_ENDED`), cannot reach anyone yet, and no spend is pending for
+/// it. The node ends the call by itself when its paid time runs out, so End
+/// waits for that, asking
+/// the node and holding no lock. The node showing the call ended is the evidence
+/// that closes the admission, so End writes that down and asks for nothing more.
+/// A further request could only be refused, by the node or by anything that
+/// changed meanwhile (a pause, an approval or budget gone), and none of those is a
+/// reason to keep a call open that is over. Nothing is sent or paid, and no other
+/// pending result is touched. A read that fails, a call still open when the wait
+/// runs out (a read in progress included), or another node made active meanwhile
+/// (even for a moment) or its connection replaced, leaves the refusal as the
+/// answer, and "Try ending it again" stays on the card.
+async fn do_op_end_call_when_node_ends(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
+    let refused = do_op_end_call_with_limit(state, call_id, max_msat).await;
+    let Err(error) = &refused else { return refused };
+    let offer = match error.code {
+        "not_dispatched" => refused_hangup_admission(state, error.operation_id.as_deref()).await,
+        // A kept call after its grant ended: its minutes stopped as End began,
+        // and the node ends it when its paid time runs out.
+        HELD_GRANT_ENDED => refused_end_admission(state, error.operation_id.as_deref()).await,
+        _ => None,
+    };
+    let Some(offer) = offer else { return refused };
+    let deadline = tokio::time::Instant::now() + END_WAIT_MAX;
+    // Only the call's own node can show it ended, and only over the connection
+    // the wait began on. Every read is bound to both and to the deadline: none
+    // goes out, is retried or is believed once another node was made active
+    // (even if the call's own is active again) or the deadline has come, and the
+    // wait ends with the refusal.
+    let Some(bound) = NodeBound::now(state, &offer.node_id, Some(deadline)) else { return refused };
+    loop {
+        match tokio::time::timeout_at(deadline, read_call_status_from(state, Some(&bound), &offer.peer, call_id)).await {
+            Ok(Ok(Some(status))) if status.state != "ended" => {}
+            Ok(Ok(_)) => break,
+            Ok(Err(_)) | Err(_) => return refused,
+        }
+        if cfg!(test) { pause_points::at(&state.api_base, "end_wait_read").await; }
+        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + END_WAIT_POLL)).await;
+    }
+    {
+        let _money = state.money.lock().await;
+        // Still the node and connection that read the call: another node's word closes nothing.
+        if !(NodeBound { until: None, ..bound }).holds(state) { return refused; }
+        locked_spend_journal(state)?.observe_call(&offer, true)?;
+    }
+    do_op_end_call_with_limit(state, call_id, max_msat).await
+}
+
+/// The admission End named in its refusal, when no hangup could be sent for it.
+async fn refused_end_admission(state: &NodeState, operation_id: Option<&str>) -> Option<spend_journal::OperationRecord> {
+    let _money = state.money.lock().await;
+    let journal = locked_spend_journal(state).ok()?;
+    let offer = journal.operation_record(operation_id?).ok()??;
+    matches!(offer.kind.as_str(), "call_offer" | "call_recovery").then_some(offer)
+}
+
+/// The admission End's refused hangup belonged to, from the host's own record.
+async fn refused_hangup_admission(state: &NodeState, operation_id: Option<&str>) -> Option<spend_journal::OperationRecord> {
+    let _money = state.money.lock().await;
+    let journal = locked_spend_journal(state).ok()?;
+    let hangup = journal.operation_record(operation_id?).ok()??;
+    if hangup.kind != "call_hangup" { return None; }
+    journal.operation_record(hangup.parent_op.as_deref()?).ok()?
 }
 
 /// No new minute of this call is issued, for this node identity. Takes no
@@ -8180,9 +9274,11 @@ async fn end_call_admission(state: &NodeState, call_id: &str, max_msat: Option<u
             // No hangup can be priced, so this never reached the node, which is how
             // End learns a call is over. Ask it: a call it has ended needs no hangup.
             Err(error) if error.code == "call_price_unknown" => {
-                let over = read_call_status(state, &offer.peer, call_id).await.is_ok_and(|status| status.is_none_or(|s| s.state == "ended"));
+                let Some(bound) = NodeBound::now(state, &offer.node_id, None) else { return Err(error) };
+                let over = read_call_status_from(state, Some(&bound), &offer.peer, call_id).await.is_ok_and(|status| status.is_none_or(|s| s.state == "ended"));
                 let _money = state.money.lock().await;
-                if !over || state.node_id.lock().unwrap().as_deref() != Some(offer.node_id.as_str()) { return Err(error); }
+                // The call's own node, and the same one throughout since the read.
+                if !over || !bound.holds(state) { return Err(error); }
                 let journal = locked_spend_journal(state)?;
                 journal.observe_call(&offer, true)?;
                 return journal.operation_record(&offer.op_id)?.map(Into::into)
@@ -8272,6 +9368,7 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
         operation: false,
         envelope_ids: None,
         failure_final_on: None,
+        call_window: false,
     };
     let (text, accounted) = porch_post(state, auth, body, max_msat, charge).await?;
     porch::project(&text, &target, &path, accounted, now_unix().max(0) as u64).map_err(|e| {
@@ -8298,7 +9395,8 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     let prior = journal.pending()?;
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let token = state.ordinary_token().map_err(|e| ActionError::new("app_not_ready", &e))?
+        .ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     match &prior {
         None => {}
@@ -8336,9 +9434,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
         abandon(&journal)?;
         release(state)?;
-        state.autopay.lock().unwrap().lock();
-        *state.node_grant.lock().unwrap() = None;
-        return Err(state.spend.lock().unwrap().refused());
+        return Err(refuse_spend(state));
     }
     let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
     let code = status.as_u16();
@@ -8456,6 +9552,7 @@ async fn do_file_send(
         operation: false,
         envelope_ids: Some(caps.envelope_ids),
         failure_final_on: None,
+        call_window: false,
     };
     let text = money_post(
         state,
@@ -8492,6 +9589,133 @@ async fn do_file_send(
     act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
+/// A pairing link was just imported: the next signed-in spend poll asks the
+/// node once for the day's budget (`ask_budget_after_pairing`).
+fn pairing_imported(state: &NodeState) {
+    state.budget_after_pairing.store(true, Ordering::SeqCst);
+}
+
+const BUDGET_ASK_FILE: &str = "budget-ask-after-pairing";
+
+fn budget_ask_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(BUDGET_ASK_FILE)
+}
+
+/// A link was imported and is used now: the ask is due in this run and, until
+/// it is sent, in every later start too (the app may quit first).
+fn pairing_imported_at(state: &NodeState, app_data_dir: &Path) {
+    save_budget_ask(app_data_dir);
+    *state.budget_ask_marker.lock().unwrap() = Some(budget_ask_path(app_data_dir));
+    pairing_imported(state);
+}
+
+/// The ask waits in a file until it is sent. It holds no secret, only that
+/// the ask is due. Desktop Import writes it for the next start.
+fn save_budget_ask(app_data_dir: &Path) {
+    if let Err(error) = std::fs::write(budget_ask_path(app_data_dir), b"1\n") {
+        eprintln!("[spend] could not keep the budget ask for the next start: {error}");
+    }
+}
+
+/// Startup with a saved link: an ask the import left for this start is due.
+fn restore_budget_ask(state: &NodeState, app_data_dir: &Path) {
+    let path = budget_ask_path(app_data_dir);
+    if path.is_file() {
+        *state.budget_ask_marker.lock().unwrap() = Some(path);
+        pairing_imported(state);
+    }
+}
+
+fn remove_budget_ask(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// The ask is sent now, or not needed: never again for this link. Its file
+/// goes first: if it cannot be removed, nothing is sent and the ask stays, so
+/// a later start can never repeat a request whose result was unclear.
+fn budget_ask_done(state: &NodeState) -> Result<(), ActionError> {
+    let path = state.budget_ask_marker.lock().unwrap().clone();
+    if let Some(path) = path {
+        remove_budget_ask(&path).map_err(|error| {
+            eprintln!("[spend] could not clear the budget ask: {error}");
+            ActionError::new("app_not_ready", "The app could not update its own files. Nothing was sent.")
+        })?;
+        *state.budget_ask_marker.lock().unwrap() = None;
+    }
+    state.budget_after_pairing.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+/// One owner step up front: right after pairing, ask the node for the day's
+/// budget so its owner can say yes before the first call, not at Accept or
+/// Ring. Only asks (never obtains), only once per imported link, and only for
+/// a signed-in pairing without spending and without a request already waiting.
+/// It records no wants: a yes at the box opens nothing in the app until the
+/// owner taps here. Waits, without losing the ask, while not signed in yet and
+/// after any read that fails before the request: the next poll tries again.
+/// The ask is spent just before its POST, so an unclear POST is never repeated.
+async fn ask_budget_after_pairing(state: &NodeState) -> Result<(), ActionError> {
+    if !state.budget_after_pairing.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    if !matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+        return Ok(());
+    }
+    if budget_paused(state)? {
+        return budget_ask_done(state);
+    }
+    // A saved request from an earlier run is followed, not repeated. This read
+    // may also refresh the session, so its scopes are read only after it.
+    if !state.approvals_restored.load(Ordering::SeqCst) {
+        do_budget_status(state).await?;
+    }
+    let has_spend = match &*state.auth.lock().unwrap() {
+        AuthMode::Paired(session) => session.scopes.iter().any(|s| s == "spend"),
+        _ => return Ok(()),
+    };
+    if has_spend {
+        return budget_ask_done(state);
+    }
+    restore_spend_pending(state);
+    // One request at a time, shared with every explicit ask. Busy: the next poll tries again.
+    let Ok(_create) = state.elevation_create.try_lock() else { return Ok(()) };
+    if !state.budget_after_pairing.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let generation = {
+        let gate = state.spend.lock().unwrap();
+        if gate.pending().is_some_and(|p| p.expires_at_ms > now_ms()) {
+            drop(gate);
+            return budget_ask_done(state);
+        }
+        gate.generation()
+    };
+    // Pre-G1 nodes keep their old ask-at-use path.
+    if !node_has_g1(state).await? {
+        return budget_ask_done(state);
+    }
+    // The whole request is ready before the ask is spent: a failed read keeps it.
+    let budget = budget_proposal(state, Want::Window, None)
+        .ok_or_else(|| ActionError::new("app_not_ready", "The day’s budget could not be read yet. Nothing was sent."))?;
+    let ask = serde_json::json!({ "scopes": ["spend"], "budget": budget });
+    // Spent just before the POST: an unclear POST is never repeated.
+    budget_ask_done(state)?;
+    dispatch_elevation_request(state, ask, None, generation).await?;
+    save_spend_pending(state);
+    Ok(())
+}
+
+/// `spend_status`: the pairing's first budget ask, then the usual poll.
+async fn spend_status_now(state: &NodeState) -> Result<act::SpendView, ActionError> {
+    if let Err(error) = ask_budget_after_pairing(state).await {
+        eprintln!("[spend] could not ask for the budget after pairing: {}", error.message);
+    }
+    spend_advance(state, false).await
+}
+
 /// The owner's spend window as it stands; polls a pending elevation request.
 #[tauri::command(rename_all = "snake_case")]
 async fn spend_status(
@@ -8500,7 +9724,7 @@ async fn spend_status(
 ) -> Result<act::SpendView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    spend_advance(state.inner(), false).await
+    spend_status_now(state.inner()).await
 }
 
 /// The owner's one tap: open a short spend window, or ask the node for spend.
@@ -8508,10 +9732,12 @@ async fn spend_status(
 async fn spend_request(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
+    budget_msat: Option<u64>,
+    call_peer: Option<String>,
 ) -> Result<act::SpendView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    spend_advance(state.inner(), true).await
+    do_spend_request(state.inner(), budget_msat, call_peer.as_deref()).await
 }
 
 /// Close the spend window now.
@@ -8522,6 +9748,12 @@ async fn spend_lock(
 ) -> Result<act::SpendView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
+    Ok(do_spend_lock(state.inner()))
+}
+
+fn do_spend_lock(state: &NodeState) -> act::SpendView {
+    // The owner's lock also stops a live call's held minutes.
+    stop_spending(state);
     let view = {
         let mut gate = state.spend.lock().unwrap();
         gate.lock();
@@ -8529,8 +9761,8 @@ async fn spend_lock(
         *state.wants.lock().unwrap() = Wants::default();
         gate.view(now_ms())
     };
-    save_spend_pending(state.inner());
-    Ok(view)
+    save_spend_pending(state);
+    view
 }
 
 /// Withdraw the pending request at the node, then forget it here.
@@ -8545,15 +9777,23 @@ async fn spend_cancel(
 }
 
 async fn do_spend_cancel(state: &NodeState) -> Result<act::SpendView, ActionError> {
-    let pending = state.spend.lock().unwrap().pending().cloned();
-    if let Some(p) = pending {
+    let (pending, generation) = {
+        let gate = state.spend.lock().unwrap();
+        (gate.pending().cloned(), gate.generation())
+    };
+    if let Some(p) = &pending {
         if let Ok(path) = act::elevation_status_path(&p.op_id) {
             withdraw_at_node(state, &path).await?;
         }
     }
     let view = {
         let mut gate = state.spend.lock().unwrap();
-        gate.lock();
+        if pending.is_some() && gate.generation() == generation && gate.pending() == pending.as_ref() {
+            gate.clear_pending();
+        } else {
+            stop_spending(state);
+            gate.lock();
+        }
         *state.wants.lock().unwrap() = Wants::default();
         gate.view(now_ms())
     };
@@ -8602,7 +9842,7 @@ fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     match e {
         device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Biometric approval was cancelled. Nothing was approved."),
         device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This phone has no hardware-backed Android Keystore key the app can use. Approve at the node instead."),
-        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Strong biometric approval is not available on this phone right now (none enrolled, unavailable, or locked out). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
+        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Strong biometric approval is not available on this phone right now (none enrolled, unavailable, or locked out). Nothing was approved. Ask the person who set up your box to approve it there instead."),
         device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This phone's approval key no longer works (for example, biometric enrollment changed). Set up biometric approvals again."),
         device_key::DeviceKeyError::Other(code) => ActionError::new("device_key", format!("Android Keystore refused ({code}). Nothing was approved.")),
     }
@@ -8613,7 +9853,7 @@ fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     match e {
         device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Biometric approval (Touch ID or Face ID) was cancelled. Nothing was approved."),
         device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This device has no Secure Enclave the app can use. Approve at the node instead."),
-        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Touch ID or Face ID is not available on this device right now (not enrolled, or locked out after failed tries). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
+        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Touch ID or Face ID is not available on this device right now (not enrolled, or locked out after failed tries). Nothing was approved. Ask the person who set up your box to approve it there instead."),
         device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This device's approval key no longer works (for example, the enrolled fingerprints or face changed). Set up biometric approvals again."),
         device_key::DeviceKeyError::Other(code) => ActionError::new("device_key", format!("The Secure Enclave refused ({code}). Nothing was approved.")),
     }
@@ -8917,7 +10157,7 @@ fn save_device_record_if(
 fn allow_device_change(state: &NodeState) -> Result<(), ActionError> {
     #[cfg(all(desktop, not(feature = "mobile")))]
     {
-        return local_owner::allow_legacy_device_change(state);
+        local_owner::allow_legacy_device_change(state)
     }
     #[cfg(any(mobile, feature = "mobile"))]
     {
@@ -9252,10 +10492,7 @@ async fn op_end_call(
 ) -> Result<spend_journal::OpView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    match max_msat {
-        Some(limit) => do_op_end_call_with_limit(state.inner(), &call_id, Some(limit)).await,
-        None => do_op_end_call(state.inner(), &call_id).await,
-    }
+    do_op_end_call_when_node_ends(state.inner(), &call_id, max_msat).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -9387,6 +10624,7 @@ async fn do_budget_approve(state: &NodeState, ceiling_msat: u64, preset: budget:
 
 /// Pause-all: every payment stops now, and stays stopped across restarts.
 fn do_budget_pause(state: &NodeState) -> Result<budget::BudgetView, ActionError> {
+    stop_spending(state);
     state.autopay.lock().unwrap().lock();
     state.spend.lock().unwrap().lock();
     *state.wants.lock().unwrap() = Wants::default();
@@ -9711,6 +10949,7 @@ async fn call_hold(
 
 /// `POST /messages/compose` for one call signal (kinds 400-403).
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn call_signal(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -9726,6 +10965,135 @@ async fn call_signal(
     do_renderer_call_signal(state.inner(), &peer, kind, &plaintext, max_msat, minutes, max_hangup_msat).await
 }
 
+/// A free reply to a ringing incoming call: its answer, or its declined
+/// hangup. See [`do_call_free_reply`].
+#[tauri::command(rename_all = "snake_case")]
+async fn call_free_reply(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+    kind: u16,
+    plaintext: String,
+) -> Result<act::CallReceipt, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_call_free_reply(state.inner(), &peer, kind, &plaintext).await
+}
+
+/// `/status` capability: this node sends a callee's answer, or its declined
+/// hangup, to a ringing call free, to a caller that advertises it too.
+const FREE_REPLY_CAPABILITY: &str = "call_reply_free_v1";
+/// `/status` capability: an admitted call keeps its media and its minutes,
+/// drawn on the hold pinned at admission, after its grant expires or is
+/// renewed. A revoke still ends it.
+const CALL_CONTINUITY_CAPABILITY: &str = "call_continuity_v1";
+
+fn status_lists(status: &serde_json::Value, capability: &str) -> bool {
+    status["api_capabilities"].as_array().is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(capability)))
+}
+
+const FREE_REPLY_UNAVAILABLE: &str = "This reply cannot go out for free: your node or theirs does not take free call replies. Nothing was sent or paid.";
+const FREE_REPLY_NOT_SENT: &str = "Your node did not send this reply for free, so it was not sent. Nothing was paid.";
+const FREE_REPLY_UNKNOWN: &str = "It is not known yet whether your node sent this reply. Nothing can be paid for it.";
+
+/// A callee's answer, or its declined hangup, to a call ringing here, sent
+/// free. Only when this node and the caller's node both advertise
+/// `call_reply_free_v1` and the caller is connected, all read fresh here; the
+/// node checks the same again and binds the reply to the ringing call.
+///
+/// The compose carries a zero cap (`max_total_msat` and
+/// `max_routing_fee_msat` both 0), so whatever the node decides it can pay
+/// nothing for it. It needs no grant, opens no spend window, reserves nothing
+/// in the budget book and journals no payment. A refusal is final: the
+/// renderer never retries it as a paid signal.
+async fn do_call_free_reply(state: &NodeState, peer: &str, kind: u16, plaintext: &str) -> Result<act::CallReceipt, ActionError> {
+    // An answer keeps its call (`held_call_plan`) only if spending is open as it
+    // goes out and no stop comes before it is through: the reply itself is free,
+    // so it is no evidence the owner let this app spend.
+    let stops = spend_stops(state);
+    let could_spend = kind == act::KIND_CALL_ANSWER && spending_open(state);
+    let target = control::node_id(peer).map_err(ActionError::invalid)?;
+    let signal: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("invalid call signal"))?;
+    let bound = signal["call_id"].as_str().is_some_and(act::is_call_id);
+    let reply = match kind {
+        act::KIND_CALL_ANSWER => signal["sdp"].is_string(),
+        act::KIND_CALL_HANGUP => signal["reason"].as_str() == Some("declined"),
+        _ => false,
+    };
+    if !bound || !reply {
+        return Err(ActionError::invalid("only an answer or a declined hangup to a ringing call is a free reply"));
+    }
+    let mut body = act::call_body(&target, kind, plaintext)?;
+    let unavailable = || ActionError::new("call_reply_not_free", FREE_REPLY_UNAVAILABLE);
+    let status: serde_json::Value = get_json(state, "/status").await.map_err(|_| unavailable())?;
+    let status_node_id = status["node_id"].as_str().map(str::to_string);
+    if !status_lists(&status, FREE_REPLY_CAPABILITY) {
+        return Err(unavailable());
+    }
+    let peers: Vec<control::Peer> = get_json(state, "/peers").await.map_err(|_| unavailable())?;
+    let caller = control::with_meeting_support(peers).into_iter().find(|p| p.node_id.eq_ignore_ascii_case(&target));
+    if !caller.is_some_and(|p| p.free_replies) {
+        return Err(unavailable());
+    }
+    body["max_total_msat"] = serde_json::json!(0);
+    body["max_routing_fee_msat"] = serde_json::json!(0);
+    let unknown = || ActionError::new("call_reply_unknown", FREE_REPLY_UNKNOWN);
+    let (status, text) = call_api(state, reqwest::Method::POST, "/messages/compose", Some(body)).await.map_err(|_| unknown())?;
+    // A refusal the node answered before sending; a server failure may have come after.
+    if status.is_client_error() {
+        return Err(ActionError::new("call_reply_not_sent", FREE_REPLY_NOT_SENT));
+    }
+    if !status.is_success() {
+        return Err(unknown());
+    }
+    let reply: act::SendReply = serde_json::from_str(&text).map_err(|_| unknown())?;
+    // Free only on a receipt that shows nothing paid: any amount, routing
+    // ceiling, re-admission or fee is not a free reply, so it is unknown.
+    let total = reply.total_msat().map_err(|_| unknown())?;
+    if reply.amount_msat != 0 || total != 0 || reply.fee_paid_msat.unwrap_or(0) != 0 {
+        return Err(unknown());
+    }
+    if could_spend && spending_open(state) && spend_stops(state) == stops {
+        // The node's own identity, from the status this reply was checked against when none is cached yet.
+        let cached = state.node_id.lock().unwrap().clone();
+        let node_id = cached.or(status_node_id).unwrap_or_default();
+        keep_answered_call(state, &node_id, &target, plaintext, stops);
+    }
+    Ok(act::CallReceipt {
+        operation_id: reply.operation_id.clone(),
+        total_msat: total,
+        message_id: reply.message_id,
+        kind,
+        amount_msat: reply.amount_msat,
+        max_routing_fee_msat: reply.max_routing_fee_msat,
+        delivered: reply.delivered,
+        accepted: reply.accepted,
+        sent_at_ms: now_ms(),
+    })
+}
+
+/// The most minutes any node lets one call last (`[calls] max_call_minutes`).
+const CALL_LIMIT_MAX_MINUTES: u64 = 240;
+/// Room beyond the call limit, so an approval never ends in a call's last minute.
+const CALL_WINDOW_MARGIN_MS: u64 = 60_000;
+const CALL_WINDOW_SHORT: &str = "Your box’s approval ends before this call could end, and the call would stop there. Nothing was sent or paid. Ask the person who set up your box for a new approval.";
+
+/// A node-routed call lives only as long as the box approval. Refuse, before
+/// anything is sent or paid, a paid offer or answer whose freshly read grant
+/// ends before this node's call limit could (the most any node allows while
+/// that limit is not known yet).
+fn call_window_fits(state: &NodeState, grant_expires_at_ms: u64) -> Result<(), ActionError> {
+    let node = state.node_id.lock().unwrap().clone();
+    let limit = state.call_limit_seen.lock().unwrap().as_ref()
+        .filter(|(seen, _)| node.as_deref() == Some(seen.as_str()))
+        .map_or(CALL_LIMIT_MAX_MINUTES, |(_, minutes)| u64::from(*minutes).max(1));
+    let needed = now_ms().saturating_add(limit * 60_000 + CALL_WINDOW_MARGIN_MS);
+    if grant_expires_at_ms < needed {
+        return Err(ActionError::new("call_window_short", CALL_WINDOW_SHORT));
+    }
+    Ok(())
+}
+
 /// One call signal as the renderer asks for it. Every offer names the hangup
 /// ceiling it was shown with: without one it is refused, and nothing is sent.
 async fn do_renderer_call_signal(
@@ -9739,6 +11107,8 @@ async fn do_renderer_call_signal(
         // M6 A2: a node-routed offer carries the minutes agreed before Ring.
         Some(consent) if kind == act::KIND_CALL_OFFER => do_call_offer_with_minutes(state, peer, plaintext, max_msat, consent, max_hangup_msat).await,
         Some(_) => Err(ActionError::invalid("only an offer carries agreed minutes")),
+        // A paid answer's call window is checked under the money lock, against
+        // the grant read there (none on an owner session or a pre-G1 node).
         None => do_call_signal_bounded(state, peer, kind, plaintext, max_msat, None, None, max_hangup_msat).await,
     }
 }
@@ -9904,7 +11274,10 @@ async fn ai_provider_views(app: &AppHandle<impl tauri::Runtime>) -> Vec<ai::Prov
 /// Read one topic through the broker, off the async runtime.
 async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64>) -> Result<ai::TopicRead, String> {
     ensure_fresh_token(state).await;
+    let checked = state.ordinary_token()?;
     let auth = node_auth(state);
+    // The session read must still be the credential whose network check passed.
+    if state.signet_only && state.ordinary_token()? != checked { return Err(NETWORK_UNCHECKED.into()); }
     let base = state.api_base.clone();
     let proxy_auth = state
         .remote_mode
@@ -9920,6 +11293,7 @@ async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64
 
 /// One topic from the node, as the broker projects it, with its freshness.
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn ai_read(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -9953,8 +11327,11 @@ async fn ai_read(
             }
             &ai::threads::MacSealer
         };
-        #[cfg(not(all(target_os = "macos", not(feature = "mobile"))))]
+        #[cfg(not(any(windows, all(target_os = "macos", not(feature = "mobile")))))]
         let sealer = bitsov_app::at_rest::installed().ok_or("Sealed thread storage is unavailable on this platform.")?;
+        // The Windows sealer protects pairing only; AI threads have no private folder there.
+        #[cfg(windows)]
+        let sealer = windows_ai_storage_refused()?;
         let update = ai::threads::poll_watches(&dir, assistant, poll.revision.as_deref(), &poll.sample,
             &mut settings, &mut engine, true, now_ms(), sealer)?;
         return serde_json::to_value(update).map_err(|_| "Could not encode watch notices.".into());
@@ -9992,8 +11369,11 @@ async fn ai_read(
             }
             &ai::threads::MacSealer
         };
-        #[cfg(not(all(target_os = "macos", not(feature = "mobile"))))]
+        #[cfg(not(any(windows, all(target_os = "macos", not(feature = "mobile")))))]
         let sealer = bitsov_app::at_rest::installed().ok_or("Sealed thread storage is unavailable on this platform.")?;
+        // The Windows sealer protects pairing only; AI threads have no private folder there.
+        #[cfg(windows)]
+        let sealer = windows_ai_storage_refused()?;
         let changed_rule = match &request { ai::threads::Request::SetWatch { rule, .. } => Some(*rule), _ => None };
         let saved = ai::threads::apply(&dir, assistant, request, sealer)?;
         settings.insert(assistant.id(), saved.clone());
@@ -10247,7 +11627,7 @@ async fn live_bridge(app: AppHandle) {
             }
             if !*state.ready.lock().unwrap() { return Ok(None); }
             ensure_fresh_token(&state).await;
-            let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
+            let Ok(Some(token)) = state.ordinary_token() else { return Ok(None); };
             let url = control::ws_url(&state.api_base, &token)?;
             *session_identity.lock().unwrap() = state.node_id.lock().unwrap().clone();
             Ok(Some((url, state.remote_proxy_auth.to_string())))
@@ -10350,7 +11730,7 @@ fn stop_supervised_node(child: &SharedChild, budget: Duration) -> StopOutcome {
     StopOutcome::Killed
 }
 
-/// Registration of the supervised node, coordinated with quit (Codex R2G on 3ff4e60e).
+/// Registration of the supervised node, coordinated with quit.
 ///
 /// The hazard: the host process ends as soon as the exit handler returns, taking every
 /// other thread with it. So whatever the exit handler cannot see — a node deregistered
@@ -10427,7 +11807,13 @@ struct MediaSession {
     #[allow(dead_code)]
     call_id: String,
     uplink: Arc<control::media::FrameQueue>,
+    /// Puts the renderer's uplink sends back in order before `uplink`.
+    send_order: Arc<control::media::SendOrder>,
+    /// The video path, on a video call only.
+    video: Option<Arc<control::media::VideoPath>>,
     stop: Arc<AtomicBool>,
+    /// This session's hold on the latency-critical activity for its call.
+    activity: Arc<control::call_activity::CallHold>,
 }
 
 /// Stop the current media session, if any. Idempotent; the socket task sees
@@ -10435,7 +11821,11 @@ struct MediaSession {
 fn stop_media_session(state: &NodeState) {
     if let Some(session) = state.media.lock().unwrap().take() {
         session.stop.store(true, Ordering::SeqCst);
+        session.activity.release();
         session.uplink.clear();
+        if let Some(video) = session.video {
+            video.clear();
+        }
     }
 }
 
@@ -10444,37 +11834,48 @@ fn stop_media_session(state: &NodeState) {
 /// reconnect with backoff, and stop on a refusal, on `stop`, or when the app
 /// quits. Frames from the node reach the renderer through a bounded
 /// drop-oldest queue drained into the channel; link transitions go as JSON.
+#[allow(clippy::too_many_arguments)]
 async fn media_bridge<R: tauri::Runtime>(
     app: AppHandle<R>,
     call_id: String,
     peer: String,
     uplink: Arc<control::media::FrameQueue>,
+    video: Option<Arc<control::media::VideoPath>>,
     stop: Arc<AtomicBool>,
     mut seal: Option<Box<control::media::SealedMedia>>,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    activity: Arc<control::call_activity::CallHold>,
 ) {
+    // However this task ends, panic included, it releases the hold.
+    let _activity = control::call_activity::ReleaseOnDrop(activity);
     let state = app.state::<NodeState>();
     let downlink = control::media::FrameQueue::new(control::media::QUEUE_FRAMES);
     let stopping = || stop.load(Ordering::SeqCst) || state.quitting.load(Ordering::SeqCst);
     let emit = |link: control::media::MediaLink| {
         let _ = channel.send(tauri::ipc::InvokeResponseBody::Json(link.to_json()));
     };
-    let link = control::media::run_media_link_with_seal(
+    let link = control::media::run_media_link_full(
         || async {
             if !*state.ready.lock().unwrap() { return Ok(None); }
+            let Ok(checked) = state.ordinary_token() else { return Ok(None); };
             let Some(token) = media_token(&state).await else { return Ok(None); };
+            // A credential replaced while this token was fetched ends its check.
+            if state.signet_only && state.ordinary_token().ok().flatten().is_none_or(|now| Some(now) != checked) {
+                return Ok(None);
+            }
             let url = control::media::media_url(&state.api_base, &call_id, &peer)?;
             Ok(Some((url, token, state.remote_proxy_auth.to_string())))
         },
         &uplink,
         &downlink,
+        video.as_deref(),
         seal.as_deref_mut(),
         &emit,
         &stopping,
     );
     let drain = async {
         loop {
-            let frame = downlink.pop().await;
+            let frame = control::media::next_downlink(&downlink, video.as_deref()).await;
             if channel.send(tauri::ipc::InvokeResponseBody::Raw(frame)).is_err() { break; }
         }
     };
@@ -10492,8 +11893,13 @@ async fn media_bridge<R: tauri::Runtime>(
 /// (`{"link": …, "detail": …}`). One session at a time: opening replaces the
 /// previous one. No payment and no admission change here: the node admits the
 /// socket only for a `(peer, call_id)` it already knows, under the owner's token.
+/// `video` opens the video path on the same socket; a call without it is an
+/// audio session, unchanged. `send_base`: the renderer's uplink send count at
+/// this open; any send counted lower belongs to an earlier socket and is
+/// dropped (see [`control::media::SendOrder`]).
 #[cfg(not(feature = "call-seal"))]
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn call_media_open(
     window: WebviewWindow<impl tauri::Runtime>,
     app: AppHandle<impl tauri::Runtime>,
@@ -10501,21 +11907,25 @@ async fn call_media_open(
     call_id: String,
     peer: String,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    video: Option<bool>,
+    send_base: Option<u64>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
     let peer = control::media::peer_id(&peer)?;
-    start_media_session(app, state.inner(), call_id, peer, None, on_frame);
+    start_media_session(app, state.inner(), call_id, peer, video.unwrap_or(false), None, send_base, on_frame);
     Ok(())
 }
 
 /// The same, in a call-seal build. `sealed`: the renderer expects this call's
 /// finished key exchange to be here. Without one the socket does not open, so a
 /// call never goes out in the clear by mistake. Without `sealed` and with no
-/// exchange, this is today's session.
+/// exchange, this is today's session. Video is never sealed, so a sealed call
+/// asking for `video` does not open: nothing goes out in the clear.
 #[cfg(feature = "call-seal")]
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn call_media_open(
     window: WebviewWindow<impl tauri::Runtime>,
     app: AppHandle<impl tauri::Runtime>,
@@ -10524,29 +11934,63 @@ async fn call_media_open(
     peer: String,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     sealed: Option<bool>,
+    video: Option<bool>,
+    send_base: Option<u64>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
     let peer = control::media::peer_id(&peer)?;
     let seal = seal_for_media(state.call_seal.lock().unwrap().take(), &call_id, sealed.unwrap_or(false)).map_err(|end| end.code().to_string())?;
-    start_media_session(app, state.inner(), call_id, peer, seal, on_frame);
+    let video = video.unwrap_or(false);
+    if video && seal.is_some() {
+        return Err(control::call_seal::SealError::NotReady.code().to_string());
+    }
+    start_media_session(app, state.inner(), call_id, peer, video, seal, send_base, on_frame);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_media_session<R: tauri::Runtime>(
     app: AppHandle<R>,
     state: &NodeState,
     call_id: String,
     peer: String,
+    video: bool,
     seal: Option<Box<control::media::SealedMedia>>,
+    send_base: Option<u64>,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) {
+    // Taken before the old session lets go: a session replaced for the same call keeps the activity.
+    let activity = Arc::new(control::call_activity::CallActivity::system().hold(&call_id));
+    let (uplink, video, stop) = install_media_session(state, &call_id, video, send_base, activity.clone());
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, video, stop, seal, on_frame, activity));
+}
+
+/// Replace the current media session, if any, with a new one for `call_id`
+/// whose send order starts at `send_base`. Answers the new session's uplink,
+/// video path and stop flag for its socket task.
+#[allow(clippy::type_complexity)]
+fn install_media_session(
+    state: &NodeState,
+    call_id: &str,
+    video: bool,
+    send_base: Option<u64>,
+    activity: Arc<control::call_activity::CallHold>,
+) -> (Arc<control::media::FrameQueue>, Option<Arc<control::media::VideoPath>>, Arc<AtomicBool>) {
     let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
+    let video = video.then(|| Arc::new(control::media::VideoPath::new()));
     let stop = Arc::new(AtomicBool::new(false));
     stop_media_session(state);
-    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), stop: stop.clone() });
-    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, stop, seal, on_frame));
+    *state.media.lock().unwrap() = Some(MediaSession {
+        call_id: call_id.to_string(),
+        uplink: uplink.clone(),
+        send_order: Arc::new(control::media::SendOrder::starting_at(send_base)),
+        video: video.clone(),
+        stop: stop.clone(),
+        activity,
+    });
+    (uplink, video, stop)
 }
 
 #[cfg(feature = "call-seal")]
@@ -10673,19 +12117,53 @@ fn media_payload(body: &tauri::ipc::InvokeBody) -> Result<Vec<u8>, String> {
 }
 
 /// One uplink payload for the open media session (raw bytes, no JSON). The
-/// host assigns `seq`; a full queue drops its oldest frame rather than stall.
+/// host assigns `seq` when it writes the frame; a full queue drops its oldest
+/// frame rather than stall. Async, so it runs off the main thread: a busy UI
+/// cannot hold outgoing audio back and let it go in a bunch. Sends run as
+/// separate tasks, so the renderer's count in [`control::media::SEND_ORDER_HEADER`]
+/// puts them back in order before the queue.
 #[tauri::command(rename_all = "snake_case")]
-fn call_media_send(
+async fn call_media_send(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
+    let payload = media_payload(request.body());
+    let order = control::media::send_order(
+        request.headers().get(control::media::SEND_ORDER_HEADER).and_then(|value| value.to_str().ok()),
+    );
+    admit_media_send(state.inner(), order, payload)
+}
+
+/// One uplink send for whichever media session is open when it runs, which
+/// may be a newer one than the send was made for: the session's send order
+/// drops a send counted below its start.
+fn admit_media_send(state: &NodeState, order: Option<u64>, payload: Result<Vec<u8>, String>) -> Result<(), String> {
+    let session = state.media.lock().unwrap().as_ref().map(|session| (session.uplink.clone(), session.send_order.clone()));
+    let Some((uplink, send_order)) = session else {
+        payload?;
+        return Err("no media session is open".into());
+    };
+    let checked = payload.as_ref().map(|_| ()).map_err(Clone::clone);
+    send_order.admit(order, payload.ok(), &uplink);
+    checked
+}
+
+/// One uplink video payload for the open media session (raw bytes). Answers
+/// how many fragments wait to leave, which the renderer reads as backpressure.
+#[tauri::command(rename_all = "snake_case")]
+fn call_media_video_send(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<usize, String> {
+    reject_sealed_window(&window)?;
     let payload = media_payload(request.body())?;
     let slot = state.media.lock().unwrap();
     let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
-    session.uplink.push(payload);
-    Ok(())
+    let Some(video) = session.video.as_ref() else { return Err("this media session carries no video".into()) };
+    video.push(payload)
 }
 
 /// Close the open media session (hangup or local teardown). Idempotent; only
@@ -10783,6 +12261,7 @@ fn run() {
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
             #[cfg(target_os = "ios")]
             bitsov_ffi::call_audio::terminate();
+            control::call_activity::CallActivity::system().shutdown();
             let state = app.state::<NodeState>();
             if let Some(proxy) = state.remote_proxy.lock().unwrap().take() {
                 proxy.stop();
@@ -10814,6 +12293,21 @@ fn guard_ios_startup<R: tauri::Runtime>(
     }
 }
 
+/// AI threads and watches stay refused on Windows even with the pairing
+/// sealer installed: their folder is not on the private-file layer.
+#[cfg(windows)]
+fn windows_ai_storage_refused() -> Result<&'static dyn bitsov_app::at_rest::Sealer, String> {
+    Err("Sealed thread storage is unavailable on this platform.".into())
+}
+
+#[cfg(all(test, windows))]
+mod windows_ai_storage_tests {
+    #[test]
+    fn ai_threads_and_watches_stay_refused() {
+        assert!(super::windows_ai_storage_refused().is_err());
+    }
+}
+
 /// Runs synchronously on the event-loop thread, before admitting commands or
 /// starting any tasks. Returning false also prevents a duplicate resume task
 /// when this foreground event has just started the deferred bootstrap.
@@ -10840,7 +12334,7 @@ fn resume_ios_startup(app: &AppHandle) -> bool {
 /// Normal CS-1 / CS-2 desktop shell: NodeState, wallet commands, bootstrap.
 fn app_builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
-    #[cfg(all(target_os = "macos", not(feature = "mobile")))]
+    #[cfg(all(any(target_os = "macos", target_os = "windows", target_os = "linux"), not(feature = "mobile")))]
     let builder = builder.plugin(tauri_plugin_notification::init());
     #[cfg(all(desktop, not(feature = "mobile")))]
     let builder = builder
@@ -10878,6 +12372,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             local_owner_cancel,
             local_owner_finalize,
             local_owner_reconcile,
+            node_setup_local,
             node_repair_initialized,
             node_repair_price_floor,
             fund_state,
@@ -10973,11 +12468,13 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_audio_session,
             call_quote,
             call_signal,
+            call_free_reply,
             call_status,
             call_block,
             call_hold,
             call_media_open,
             call_media_send,
+            call_media_video_send,
             call_media_close,
             porch_quote,
             porch_read,
@@ -10998,6 +12495,16 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             handler
         })
         .setup(|app| {
+            // Windows: refuse an elevated process, then install current-user
+            // DPAPI, before any storage, identity or bootstrap work. Either
+            // failure is fatal.
+            #[cfg(windows)]
+            {
+                bitsov_ffi::win_private::elevation_gate().map_err(|error| error.to_string())?;
+                bitsov_app::at_rest::install_windows(&app.config().identifier)?;
+                let data_dir = app.path().app_data_dir()?;
+                home_keychain_windows::set_pairing_store(&data_dir.join(PAIRING_STORE_DIR))?;
+            }
             // Install the immutable profile policy before any commands or tasks run.
             crate::profile::install(&app.config().identifier)?;
             app.manage(NodeState::for_identifier(&app.config().identifier));
@@ -11064,6 +12571,84 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
         })
 }
 
+#[cfg(all(test, desktop, not(feature = "mobile"), unix))]
+#[path = "beta_network_tests.rs"]
+mod beta_network_tests;
+
+/// One paid call signal (offer, answer, ICE or hangup) to one contact.
+/// Same authority as a 1:1 message: the owner's budget or the ten-minute
+/// window, one journaled spend at a time, a durable operation id when the
+/// node keeps them. Calls go to contacts already in the book: a first
+/// contact is a message, never a ring.
+#[cfg(test)]
+#[cfg_attr(feature = "mobile", allow(dead_code))]
+async fn do_call_signal(
+    state: &NodeState,
+    peer: &str,
+    kind: u16,
+    plaintext: &str,
+    max_msat: u64,
+) -> Result<act::CallReceipt, ActionError> {
+    do_call_signal_for_admission(state, peer, kind, plaintext, max_msat, None).await
+}
+
+#[cfg(test)]
+mod phone_signet_gate_tests {
+    use super::*;
+    use crate::network_policy::NetworkRefusal;
+    use crate::profile::AppProfile;
+
+    fn phone_state() -> NodeState {
+        // The production constructor, built as a phone build would build it.
+        let mut state = crate::profile::as_phone_build(|| NodeState::for_identifier("tech.mindlink.bitsov"));
+        // Nothing listens here: any report read fails and must be refused.
+        state.api_base = "http://localhost:1/api/v1".into();
+        state
+    }
+
+    #[test]
+    fn phone_product_build_is_signet_only() {
+        assert!(phone_state().signet_only);
+        assert!(!NodeState::for_profile(AppProfile::for_platform("tech.mindlink.bitsov", false)).signet_only);
+    }
+
+    #[tokio::test]
+    async fn phone_report_gate_refuses_without_a_signet_report() {
+        let state = phone_state();
+        for bootstrap in [false, true] {
+            assert!(require_signet_report(&state, bootstrap).await.is_err(), "{bootstrap}");
+            assert_eq!(*state.network_refusal.lock().unwrap(), NetworkRefusal::Unknown);
+        }
+    }
+
+    #[tokio::test]
+    async fn phone_candidate_gate_refuses_without_a_signet_report() {
+        let state = phone_state();
+        assert_eq!(require_signet_candidate_report(&state, "token").await, Err(NetworkRefusal::Unknown));
+    }
+
+    #[test]
+    fn phone_candidate_acceptance_refuses_non_signet_reports() {
+        for refusal in [NetworkRefusal::Mainnet, NetworkRefusal::Unknown, NetworkRefusal::Other] {
+            let state = phone_state();
+            let mut epoch = *state.network_auth_epoch.lock().unwrap();
+            let before = epoch;
+            assert!(accept_signet_candidate_report(&state, &mut epoch, Err(refusal)).is_err(), "{refusal:?}");
+            assert_ne!(epoch, before);
+            assert_eq!(*state.network_refusal.lock().unwrap(), refusal);
+        }
+    }
+
+    #[test]
+    fn phone_local_peer_gate_refuses_an_unverified_local_node() {
+        let state = phone_state();
+        assert!(!state.remote_mode.load(Ordering::SeqCst));
+        assert!(state.require_local_peer().is_err());
+        state.remote_mode.store(true, Ordering::SeqCst);
+        assert!(state.require_local_peer().is_ok());
+    }
+}
+
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_test_profile_tests {
     use super::*;
@@ -11113,8 +12698,8 @@ mod device_sign_error_tests {
         std::fs::write(&blob, b"not a readable enclave key").unwrap();
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0)).unwrap();
-            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o0)).unwrap();
+            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o0)).unwrap();
         }
         for _ in 0..20 {
             assert_eq!(local_device_record(&state, dir.path()).unwrap(), Some(record.clone()));
@@ -11295,6 +12880,60 @@ fn with_call_seal_commands<R: tauri::Runtime>(
     }
 }
 
+#[cfg(test)]
+mod media_send_session_tests {
+    use super::*;
+
+    struct NoActivity;
+    impl control::call_activity::ActivityDriver for NoActivity {
+        fn begin(&self) {}
+        fn end(&self) {}
+    }
+
+    fn open(state: &NodeState, send_base: Option<u64>) -> Arc<control::media::FrameQueue> {
+        let activity = control::call_activity::CallActivity::new(Box::new(NoActivity));
+        install_media_session(state, "call-1", false, send_base, Arc::new(activity.hold("call-1"))).0
+    }
+
+    fn drain(queue: &control::media::FrameQueue) -> Vec<u8> {
+        std::iter::from_fn(|| queue.try_pop()).map(|frame| frame[0]).collect()
+    }
+
+    /// A send from the old socket that only runs after close and a new open
+    /// looks up the new session; its lower count keeps it out of that uplink.
+    #[test]
+    fn a_stale_send_after_close_and_reopen_never_reaches_the_new_session() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let old = open(&state, Some(0));
+        for count in 0..5u64 {
+            admit_media_send(&state, Some(count), Ok(vec![count as u8])).unwrap();
+        }
+        assert_eq!(drain(&old), [0, 1, 2, 3, 4]);
+        // Counts 5 and 6 were handed over for the old socket but have not run yet.
+        stop_media_session(&state);
+        let new = open(&state, Some(7));
+        admit_media_send(&state, Some(6), Ok(vec![6])).unwrap();
+        admit_media_send(&state, Some(5), Ok(vec![5])).unwrap();
+        assert!(drain(&new).is_empty(), "the old call's frames must not go to the new peer");
+        admit_media_send(&state, Some(7), Ok(vec![7])).unwrap();
+        admit_media_send(&state, Some(8), Ok(vec![8])).unwrap();
+        assert_eq!(drain(&new), [7, 8]);
+        assert!(drain(&old).is_empty());
+        stop_media_session(&state);
+    }
+
+    #[test]
+    fn a_send_without_a_session_or_count_keeps_todays_answers() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        assert!(admit_media_send(&state, Some(0), Ok(vec![0])).is_err());
+        let queue = open(&state, None);
+        admit_media_send(&state, None, Ok(vec![3])).unwrap();
+        assert!(admit_media_send(&state, Some(1), Err("bad".into())).is_err());
+        assert_eq!(drain(&queue), [3]);
+        stop_media_session(&state);
+    }
+}
+
 #[cfg(all(test, not(feature = "call-seal")))]
 mod no_call_seal_tests {
     /// Without the feature, the generated permission and capability sets know
@@ -11440,7 +13079,7 @@ mod api_base_tests {
 }
 
 /// Custody provenance must bind the IPv4 endpoint the app dials, not any
-/// listener that shares its port (Codex app95 delta1).
+/// listener that shares its port.
 #[cfg(all(test, desktop, not(feature = "mobile"), unix))]
 mod verified_local_socket_tests {
     use super::{
@@ -11847,7 +13486,7 @@ mod remote_onboarding_tests {
             transport_signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(signature.to_bytes()),
             code: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32]),
-            hosted_by: Some("Rasmus's Pi".into()),
+            hosted_by: Some("Alex's Pi".into()),
             ..Default::default()
         };
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -11855,7 +13494,7 @@ mod remote_onboarding_tests {
         *state.remote_descriptor.lock().unwrap() =
             Some(remote_access::parse_pairing_link(&format!("bitsov://pair/{encoded}")).unwrap());
         state.remote_mode.store(true, Ordering::SeqCst);
-        assert_eq!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"], "Rasmus's Pi");
+        assert_eq!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"], "Alex's Pi");
         state.remote_mode.store(false, Ordering::SeqCst);
         assert!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"].is_null());
     }
@@ -12024,7 +13663,8 @@ mod pairing_wiring_tests {
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = vec![0; 4096];
-                stream.read(&mut request).await.unwrap();
+                let read = stream.read(&mut request).await.unwrap();
+                assert_ne!(read, 0, "the client sent a request");
                 let body = format!(r#"{{"code":"{code}","message":"remote unavailable"}}"#);
                 stream.write_all(format!("HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             });
@@ -12363,7 +14003,7 @@ mod control_read_tests {
                 "lightning_node_pubkey": "02cd"
             }),
             "/peers" => serde_json::json!([{
-                "node_id": A, "addr": "127.0.0.1:9735", "label": "Maya", "connected": true,
+                "node_id": A, "addr": "127.0.0.1:9735", "label": "Robin", "connected": true,
                 "auto_connect": true, "fingerprint": "aaaaaaaa", "safety_number": "1 2 3"
             }]),
             "/rooms" => serde_json::json!([{
@@ -12447,7 +14087,7 @@ mod control_read_tests {
         assert_eq!(node.targets(), ["/api/v1/status"], "STUN comes only from owner status, never public health");
 
         let peers: Vec<control::Peer> = get_json(&node.state, "/peers").await.unwrap();
-        assert_eq!(peers[0].label.as_deref(), Some("Maya"));
+        assert_eq!(peers[0].label.as_deref(), Some("Robin"));
         let rooms: Vec<control::Room> = get_json(&node.state, "/rooms").await.unwrap();
         assert_eq!(rooms[0].name, "Mexico");
         assert_eq!(read_room_members(&node.state, ROOM).await.unwrap(), vec![A.to_string()]);
@@ -13794,7 +15434,7 @@ mod control_act_tests {
             // A minute reaches the node only under an admitted, confirmed consent.
             if kind == 404 { admit_minutes(&node.state, A, CALL_ID); }
             let charge = Charge { target: A.into(), room, confirm: None, readmission_possible: false,
-                confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None };
+                confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None, call_window: false };
             let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()), path,
                 serde_json::json!({"recipient": A, "is_room": room, "kind": kind, "plaintext": OFFER}),
                 15000, Some(charge), None).await.unwrap_err();
@@ -13846,7 +15486,7 @@ mod control_act_tests {
             journal.save(&prior).unwrap();
             drop(journal);
             let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
-                confirmed: false, operation: has_operation_id, envelope_ids: Some(true), failure_final_on: None };
+                confirmed: false, operation: has_operation_id, envelope_ids: Some(true), failure_final_on: None, call_window: false };
             let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
                 "/messages/compose", body, 15000, Some(charge), prior.undelivered.as_ref()).await.unwrap_err();
             if has_operation_id && (kind == 400 || !delivery_retry) {
@@ -13855,7 +15495,7 @@ mod control_act_tests {
                 assert_eq!(pending(&node).unwrap().operation_id, id);
                 continue;
             }
-            assert_eq!(op_ids(&node), [id.clone()], "the existing operation id is reused");
+            assert_eq!(op_ids(&node), std::slice::from_ref(&id), "the existing operation id is reused");
             assert_eq!(err.code, "spend_unknown", "retry={delivery_retry}, operation_id={has_operation_id}");
             assert!(!err.message.contains("Nothing was paid"));
             assert_eq!(err.operation_id, id);
@@ -14167,7 +15807,7 @@ mod control_act_tests {
         let mut body = act::compose_body(ROOM, true, "hi").unwrap();
         body["max_total_msat"] = serde_json::json!(13000);
         body["max_recipient_msat"] = serde_json::json!({A: 7000, C: 6000});
-        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None, failure_final_on: None };
+        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None, failure_final_on: None, call_window: false };
         money_post(&ops.state, auth, "/messages/compose", body, 13000, Some(charge)).await.unwrap();
         assert_eq!(op_ids(&node), [None]);
         assert_eq!(op_ids(&ops), [None], "genome refuses operation_id for rooms (slice 4)");
@@ -14800,7 +16440,7 @@ mod control_act_tests {
                     else if command == "porch" {
                         porch_post(&node.state, Auth::Window(0), serde_json::json!({}), 6000,
                             Charge { target: A.into(), room: false, confirm: None,
-                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None }).await.map(|_| ())
+                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None, call_window: false }).await.map(|_| ())
                     }
                     else { money_post_with(&node.state, Auth::Window(0), "/messages/compose",
                         serde_json::json!({}), 7000, None, None).await.map(|_| ()) }
@@ -15624,7 +17264,7 @@ mod control_act_tests {
         assert_eq!(compose_bodies(&node).len(), 1);
     }
 
-    /// Codex review of 2d683b5 (P1): accounting must not erase the undelivered
+    /// Accounting must not erase the undelivered
     /// record. Reconciliation settles the book and keeps the record, the retry
     /// and the fence; only the owner stopping retries releases it.
     #[tokio::test]
@@ -15686,7 +17326,7 @@ mod control_act_tests {
         })
     }
 
-    /// Codex review of 0308673 (P1), the reviewer's scenario: a cached message
+    /// A cached message
     /// price of 50,000 msat, the paid proof consumed on an earlier connection,
     /// and a much lower fresh quote (1,000 admission + 1,000 message + two
     /// 5,000 fee ceilings = 12,000). A message-price cap would let the node buy
@@ -15760,7 +17400,7 @@ mod control_act_tests {
         assert_eq!(bodies.len(), 3);
         assert_eq!(bodies[2], serde_json::json!({"recipient": A, "is_room": false, "kind": 0, "plaintext": "gm", "max_total_msat": 14000}), "capped at exactly what the owner approved");
         // While each retry was on the wire the SAME record was there, in flight:
-        // never removed and re-created (Codex review of 2d683b5, P2).
+        // never removed and re-created.
         let seen = at_compose.lock().unwrap().clone();
         assert_eq!(seen.len(), 2);
         for (during, n) in seen.iter().zip([1, 1]) {
@@ -15834,7 +17474,7 @@ mod control_act_tests {
         ], "one admission allowance and one message in the book");
     }
 
-    /// Codex review of 0308673 (P2): a retry's own book entry survives expiry
+    /// A retry's own book entry survives expiry
     /// and pruning while its record still needs it, so reconciliation and Stop
     /// retrying keep working a day later.
     #[tokio::test]
@@ -15855,7 +17495,7 @@ mod control_act_tests {
         assert!(pending(&node).is_none());
     }
 
-    /// Codex review of 0308673 (P2): a delivered retry saves its accounting as
+    /// A delivered retry saves its accounting as
     /// a resolved delivery. A crash before the record is cleared leaves known
     /// money that reconciliation settles, never an unknown in-flight retry.
     #[tokio::test]
@@ -16407,7 +18047,7 @@ mod control_act_tests {
         let node_id = state.node_id.lock().unwrap().clone()
             .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
         let mut kept = state.call_consents.lock().unwrap();
-        kept.register(node_id.clone(), peer, call_id, consent)?;
+        kept.register(node_id.clone(), peer, call_id, consent, spend_stops(state))?;
         kept.find_mut(&node_id, peer, call_id).expect("just registered").dispatched = true;
         Ok(())
     }
@@ -16713,6 +18353,50 @@ mod control_act_tests {
         remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
         do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap();
         node
+    }
+
+    #[tokio::test]
+    async fn a2_call_minutes_respect_the_separate_contact_and_app_limits_with_grant_left() {
+        for contact_limit in [true, false] {
+            let (routes, next, reserved) = PacedHold {
+                per_block: 10_000, fee: 0, minutes: 60, closing: 1_000, direct: true, spent: SPENT_AT_CEILING,
+            }.routes();
+            assert_eq!(reserved, 601_000);
+            let node = paced_call(routes, reserved).await;
+            *node.state.node_grant.lock().unwrap() = Some(serde_json::from_value(g1_grant(3600, 5_000_000, 4_368_000)).unwrap());
+            with_book(&node.state, true, |b| {
+                b.ceiling_msat = if contact_limit { 5_000_000 } else { 50_000 };
+                b.set_limit(A, false, 50_000)?;
+                let earlier = if contact_limit { 38_000 } else { 28_000 };
+                b.reserve("earlier", A, false, earlier, now_ms());
+                b.settle("earlier", earlier, now_ms());
+                if !contact_limit {
+                    b.reserve("other-payment", budget::INVOICE_PAYMENTS, false, 10_000, now_ms());
+                    b.settle("other-payment", 10_000, now_ms());
+                }
+                Ok(())
+            }).unwrap();
+            // The offer cost 2 sats; the next minute's 10-sat ceiling fits exactly.
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            let view = budget_view(&node.state).unwrap();
+            assert_eq!(view.accounted_msat, 42_000);
+            assert_eq!(view.unsettled_msat, 0);
+            assert_eq!(view.node_grant.unwrap().remaining_msat, 4_368_000);
+            let refused = do_call_block(&node.state, A, CALL_ID, 1).await.unwrap_err();
+            assert_eq!(refused.code, if contact_limit { "budget_exhausted" } else { "ceiling_exhausted" });
+            assert!(refused.message.contains("42 sats"));
+            assert!(refused.message.contains("50 sats"));
+            assert_eq!(minutes_sent(&node), 1);
+            assert_eq!(next.load(Ordering::SeqCst), 1);
+            // Raising only the limiting budget allows the next minute, at its exact ceiling.
+            with_book(&node.state, true, |b| {
+                if contact_limit { b.set_limit(A, false, 52_000)?; } else { b.ceiling_msat = 52_000; }
+                Ok(())
+            }).unwrap();
+            do_call_block(&node.state, A, CALL_ID, 1).await.unwrap();
+            assert_eq!(minutes_sent(&node), 2);
+            assert_eq!(next.load(Ordering::SeqCst), 2);
+        }
     }
 
     /// A call runs to its hold: every minute the node's cap allows is paid, at the
@@ -17114,69 +18798,550 @@ mod control_act_tests {
         assert_eq!(minutes_sent(&node), 0);
     }
 
-    /// End or local teardown on another OS thread against a minute's last step.
-    /// Either one revokes at once, while the minute still holds the money lock.
-    /// Revoked first: no kind 404 goes out and the minute is charged nothing.
-    /// Decided first: exactly one kind 404 goes out and is accounted, and End's
-    /// hangup is ordered after it.
+    /// End or local teardown on the runtime's worker threads against a minute's
+    /// last step. Either one revokes at once, while the minute still holds the
+    /// money lock. Revoked first: no kind 404 goes out and the minute is charged
+    /// nothing, its reservation released. Decided first: exactly one kind 404
+    /// goes out and is accounted, and End's hangup is ordered after it.
+    /// Teardown never claims the node closed the call. Every wait is bounded.
     #[test]
     fn a2_a_minute_revoked_first_is_never_sent_and_one_decided_first_goes_before_the_hangup() {
         let rt = race_runtime();
         for ender in ["end", "close"] {
             for revoke_first in [true, false] {
                 let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
-                let node = rt.block_on(minute_ready(routes));
+                let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
                 let state = &node.state;
                 let spent = budget_now(state).spent_msat;
-                let op = offer_op(&node);
+                let op = offer_op(node);
                 let point = if revoke_first { "before_decision" } else { "after_decision" };
                 let case = format!("{ender} {point}");
+                let before = minute_snapshot(node, &paid);
+                assert_admitted_and_idle(node, &case);
                 let (arrived, release) = pause_points::arm(&state.api_base, point);
-                std::thread::scope(|s| {
-                    let minute = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 0)));
-                    rt.block_on(arrived.notified());
-                    let stop = s.spawn(|| rt.block_on(async {
-                        if ender == "end" { do_op_end_call(state, CALL_ID).await.map(|_| ()) }
-                        else { do_op_close_call(state, &op, A, CALL_ID).await }
-                    }));
-                    let deadline = Instant::now() + Duration::from_secs(2);
-                    while consent_phase(&node) != ConsentPhase::Ended && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    let phase = consent_phase(&node);
-                    let sent_while_paused = compose_kinds(&node);
-                    // Every assertion below runs after the minute is released, so a
-                    // failure ends the test instead of leaving it paused.
-                    release.notify_one();
-                    assert_eq!(phase, ConsentPhase::Ended, "{case}: revoked at once, without the money lock");
-                    assert_eq!(sent_while_paused, [400], "{case}: nothing goes out while the minute holds the lock");
-                    let minute = minute.join().unwrap();
-                    if revoke_first {
-                        assert_eq!(minute.unwrap_err().code, "call_not_live", "{case}");
-                    } else {
-                        minute.unwrap();
-                    }
-                    stop.join().unwrap().unwrap();
-                });
+                let minute = rt.spawn(do_call_block(state, A, CALL_ID, 0));
+                reach(&rt, &arrived, &release, &case);
+                let stop = {
+                    let op = op.clone();
+                    rt.spawn(async move {
+                        if ender == "end" { do_op_end_call(&node.state, CALL_ID).await.map(|_| ()) }
+                        else { do_op_close_call(&node.state, &op, A, CALL_ID).await }
+                    })
+                };
+                let phase = phase_once_ended(node);
+                let sent_while_paused = compose_kinds(node);
+                let posts_while_paused = node.posts();
+                let stop_waiting = !stop.is_finished();
+                // Every assertion below runs after the minute is released, so a
+                // failure ends the test instead of leaving it paused.
+                release.notify_one();
+                assert_eq!(phase, ConsentPhase::Ended, "{case}: revoked at once, without the money lock");
+                assert_eq!(sent_while_paused, [400], "{case}: nothing goes out while the minute holds the lock");
+                assert_eq!(posts_while_paused, before.posts, "{case}: no POST of any kind while paused");
+                assert!(stop_waiting, "{case}: the ender waits for the minute's money lock");
+                let minute = joined(&rt, minute, &case);
+                if revoke_first {
+                    assert_eq!(minute.unwrap_err().code, "call_not_live", "{case}");
+                } else {
+                    minute.unwrap();
+                }
+                joined(&rt, stop, &case).unwrap();
                 let hangups = u64::from(ender == "end");
                 let minutes = u64::from(!revoke_first);
                 let mut order = vec![400];
                 if !revoke_first { order.push(404); }
                 if ender == "end" { order.push(403); }
-                assert_eq!(compose_kinds(&node), order, "{case}: the minute, if any, then the hangup");
+                assert_eq!(compose_kinds(node), order, "{case}: the minute, if any, then the hangup");
                 assert_eq!(budget_now(state).spent_msat, spent + (minutes + hangups) * PAID_SIGNAL_MSAT, "{case}: charged exactly what was sent");
                 assert_eq!(paid.lock().unwrap().pays as u64, 1 + minutes + hangups, "{case}");
-                let records = minute_records(&node);
+                let records = minute_records(node);
                 assert_eq!(records.len(), 1, "{case}");
                 assert_eq!(records[0].state, if revoke_first { spend_journal::OperationState::Unpaid } else { spend_journal::OperationState::Settled }, "{case}");
                 assert_eq!(records[0].paid_msat.unwrap_or(0), minutes * PAID_SIGNAL_MSAT, "{case}");
-                assert!(pending(&node).is_none(), "{case}");
-                assert_eq!(consent_phase(&node), ConsentPhase::Ended, "{case}");
-                // Revoked: no later minute passes.
+                assert!(pending(node).is_none(), "{case}");
+                assert_eq!(consent_phase(node), ConsentPhase::Ended, "{case}");
+                // Every POST: the earlier ones unchanged, then exactly the expected
+                // signals for this peer and call, and nothing else.
+                let after = minute_snapshot(node, &paid);
+                assert_eq!(after.posts[..before.posts.len()], before.posts[..], "{case}");
+                let added: Vec<_> = after.posts[before.posts.len()..].iter().map(compose_signal).collect();
+                let expected: Vec<_> = order[1..].iter().map(|kind| ("/messages/compose".to_string(), *kind, A.to_string(), CALL_ID.to_string())).collect();
+                assert_eq!(added, expected, "{case}: no other POST");
+                // One reservation per paid signal; a refused minute's is released.
+                assert_eq!(after.book[..before.book.len()], before.book[..], "{case}");
+                assert_eq!(after.book.len(), before.book.len() + (minutes + hangups) as usize, "{case}: no reservation left held");
+                assert!(after.book.iter().all(|(_, _, settled)| *settled), "{case}: no reservation left held");
+                assert_eq!(records[0].peer, A, "{case}");
+                assert_eq!(records[0].call_id.as_deref(), Some(CALL_ID), "{case}");
+                assert_ne!(records[0].op_id, op, "{case}");
+                let hangup_ops = hangup_records(node);
+                assert_eq!(hangup_ops.len() as u64, hangups, "{case}");
+                if let Some(hangup) = hangup_ops.first() {
+                    assert_eq!(hangup.parent_op.as_deref(), Some(op.as_str()), "{case}: the hangup is bound to the offer");
+                    assert_eq!(hangup.state, spend_journal::OperationState::Settled, "{case}");
+                    assert_ne!(hangup.op_id, records[0].op_id, "{case}");
+                } else {
+                    let offer = spend_journal(state).unwrap().operation_record(&op).unwrap().expect("the offer stays recorded");
+                    assert!(!offer.call_closed, "{case}: local teardown is not the node closing the call");
+                    assert!(!call_consent(state, A, CALL_ID).expect("consent kept").node_closed, "{case}");
+                }
+                // Revoked: no later minute passes, and nothing more is sent or paid.
+                let settled = minute_snapshot(node, &paid);
                 assert_eq!(rt.block_on(do_call_block(state, A, CALL_ID, 1)).unwrap_err().code, "call_not_live", "{case}");
-                assert_eq!(minutes_sent(&node), minutes as usize, "{case}");
+                assert_eq!(minutes_sent(node), minutes as usize, "{case}");
+                assert_eq!(minute_snapshot(node, &paid), settled, "{case}");
             }
         }
+    }
+
+    /// End lands while a minute sits between its two checks under the money
+    /// lock (consent still admitted, then the hold). The minute is refused as
+    /// a call that ended, not as one past its hold, and nothing is sent: no
+    /// POST of any kind, no charge, no reservation, no minute operation.
+    #[test]
+    fn a2_end_between_the_minute_checks_reports_the_call_ended() {
+        let rt = race_runtime();
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+        let before = minute_snapshot(node, &paid);
+        assert_admitted_and_idle(node, "end between checks");
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, "end between checks");
+        end_minutes(&node.state, CALL_ID);
+        release.notify_one();
+        let code = joined(&rt, minute, "end between checks").unwrap_err().code;
+        assert_eq!(code, "call_not_live", "End came first: the call ended, not past its hold");
+        assert_eq!(consent_phase(node), ConsentPhase::Ended);
+        assert_eq!(minutes_sent(node), 0);
+        assert_eq!(minute_snapshot(node, &paid), before, "no POST, charge, reservation or payment");
+        assert!(!compose_kinds(node).contains(&403), "the ended minute hangs up nothing itself");
+        assert!(minute_records(node).is_empty(), "no minute operation was begun");
+        assert!(pending(node).is_none());
+    }
+
+    /// Every POST, the budget's spend and book, and the node's paid dispatches:
+    /// all a minute could change.
+    #[derive(Debug, PartialEq)]
+    struct MinuteSnapshot { posts: Vec<(String, serde_json::Value)>, spent: u64, book: Vec<(String, u64, bool)>, pays: usize }
+
+    fn minute_snapshot(node: &Fake, paid: &Mutex<OpsNode>) -> MinuteSnapshot {
+        let pays = paid.lock().unwrap().pays;
+        MinuteSnapshot { posts: node.posts(), spent: budget_now(&node.state).spent_msat, book: book(node), pays }
+    }
+
+    /// `minute_ready`'s starting point: the offer alone sent, the call admitted,
+    /// no minute begun and nothing pending.
+    fn assert_admitted_and_idle(node: &Fake, case: &str) {
+        assert_eq!(compose_kinds(node), [400], "{case}");
+        assert_eq!(consent_phase(node), ConsentPhase::Admitted, "{case}");
+        assert!(minute_records(node).is_empty(), "{case}");
+        assert!(pending(node).is_none(), "{case}");
+    }
+
+    /// Waits, bounded, for a minute to reach its armed pause point. If it never
+    /// does, the gate is released so nothing stays paused, and the test fails.
+    fn reach(rt: &tokio::runtime::Runtime, arrived: &tokio::sync::Notify, release: &tokio::sync::Notify, case: &str) {
+        reach_within(rt, arrived, release, case, Duration::from_secs(5));
+    }
+
+    fn reach_within(rt: &tokio::runtime::Runtime, arrived: &tokio::sync::Notify, release: &tokio::sync::Notify, case: &str, bound: Duration) {
+        if rt.block_on(async { tokio::time::timeout(bound, arrived.notified()).await }).is_err() {
+            release.notify_one();
+            panic!("{case}: the minute never reached its pause point");
+        }
+    }
+
+    /// A spawned task's result, bounded: a task still running after 20 seconds
+    /// is aborted and fails the test instead of hanging it.
+    fn joined<T>(rt: &tokio::runtime::Runtime, task: tokio::task::JoinHandle<T>, case: &str) -> T {
+        joined_within(rt, task, case, Duration::from_secs(20))
+    }
+
+    fn joined_within<T>(rt: &tokio::runtime::Runtime, task: tokio::task::JoinHandle<T>, case: &str, bound: Duration) -> T {
+        let abort = task.abort_handle();
+        match rt.block_on(async { tokio::time::timeout(bound, task).await }) {
+            Ok(done) => done.unwrap(),
+            Err(_) => {
+                abort.abort();
+                panic!("{case}: did not finish in time");
+            }
+        }
+    }
+
+    /// The call's consent phase once it reads Ended, or after two seconds.
+    fn phase_once_ended(node: &Fake) -> ConsentPhase {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while consent_phase(node) != ConsentPhase::Ended && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        consent_phase(node)
+    }
+
+    /// The call's hangup operations.
+    fn hangup_records(node: &Fake) -> Vec<spend_journal::OperationRecord> {
+        spend_journal(&node.state).unwrap().call_operations_for(OWN, None, Some(CALL_ID)).unwrap()
+            .into_iter().filter(|r| r.kind == "call_hangup").collect()
+    }
+
+    /// The kind and call id of a compose POST, and its recipient.
+    fn compose_signal(post: &(String, serde_json::Value)) -> (String, u64, String, String) {
+        let (path, body) = post;
+        let call_id = body["plaintext"].as_str().and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+            .and_then(|p| p["call_id"].as_str().map(str::to_string)).unwrap_or_default();
+        (path.clone(), body["kind"].as_u64().unwrap_or(0), body["recipient"].as_str().unwrap_or_default().to_string(), call_id)
+    }
+
+    /// The owner's End, or local teardown, begins while a minute sits between
+    /// its two checks under the money lock. Either revokes at once; the minute
+    /// is refused as a call that ended and sends nothing. End's own hangup goes
+    /// out after it, alone and paid once; teardown sends and charges nothing.
+    #[test]
+    fn a2_full_end_or_teardown_between_minute_checks_preserves_accounting() {
+        let rt = race_runtime();
+        for ender in ["end", "close"] {
+            let case = format!("{ender} between checks");
+            let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+            let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+            let op = offer_op(node);
+            let before = minute_snapshot(node, &paid);
+            assert_admitted_and_idle(node, &case);
+            let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+            let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+            reach(&rt, &arrived, &release, &case);
+            let stop = {
+                let op = op.clone();
+                rt.spawn(async move {
+                    if ender == "end" { do_op_end_call(&node.state, CALL_ID).await.map(|_| ()) }
+                    else { do_op_close_call(&node.state, &op, A, CALL_ID).await }
+                })
+            };
+            let phase = phase_once_ended(node);
+            let while_paused = node.posts();
+            let stop_waiting = !stop.is_finished();
+            release.notify_one();
+            assert_eq!(phase, ConsentPhase::Ended, "{case}: revoked at once, without the money lock");
+            assert_eq!(while_paused, before.posts, "{case}: nothing goes out while the minute holds the lock");
+            assert!(stop_waiting, "{case}: the ender waits for the minute's money lock");
+            let minute = joined(&rt, minute, &case);
+            let stop = joined(&rt, stop, &case);
+            assert_eq!(minute.unwrap_err().code, "call_not_live", "{case}: the call ended, not past its hold");
+            stop.unwrap();
+            let after = minute_snapshot(node, &paid);
+            assert_eq!(after.posts[..before.posts.len()], before.posts[..], "{case}: earlier POSTs unchanged");
+            let added: Vec<_> = after.posts[before.posts.len()..].iter().map(compose_signal).collect();
+            assert!(minute_records(node).is_empty(), "{case}: no minute operation was begun");
+            assert!(pending(node).is_none(), "{case}");
+            assert_eq!(consent_phase(node), ConsentPhase::Ended, "{case}");
+            assert_eq!(minutes_sent(node), 0, "{case}");
+            if ender == "end" {
+                assert_eq!(added, [("/messages/compose".to_string(), 403, A.to_string(), CALL_ID.to_string())], "{case}: only End's hangup goes out");
+                assert_eq!(after.spent, before.spent + PAID_SIGNAL_MSAT, "{case}: the hangup alone is charged");
+                assert_eq!(after.pays, before.pays + 1, "{case}");
+                assert_eq!(after.book.len(), before.book.len() + 1, "{case}: one reservation, for the hangup");
+                assert_eq!(after.book[..before.book.len()], before.book[..], "{case}");
+                let hangups = hangup_records(node);
+                assert_eq!(hangups.len(), 1, "{case}");
+                assert_eq!(hangups[0].parent_op.as_deref(), Some(op.as_str()), "{case}: the hangup is bound to the offer");
+                assert_eq!(hangups[0].peer, A, "{case}");
+                assert_eq!(hangups[0].state, spend_journal::OperationState::Settled, "{case}");
+                assert_ne!(hangups[0].op_id, op, "{case}");
+            } else {
+                assert_eq!(after, before, "{case}: teardown sends, charges and reserves nothing");
+                assert!(hangup_records(node).is_empty(), "{case}");
+                let offer = spend_journal(&node.state).unwrap().operation_record(&op).unwrap().expect("the offer stays recorded");
+                assert!(!offer.call_closed, "{case}: local teardown is not the node closing the call");
+                assert!(!call_consent(&node.state, A, CALL_ID).expect("consent kept").node_closed, "{case}");
+            }
+            // Revoked: no later minute is sent.
+            let posts = node.posts();
+            assert_eq!(rt.block_on(do_call_block(&node.state, A, CALL_ID, 0)).unwrap_err().code, "call_not_live", "{case}");
+            assert_eq!(node.posts(), posts, "{case}");
+        }
+    }
+
+    /// End begins after a minute's last consent check passed and before its POST.
+    /// The call reads Ended at once, yet that one minute goes out, paid and
+    /// settled, and only then End's hangup; no later minute is sent.
+    #[test]
+    fn a2_end_after_the_last_minute_check_sends_that_minute_then_the_hangup() {
+        let rt = race_runtime();
+        let case = "end after decision";
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+        let op = offer_op(node);
+        let before = minute_snapshot(node, &paid);
+        assert_admitted_and_idle(node, case);
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "after_decision");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, case);
+        let stop = rt.spawn(async move { do_op_end_call(&node.state, CALL_ID).await.map(|_| ()) });
+        let phase = phase_once_ended(node);
+        let while_paused = node.posts();
+        let stop_waiting = !stop.is_finished();
+        release.notify_one();
+        assert_eq!(phase, ConsentPhase::Ended, "{case}: revoked at once");
+        assert_eq!(while_paused, before.posts, "{case}: nothing goes out while the minute holds the lock");
+        assert!(stop_waiting, "{case}: End's hangup waits for the minute's money lock");
+        let minute = joined(&rt, minute, case);
+        let stop = joined(&rt, stop, case);
+        minute.expect("decided before End: the minute goes out");
+        stop.unwrap();
+        let after = minute_snapshot(node, &paid);
+        assert_eq!(after.posts[..before.posts.len()], before.posts[..], "{case}");
+        let added: Vec<_> = after.posts[before.posts.len()..].iter().map(compose_signal).collect();
+        let signal = |kind| ("/messages/compose".to_string(), kind, A.to_string(), CALL_ID.to_string());
+        assert_eq!(added, [signal(404), signal(403)], "{case}: the minute, then the hangup");
+        assert_eq!(after.spent, before.spent + 2 * PAID_SIGNAL_MSAT, "{case}: charged exactly what was sent");
+        assert_eq!(after.pays, before.pays + 2, "{case}");
+        assert_eq!(after.book[..before.book.len()], before.book[..], "{case}");
+        let records = minute_records(node);
+        assert_eq!(records.len(), 1, "{case}");
+        assert_eq!(records[0].state, spend_journal::OperationState::Settled, "{case}");
+        assert_eq!(records[0].paid_msat, Some(PAID_SIGNAL_MSAT), "{case}");
+        assert_eq!(records[0].peer, A, "{case}");
+        let hangups = hangup_records(node);
+        assert_eq!(hangups.len(), 1, "{case}");
+        assert_eq!(hangups[0].parent_op.as_deref(), Some(op.as_str()), "{case}: the hangup is bound to the offer");
+        assert_ne!(hangups[0].op_id, records[0].op_id, "{case}");
+        assert!(pending(node).is_none(), "{case}");
+        assert_eq!(consent_phase(node), ConsentPhase::Ended, "{case}");
+        // Revoked: the next minute is refused and nothing more is sent or paid.
+        let settled = minute_snapshot(node, &paid);
+        assert_eq!(rt.block_on(do_call_block(&node.state, A, CALL_ID, 1)).unwrap_err().code, "call_not_live", "{case}");
+        assert_eq!(minute_snapshot(node, &paid), settled, "{case}");
+        assert_eq!(minutes_sent(node), 1, "{case}");
+    }
+
+    /// A refusal that lands while a minute sits between its two checks stays
+    /// the answer, with its own code and words: not "ended", not "past the
+    /// hold". Nothing is sent, charged or begun.
+    #[test]
+    fn a2_a_refusal_between_the_minute_checks_keeps_its_own_reason() {
+        const CODE: &str = "test_refused_between_checks";
+        const WORDS: &str = "Synthetic refusal text for this test only.";
+        let rt = race_runtime();
+        let case = "refused between checks";
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+        let before = minute_snapshot(node, &paid);
+        assert_admitted_and_idle(node, case);
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, case);
+        node.state.call_consents.lock().unwrap().refuse(OWN, A, CALL_ID, CODE, WORDS);
+        release.notify_one();
+        let error = joined(&rt, minute, case).unwrap_err();
+        assert_eq!((error.code, error.message.as_str()), (CODE, WORDS), "{case}: the refusal is the answer");
+        assert_eq!(consent_phase(node), ConsentPhase::Refused { code: CODE, message: WORDS.into() }, "{case}");
+        assert_eq!(minute_snapshot(node, &paid), before, "{case}: no POST, charge, reservation or payment");
+        assert!(minute_records(node).is_empty(), "{case}");
+        assert!(pending(node).is_none(), "{case}");
+    }
+
+    /// Synthetic: the call's consent disappears while a minute sits between its
+    /// two checks (no product path removes a kept consent). The second check
+    /// finds none and the minute is refused as having no consent: nothing is
+    /// sent, charged, reserved or begun, and nothing is hung up.
+    #[test]
+    fn a2_a_consent_gone_between_the_minute_checks_pays_nothing() {
+        let rt = race_runtime();
+        let case = "consent gone between checks";
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+        let before = minute_snapshot(node, &paid);
+        assert_admitted_and_idle(node, case);
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, case);
+        node.state.call_consents.lock().unwrap().entries.retain(|c| !(c.node_id == OWN && c.peer == A && c.call_id == CALL_ID));
+        release.notify_one();
+        let error = joined(&rt, minute, case).unwrap_err();
+        assert_eq!((error.code, error.message.as_str()), ("call_no_consent", NO_CONSENT), "{case}");
+        assert_eq!(minute_snapshot(node, &paid), before, "{case}: no POST, charge, reservation or payment");
+        assert!(minute_records(node).is_empty(), "{case}");
+        assert!(pending(node).is_none(), "{case}");
+    }
+
+    /// Synthetic: a minute of this call already settled in the journal with
+    /// ceiling `cap_msat`, as if paid earlier.
+    fn seed_settled_minute(node: &Fake, seq: u32, cap_msat: u64) {
+        let journal = spend_journal(&node.state).unwrap();
+        let body = act::call_block_body(A, CALL_ID, seq).unwrap();
+        let operation = (spend_journal::new_operation_id().unwrap(), spend_journal::operation(&body));
+        let begun = journal.begin_operation(OWN, "/messages/compose", &body, cap_msat, Some(operation)).unwrap();
+        journal.record_outcome(&begun, spend_journal::OperationState::Settled, None).unwrap();
+        journal.clear().unwrap();
+    }
+
+    /// A minute whose ceiling would pass the hold the owner confirmed, as the
+    /// journal counts it under the money lock: refused as past the hold, the
+    /// call's consent refused for good, and the call hung up. No kind 404 goes
+    /// out and no minute operation is begun; the hangup is the only POST and is
+    /// paid like any hangup. Three ways there: (synthetic) the confirmed hold
+    /// cleared while the minute sits between its checks, the confirmed hold
+    /// used up by minutes already journaled, and a journaled ceiling so large
+    /// the sum overflows.
+    #[test]
+    fn a2_a_minute_past_its_journaled_hold_is_refused_and_the_call_hung_up() {
+        let rt = race_runtime();
+        for variant in ["hold cleared between checks", "hold used up", "sum overflows"] {
+            let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+            let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+            assert_admitted_and_idle(node, variant);
+            match variant {
+                "hold used up" => seed_settled_minute(node, 59, 600_000),
+                "sum overflows" => seed_settled_minute(node, 59, u64::MAX),
+                _ => {}
+            }
+            let seeded: Vec<_> = minute_records(node).into_iter().map(|r| (r.op_id, r.state, r.cap_msat)).collect();
+            let before = minute_snapshot(node, &paid);
+            let error = if variant == "hold cleared between checks" {
+                let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+                let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+                reach(&rt, &arrived, &release, variant);
+                node.state.call_consents.lock().unwrap().find_mut(OWN, A, CALL_ID).expect("consent kept").confirmed_msat = None;
+                release.notify_one();
+                joined(&rt, minute, variant).unwrap_err()
+            } else {
+                let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+                joined(&rt, minute, variant).unwrap_err()
+            };
+            assert_eq!(error.code, MINUTE_PAST_HOLD, "{variant}: {}", error.message);
+            assert!(error.message.starts_with(MINUTE_PAST_HOLD_WORDS), "{variant}");
+            assert_eq!(consent_phase(node), ConsentPhase::Refused { code: MINUTE_PAST_HOLD, message: MINUTE_PAST_HOLD_WORDS.into() }, "{variant}: refused for good");
+            let after = minute_snapshot(node, &paid);
+            assert_eq!(after.posts[..before.posts.len()], before.posts[..], "{variant}");
+            let added: Vec<_> = after.posts[before.posts.len()..].iter().map(compose_signal).collect();
+            assert_eq!(added, [("/messages/compose".to_string(), 403, A.to_string(), CALL_ID.to_string())], "{variant}: the hangup alone goes out");
+            assert_eq!(after.spent, before.spent + PAID_SIGNAL_MSAT, "{variant}: the hangup alone is charged");
+            assert_eq!(after.pays, before.pays + 1, "{variant}");
+            assert_eq!(after.book[..before.book.len()], before.book[..], "{variant}");
+            assert_eq!(after.book.len(), before.book.len() + 1, "{variant}: one reservation, for the hangup");
+            let minutes: Vec<_> = minute_records(node).into_iter().map(|r| (r.op_id, r.state, r.cap_msat)).collect();
+            assert_eq!(minutes, seeded, "{variant}: no minute operation begun");
+            assert!(pending(node).is_none(), "{variant}");
+            let hangups = hangup_records(node);
+            assert_eq!(hangups.len(), 1, "{variant}");
+            assert_eq!(hangups[0].parent_op.as_deref(), Some(offer_op(node).as_str()), "{variant}: the hangup is bound to the offer");
+        }
+    }
+
+    /// The text of a caught panic.
+    fn panic_text(caught: Box<dyn std::any::Any + Send>) -> String {
+        caught.downcast_ref::<String>().cloned().or_else(|| caught.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
+    }
+
+    /// The pause helpers these tests use fail, and clean up, within bounds
+    /// when the orchestration goes wrong, instead of hanging: a pause point that
+    /// does not exist or is never reached, an ender that never revokes or fails,
+    /// a task that never finishes, and two nodes paused at the same point.
+    #[test]
+    fn a2_paused_minute_orchestration_fails_within_bounds() {
+        let rt = race_runtime();
+        let short = Duration::from_millis(500);
+        let ready = || -> (&'static Fake, Arc<Mutex<OpsNode>>) {
+            let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+            (Box::leak(Box::new(rt.block_on(minute_ready(routes)))), paid)
+        };
+
+        // A pause point no step names: the wait for it fails, and the minute,
+        // never paused, goes out.
+        let case = "missing point";
+        let (node, _) = ready();
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "no_such_point");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reach_within(&rt, &arrived, &release, case, short)));
+        assert!(panic_text(failed.expect_err("the wait must fail")).contains("never reached its pause point"), "{case}");
+        joined(&rt, minute, case).expect("not paused: the minute goes out");
+        assert_eq!(minutes_sent(node), 1, "{case}");
+
+        // A minute that fails before its pause point: the wait fails and releases
+        // the gate it left armed, so a later minute is not paused there.
+        let case = "unreached point";
+        let (node, _) = ready();
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 1));
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reach_within(&rt, &arrived, &release, case, short)));
+        assert!(panic_text(failed.expect_err("the wait must fail")).contains("never reached its pause point"), "{case}");
+        assert_eq!(joined(&rt, minute, case).unwrap_err().code, "call_block_not_due", "{case}");
+        let later = rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), do_call_block(&node.state, A, CALL_ID, 0)).await });
+        assert!(later.is_ok(), "{case}: the unreached gate was released; a later minute is not left paused");
+        later.unwrap().expect("the later minute goes out");
+        assert_eq!(minutes_sent(node), 1, "{case}");
+
+        // An ender that never revokes (End for another call): the wait for Ended
+        // gives up within its bound; released, the minute goes out and the ender
+        // reports its own error.
+        let case = "ender never revokes";
+        let (node, _) = ready();
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, case);
+        let stop = rt.spawn(do_op_end_call(&node.state, "fedcba9876543210fedcba9876543210"));
+        let waited = Instant::now();
+        let phase = phase_once_ended(node);
+        let waited = waited.elapsed();
+        release.notify_one();
+        assert_eq!(phase, ConsentPhase::Admitted, "{case}");
+        assert!(waited < Duration::from_secs(5), "{case}: the wait for Ended is bounded");
+        joined(&rt, minute, case).expect("not revoked: the minute goes out");
+        assert_eq!(joined(&rt, stop, case).unwrap_err().code, "call_not_found", "{case}");
+        assert_eq!(compose_kinds(node), [400, 404], "{case}");
+
+        // An ender that revokes and then fails (teardown naming no recorded
+        // admission): the minute is still refused, and the ender's error is
+        // returned, not lost.
+        let case = "ender error";
+        let (node, paid) = ready();
+        let before = minute_snapshot(node, &paid);
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, case);
+        let stop = rt.spawn(do_op_close_call(&node.state, "00000000-0000-4000-8000-000000000000", A, CALL_ID));
+        let phase = phase_once_ended(node);
+        release.notify_one();
+        assert_eq!(phase, ConsentPhase::Ended, "{case}");
+        assert_eq!(joined(&rt, minute, case).unwrap_err().code, "call_not_live", "{case}");
+        assert_eq!(joined(&rt, stop, case).unwrap_err().code, "call_not_found", "{case}");
+        assert_eq!(minute_snapshot(node, &paid), before, "{case}");
+
+        // A task that never finishes: the bounded join fails and aborts it.
+        let case = "task never finishes";
+        let alive = Arc::new(());
+        let held = alive.clone();
+        let stuck = rt.spawn(async move {
+            let _held = held;
+            std::future::pending::<()>().await
+        });
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| joined_within(&rt, stuck, case, short)));
+        assert!(panic_text(failed.expect_err("the join must fail")).contains("did not finish in time"), "{case}");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&alive) > 1 && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(2)); }
+        assert_eq!(Arc::strong_count(&alive), 1, "{case}: the stuck task was aborted");
+
+        // Two nodes paused at the same point: each gate is its own node's.
+        // Ending and releasing one leaves the other paused and admitted.
+        let case = "two nodes";
+        let (first, _) = ready();
+        let (second, _) = ready();
+        let (arrived_1, release_1) = pause_points::arm(&first.state.api_base, "between_block_checks");
+        let (arrived_2, release_2) = pause_points::arm(&second.state.api_base, "between_block_checks");
+        let minute_1 = rt.spawn(do_call_block(&first.state, A, CALL_ID, 0));
+        let minute_2 = rt.spawn(do_call_block(&second.state, A, CALL_ID, 0));
+        reach(&rt, &arrived_1, &release_1, case);
+        reach(&rt, &arrived_2, &release_2, case);
+        end_minutes(&first.state, CALL_ID);
+        release_1.notify_one();
+        let first_minute = joined(&rt, minute_1, case);
+        let second_still_paused = !minute_2.is_finished();
+        let second_phase = consent_phase(second);
+        release_2.notify_one();
+        assert_eq!(first_minute.unwrap_err().code, "call_not_live", "{case}");
+        assert!(second_still_paused, "{case}: the other node's minute stays paused");
+        assert_eq!(second_phase, ConsentPhase::Admitted, "{case}: the other node's call is not ended");
+        joined(&rt, minute_2, case).expect("the other node's minute goes out");
+        assert_eq!((minutes_sent(first), minutes_sent(second)), (0, 1), "{case}");
     }
 
     /// A minute and End or local teardown, racing freely on OS threads (the
@@ -17263,9 +19428,10 @@ mod control_act_tests {
         node.state.spend_timeout = Duration::from_secs(30);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let ops = paid.lock().unwrap();
-            let reached = if state.is_some() { ops.ops.len() > before } else { !ops.drop_next };
-            drop(ops);
+            let reached = {
+                let ops = paid.lock().unwrap();
+                if state.is_some() { ops.ops.len() > before } else { !ops.drop_next }
+            };
             if reached { return; }
             assert!(Instant::now() < deadline, "the node never took the minute");
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -17294,6 +19460,29 @@ mod control_act_tests {
         let last_compose = targets.iter().rposition(|t| t == "POST /messages/compose").unwrap();
         assert!(at(format!("GET /messages/operations/{id}")) < at(format!("POST /messages/operations/{id}/abandon")));
         assert!(at(format!("POST /messages/operations/{id}/abandon")) < last_compose, "abandoned before the hangup");
+    }
+
+    /// Their hangup closes the admission, so no End comes for a minute lost to it.
+    /// The check the ended card runs by itself settles it, through the owner's
+    /// path: by operation id, nothing sent, and the fence is gone.
+    #[tokio::test]
+    async fn a2_the_check_settles_a_minute_lost_to_their_hangup_and_sends_nothing() {
+        let (routes, paid) = minutes_routes_with_abandon();
+        let mut node = minute_ready(routes).await;
+        lose_minute_reply(&mut node, &paid, None).await;
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        observe_call_event(&node.state, &inbound_call_event(403, "hangup")).await;
+        assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown", "the fence holds until checked");
+        let (composed, pays) = (compose_kinds(&node), paid.lock().unwrap().pays);
+
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap(), NOTHING_PAID);
+
+        assert_eq!(compose_kinds(&node), composed, "the check sends nothing");
+        assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert!(no_pending_spend(&node.state).is_ok());
+        do_message_send(&node.state, A, false, "hi", 7000, None).await.expect("a message goes");
+        assert_eq!(paid.lock().unwrap().pays, pays + 1, "only the message was paid");
     }
 
     /// The node reports the minute still paying: End says the outcome is
@@ -18219,7 +20408,7 @@ mod control_act_tests {
         async fn serve(stream: tokio::net::TcpStream, secret: [u8; 32], node: std::net::SocketAddr) -> std::io::Result<()> {
             let (mut from_app, mut to_app) = stream.into_split();
             let mut noise = snow::Builder::new(remote_access::NOISE_PROTOCOL.parse().unwrap())
-                .local_private_key(&secret).build_responder().unwrap();
+                .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
             let mut scratch = vec![0u8; 65_535];
             let message = read_frame(&mut from_app).await?;
             noise.read_message(&message, &mut scratch).unwrap();
@@ -18425,6 +20614,141 @@ mod control_act_tests {
         }
     }
 
+    /// Node rc21's reply when the callee's node refuses a minute's invoice because it
+    /// is catching up, captured from its own handlers: nothing left the wallet.
+    fn callee_catching_up_reply(id: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"accepted": false, "code": "peer_not_ready", "error": "recipient is not ready to receive payments: not_synced",
+            "max_routing_fee_msat": 5000, "operation_id": id, "payment_hash": null, "reason": "not_synced", "retry_allowed": true, "state": "released"})
+    }
+
+    /// A passing refusal, proven by the node's own reply: no fence, so the scheduler
+    /// tries again, and that try is a new operation, paid once.
+    #[tokio::test]
+    async fn a2_a_minute_refused_by_a_callee_catching_up_is_proven_unpaid_and_tried_again() {
+        let refusing = Arc::new(AtomicBool::new(true));
+        let refuse = refusing.clone();
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 404 && refuse.load(Ordering::SeqCst) {
+                return (503, callee_catching_up_reply(&body["operation_id"]).to_string());
+            }
+            routes(m, p, b)
+        })).await;
+        let (spent, pays) = (budget_now(&node.state).spent_msat, paid.lock().unwrap().pays);
+
+        let error = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert_eq!(error.code, "peer_not_ready", "{}", error.message);
+        assert!(error.message.contains("Nothing was paid"), "{}", error.message);
+        assert!(pending(&node).is_none(), "no fence");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!(budget_now(&node.state).spent_msat, spent, "nothing was charged");
+        let first = error.operation_id.clone().unwrap();
+        let record = ledger_record(&node, &first);
+        assert_eq!((record["kind"].as_str(), record["state"].as_str()), (Some("call_block"), Some("unpaid")));
+        assert!(!node.targets().iter().any(|t| t.starts_with("GET /messages/operations/")), "no check was needed");
+
+        refusing.store(false, Ordering::SeqCst);
+        let receipt = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        assert_ne!(receipt.operation_id.as_deref(), Some(first.as_str()), "a new operation");
+        assert_eq!(paid.lock().unwrap().pays, pays + 1, "paid once");
+    }
+
+    /// The book write that releases the minute's reservation fails. The record of
+    /// that reservation stays, so it can still be settled; it is never left held
+    /// in the book with nothing pointing at it.
+    #[tokio::test]
+    async fn a2_a_failed_release_on_a_callee_catching_up_keeps_the_record() {
+        let armed = Arc::new(Mutex::new(None::<PathBuf>));
+        let hook = armed.clone();
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 404 {
+                if let Some(dir) = hook.lock().unwrap().take() {
+                    // A directory in the way of the book's atomic replacement.
+                    let p = spend_journal::read_pending(&dir).unwrap().unwrap();
+                    std::fs::create_dir(budget::book_path(&dir, &p.node_id).with_extension("json.tmp")).unwrap();
+                }
+                return (503, callee_catching_up_reply(&body["operation_id"]).to_string());
+            }
+            routes(m, p, b)
+        })).await;
+        let dir = journal_file(&node).parent().unwrap().to_path_buf();
+        *armed.lock().unwrap() = Some(dir.clone());
+        let pays = paid.lock().unwrap().pays;
+
+        let error = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert!(armed.lock().unwrap().is_none(), "the fault was reached");
+        assert_ne!(error.code, "peer_not_ready", "{}", error.message);
+        assert!(budget_now(&node.state).unsettled_msat > 0, "the book still holds the reservation");
+        let held = pending(&node).expect("the reservation keeps its record");
+        assert!(held.budgeted);
+        assert!(book(&node).iter().any(|(id, _, settled)| id == held.charge_id() && !settled),
+            "the record names the held reservation");
+        assert_eq!(paid.lock().unwrap().pays, pays);
+        let book_tmp = budget::book_path(&dir, &held.node_id).with_extension("json.tmp");
+        std::fs::remove_dir(book_tmp).unwrap();
+    }
+
+    /// The whole of the reply must prove it. Short of that, the same refusal stays
+    /// unknown and the fence holds. `prepared` is what rc21 answers while an earlier
+    /// admission is in its journal, and it can hide a paid admission from this reply.
+    #[tokio::test]
+    async fn a2_a_catching_up_reply_short_of_the_proof_stays_unknown() {
+        type Change = fn(&mut serde_json::Value);
+        // The whole proof under another status is the general released reading
+        // (not dispatched, no fence), not this one; it is not listed here.
+        let changes: [(&str, u16, Change); 9] = [
+            ("prepared", 503, |v| v["state"] = "prepared".into()),
+            ("paying", 503, |v| v["state"] = "paying".into()),
+            ("payment_unknown", 503, |v| v["state"] = "payment_unknown".into()),
+            ("no state", 503, |v| { v.as_object_mut().unwrap().remove("state"); }),
+            ("hash", 503, |v| v["payment_hash"] = OP_HASH.into()),
+            ("no hash field", 503, |v| { v.as_object_mut().unwrap().remove("payment_hash"); }),
+            ("another operation", 503, |v| v["operation_id"] = "00000000-0000-4000-8000-000000000000".into()),
+            ("no retry", 503, |v| v["retry_allowed"] = false.into()),
+            ("amount", 503, |v| v["amount_msat"] = 1000.into()),
+        ];
+        for (name, status, change) in changes {
+            let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+            let node = minute_ready(Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 404 {
+                    let mut reply = callee_catching_up_reply(&body["operation_id"]);
+                    change(&mut reply);
+                    return (status, reply.to_string());
+                }
+                routes(m, p, b)
+            })).await;
+            let pays = paid.lock().unwrap().pays;
+            let error = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+            assert!(matches!(error.code, "spend_unknown" | "payment_unknown"), "{name}: {}", error.code);
+            assert!(pending(&node).is_some(), "{name}: the fence holds");
+            assert!(budget_now(&node.state).unsettled_msat > 0, "{name}: the reservation stays held");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{name}");
+        }
+    }
+
+    /// This reading is for a minute. Other sends keep what they had: the node's
+    /// released proof reads as not dispatched, with no fence, never as a minute
+    /// to try again.
+    #[tokio::test]
+    async fn a_catching_up_reply_to_another_send_is_unchanged() {
+        let (routes, _) = ops_node();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                return (503, callee_catching_up_reply(&body["operation_id"]).to_string());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        let error = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+        assert_eq!(error.code, "not_dispatched");
+        assert!(pending(&node).is_none());
+    }
+
     #[tokio::test]
     async fn a2_a_failed_offer_is_final_and_cannot_be_rebound_wider() {
         let (routes, _) = offer_routes(10_000, hold_json(10_000, 5_000, 60));
@@ -18512,7 +20836,7 @@ mod control_act_tests {
             {
                 let mut kept = node.state.call_consents.lock().unwrap();
                 for n in 0..3 * CALL_CONSENTS_KEPT {
-                    kept.register(node_id.clone(), A, &id(n), MINUTES).unwrap();
+                    kept.register(node_id.clone(), A, &id(n), MINUTES, 0).unwrap();
                     assert!(kept.node_reported(&node_id, A, &id(n), None, true), "a short call its node closed");
                 }
                 assert!(kept.entries.len() <= CALL_CONSENTS_KEPT);
@@ -18520,8 +20844,8 @@ mod control_act_tests {
                 assert!(refused.pinned() && matches!(refused.phase, ConsentPhase::Refused { .. }));
                 assert_eq!(kept.pinned_count(&node_id), 1, "it counts against the open-call limit");
                 // With it pinned, only 15 more calls fit at once.
-                for n in 5000..5000 + CALL_CONSENTS_OPEN - 1 { kept.register(node_id.clone(), A, &id(n), MINUTES).unwrap(); }
-                assert_eq!(kept.register(node_id.clone(), A, &id(6000), MINUTES).unwrap_err().code, "call_consents_full");
+                for n in 5000..5000 + CALL_CONSENTS_OPEN - 1 { kept.register(node_id.clone(), A, &id(n), MINUTES, 0).unwrap(); }
+                assert_eq!(kept.register(node_id.clone(), A, &id(6000), MINUTES, 0).unwrap_err().code, "call_consents_full");
                 for n in 5000..5000 + CALL_CONSENTS_OPEN - 1 { kept.node_reported(&node_id, A, &id(n), None, true); }
             }
             // Wider rebinding, confirming the hold and paying a minute all stay refused.
@@ -18553,29 +20877,29 @@ mod control_act_tests {
         let mut kept = CallConsents::default();
         // A full table of open calls (offering or admitted): a new call is refused, none is evicted.
         for n in 0..CALL_CONSENTS_OPEN {
-            kept.register("node".into(), A, &id(n), MINUTES).unwrap();
+            kept.register("node".into(), A, &id(n), MINUTES, 0).unwrap();
             if n % 2 == 0 { kept.admit("node", A, &id(n)); }
         }
-        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES).unwrap_err().code, "call_consents_full");
+        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES, 0).unwrap_err().code, "call_consents_full");
         assert_eq!(kept.pinned_count("node"), CALL_CONSENTS_OPEN);
         // Another node identity's calls neither count here nor are evicted for it.
-        kept.register("other".into(), A, &id(1000), MINUTES).unwrap();
+        kept.register("other".into(), A, &id(1000), MINUTES, 0).unwrap();
         assert_eq!(kept.pinned_count("other"), 1);
         // Ending one at the app frees nothing: only its node showing it closed does.
         kept.end("node", Some(A), &id(CALL_CONSENTS_OPEN - 1));
-        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES).unwrap_err().code, "call_consents_full");
+        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES, 0).unwrap_err().code, "call_consents_full");
         gone(&mut kept, &id(CALL_CONSENTS_OPEN - 1));
         // A refused call whose hold is not closed takes that slot and stays pinned.
         let refused = id(1500);
-        kept.register("node".into(), A, &refused, MINUTES).unwrap();
+        kept.register("node".into(), A, &refused, MINUTES, 0).unwrap();
         kept.refuse("node", A, &refused, "call_hold_above_consent", "refused");
-        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES).unwrap_err().code, "call_consents_full",
+        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES, 0).unwrap_err().code, "call_consents_full",
             "a refused call with an open hold counts against the limit");
         kept.end("node", Some(A), &id(CALL_CONSENTS_OPEN - 2));
         gone(&mut kept, &id(CALL_CONSENTS_OPEN - 2));
         // Then many short calls, refused or ended and closed at their node, press the table far past its size.
         for n in 2000..2000 + 3 * CALL_CONSENTS_KEPT {
-            kept.register("node".into(), A, &id(n), MINUTES).unwrap();
+            kept.register("node".into(), A, &id(n), MINUTES, 0).unwrap();
             if n % 3 == 0 { kept.refuse("node", A, &id(n), "call_hold_above_consent", "refused"); } else { kept.end("node", Some(A), &id(n)); }
             gone(&mut kept, &id(n));
         }
@@ -18584,14 +20908,14 @@ mod control_act_tests {
         for n in 0..CALL_CONSENTS_OPEN - 2 {
             let c = kept.find("node", A, &id(n)).expect("an open call is never evicted");
             assert_eq!((c.consent, c.phase.open()), (MINUTES, true));
-            assert_eq!(kept.register("node".into(), A, &id(n), wider).unwrap_err().code, "invalid");
-            assert!(kept.register("node".into(), A, &id(n), MINUTES).is_ok(), "the same offer again is a no-op");
+            assert_eq!(kept.register("node".into(), A, &id(n), wider, 0).unwrap_err().code, "invalid");
+            assert!(kept.register("node".into(), A, &id(n), MINUTES, 0).is_ok(), "the same offer again is a no-op");
         }
         // The refused call is still kept: it refuses any terms, and never becomes ended or admitted again.
         let c = kept.find("node", A, &refused).expect("a refused call is never evicted before its node closes it");
         assert!(c.pinned() && matches!(c.phase, ConsentPhase::Refused { .. }));
         for terms in [MINUTES, wider] {
-            assert_eq!(kept.register("node".into(), A, &refused, terms).unwrap_err().code, "invalid");
+            assert_eq!(kept.register("node".into(), A, &refused, terms, 0).unwrap_err().code, "invalid");
         }
         kept.end("node", Some(A), &refused);
         kept.admit("node", A, &refused);
@@ -18617,10 +20941,10 @@ mod control_act_tests {
         assert!(kept.node_reported("node", A, &refused, Some(&status("ended", "outgoing", Some(true))), false));
         let c = kept.find("node", A, &refused).unwrap();
         assert!(!c.pinned() && matches!(c.phase, ConsentPhase::Refused { .. }));
-        assert_eq!(kept.register("node".into(), A, &refused, wider).unwrap_err().code, "invalid");
+        assert_eq!(kept.register("node".into(), A, &refused, wider, 0).unwrap_err().code, "invalid");
         // An accepted offer the node no longer lists is over, whatever is pending elsewhere.
         let accepted = id(1000);
-        kept.register("node".into(), A, &accepted, MINUTES).unwrap();
+        kept.register("node".into(), A, &accepted, MINUTES, 0).unwrap();
         kept.find_mut("node", A, &accepted).unwrap().dispatched = true;
         assert!(kept.node_reported("node", A, &accepted, None, false));
         assert_eq!(kept.find("node", A, &accepted).unwrap().phase, ConsentPhase::Ended);
@@ -19526,6 +21850,886 @@ mod control_act_tests {
         assert!(pending(node).is_none());
     }
 
+    /// Node rc21's reply to a hangup with the callee offline, as seen on a real
+    /// node: its compose found the recipient gone before anything was dispatched.
+    fn recipient_offline_reply(body: &serde_json::Value) -> (u16, String) {
+        (400, serde_json::json!({"accepted": false, "code": 400,
+            "error": "Recipient is offline. Message will be queued and sent when they reconnect.",
+            "max_routing_fee_msat": 5000, "operation_id": body["operation_id"], "payment_hash": null,
+            "retry_allowed": true, "state": "released"}).to_string())
+    }
+
+    /// The same for a minute: the callee's node did not answer with a call price.
+    /// Captured the same way, from rc21's own handlers.
+    fn no_call_price_reply(body: &serde_json::Value) -> (u16, String) {
+        (400, serde_json::json!({"accepted": false, "code": 400,
+            "error": "their node did not answer with a call price (not connected, or this connection is not admitted yet: send them a message first); nothing was paid",
+            "operation_id": body["operation_id"], "payment_hash": null, "reason": "call_price_unknown",
+            "retry_allowed": true, "state": "released"}).to_string())
+    }
+
+    /// The callee goes offline mid-call. Each minute and hangup is refused as
+    /// above. The node ends the call by itself after `reads` reads of its status.
+    fn node_with_callee_offline(reads: usize) -> (Routes, Arc<Mutex<OpsNode>>) {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (routes, paid) = node_ending_the_call(ended.clone());
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p.starts_with("/calls?") && seen.fetch_add(1, Ordering::SeqCst) >= reads {
+                ended.store(true, Ordering::SeqCst);
+            }
+            if p == "/messages/compose" && !ended.load(Ordering::SeqCst) {
+                match body["kind"].as_u64() {
+                    Some(404) => return no_call_price_reply(&body),
+                    Some(403) => return recipient_offline_reply(&body),
+                    _ => {}
+                }
+            }
+            routes(m, p, b)
+        }), paid)
+    }
+
+    /// Callee offline mid-call: the minute and the hangup are proven unpaid by the
+    /// node's own reply, so nothing is fenced, nobody has to press "Check pending
+    /// result", and End closes once the node has ended the call by itself.
+    #[tokio::test]
+    async fn callee_offline_leaves_no_fence_and_end_closes_when_the_node_ends_the_call() {
+        let (routes, paid) = node_with_callee_offline(4);
+        let node = minute_ready(routes).await;
+        let offer = offer_op(&node);
+        let (spent, pays) = (budget_now(&node.state).spent_msat, paid.lock().unwrap().pays);
+
+        let minute = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert_eq!(minute.code, "not_dispatched", "{}", minute.message);
+        assert!(minute.message.contains("nothing was paid"), "{}", minute.message);
+        assert!(pending(&node).is_none(), "a refused minute holds no fence");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        let record = ledger_record(&node, minute.operation_id.as_deref().unwrap());
+        assert_eq!((record["kind"].as_str(), record["state"].as_str()), (Some("call_block"), Some("unpaid")));
+
+        let end = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.expect("End closes");
+        assert_eq!(end.op_id, offer, "the admission, closed");
+        assert_eq!(hangups(&node), 1, "the refused hangup, and nothing more once the node shows the call ended");
+        assert!(!admission_is_open(&node, &offer));
+        assert!(pending(&node).is_none());
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!((budget_now(&node.state).spent_msat, paid.lock().unwrap().pays), (spent, pays), "nothing was paid");
+        assert!(!node.targets().iter().any(|t| t.starts_with("GET /messages/operations/") || t.ends_with("/abandon")),
+            "no check of a pending result was needed");
+
+        // Nothing stands in the way of the next paid action or the next call.
+        do_message_send(&node.state, A, false, "hi", 7000, None).await.expect("a message goes");
+        let redial = OFFER.replace(CALL_ID, REDIAL_ID);
+        do_call_signal(&node.state, A, 400, &redial, 15000).await.expect("the contact can be called again");
+    }
+
+    /// While End waits for the node, the fence is already gone: another paid action
+    /// goes out, and End holds no lock against it.
+    #[tokio::test]
+    async fn a_message_goes_out_while_end_waits_for_the_node() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let node = minute_ready(routes).await;
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let before = reads(&node);
+        let (end, sent) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            // End's hangup was refused and it is asking the node about the call.
+            for _ in 0..200 {
+                if hangups(&node) > 0 && reads(&node) > before { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            do_message_send(&node.state, A, false, "hi", 7000, None).await
+        });
+        assert!(sent.is_ok(), "{sent:?}");
+        assert_eq!(end.unwrap_err().code, "not_dispatched", "a call still open stays refused");
+    }
+
+    /// The wait is bounded, and only a call the node shows ended ends it. A call
+    /// still open, or a status that cannot be read, leaves the refusal as the
+    /// answer: the admission stays open, and no second hangup was sent.
+    #[tokio::test]
+    async fn end_gives_up_waiting_with_the_refusal_when_the_node_shows_no_end() {
+        for unreadable in [false, true] {
+            let (routes, paid) = node_with_callee_offline(usize::MAX);
+            let reads = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let broken = reads.clone();
+            let node = minute_ready(Arc::new(move |m, p, b| {
+                if p.starts_with("/calls?") && broken.load(Ordering::SeqCst) { return (500, "{}".into()); }
+                routes(m, p, b)
+            })).await;
+            let offer = offer_op(&node);
+            reads.store(unreadable, Ordering::SeqCst);
+            let pays = paid.lock().unwrap().pays;
+            let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+            assert_eq!(error.code, "not_dispatched", "{unreadable}");
+            assert_eq!(error.message, act::RECIPIENT_OFFLINE, "no queue is promised");
+            assert_eq!(hangups(&node), 1, "{unreadable}");
+            assert!(admission_is_open(&node, &offer), "{unreadable}");
+            assert!(pending(&node).is_none(), "{unreadable}");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{unreadable}");
+        }
+    }
+
+    /// Only a refusal End can outwait is waited for: any other answer is returned as
+    /// it was, at once, with no read of the call.
+    #[tokio::test]
+    async fn end_does_not_wait_on_an_unknown_outcome() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 403 {
+                return (502, r#"{"error":"no answer"}"#.into());
+            }
+            routes(m, p, b)
+        })).await;
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let before = reads(&node);
+        let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert!(pending(&node).is_some(), "the fence holds");
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(reads(&node), before, "no wait, no read of the call");
+    }
+
+    /// Node rc21 while an admission an earlier operation paid to this contact is
+    /// still in its journal: the same refusal, but `prepared`, for a lookup too, and
+    /// its abandon refuses with the same view. Those bytes are also what it returns
+    /// for a row whose journal shows a dispatch or a settlement, so they prove
+    /// nothing here. The fence stays, nothing is marked unpaid, End does not wait,
+    /// and no second hangup goes out. A node able to prove it answers `released`.
+    #[tokio::test]
+    async fn a_prepared_refusal_the_node_will_not_abandon_stays_fenced() {
+        let can_abandon = Arc::new(AtomicBool::new(false));
+        let abandon_ok = can_abandon.clone();
+        let hangup_id = Arc::new(Mutex::new(String::new()));
+        let seen = hangup_id.clone();
+        let (routes, paid) = minutes_routes_with_abandon();
+        let view = |id: &str, state: &str| serde_json::json!({"accepted": false, "amount_msat": 0, "delivered": false, "max_routing_fee_msat": 5000,
+            "message_id": "e1c4388d928fb468514611fbebbf332bb2e9aba04e089b044f03db3759c871ab", "operation_id": id, "payment_hash": null,
+            "retry_allowed": true, "state": state}).to_string();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 403 {
+                *seen.lock().unwrap() = body["operation_id"].as_str().unwrap().to_string();
+                return (400, serde_json::json!({"accepted": false, "code": 400,
+                    "error": "Recipient is offline. Message will be queued and sent when they reconnect.",
+                    "max_routing_fee_msat": 5000, "operation_id": body["operation_id"], "payment_hash": null,
+                    "retry_allowed": true, "state": "prepared"}).to_string());
+            }
+            let id = seen.lock().unwrap().clone();
+            if !id.is_empty() && p == format!("/messages/operations/{id}") { return (200, view(&id, "prepared")); }
+            if !id.is_empty() && p == format!("/messages/operations/{id}/abandon") {
+                return if abandon_ok.load(Ordering::SeqCst) { (200, view(&id, "abandoned")) } else { (409, view(&id, "prepared")) };
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let before = reads(&node);
+
+        let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(reads(&node), before, "End does not wait on an unknown outcome");
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        assert_eq!(ledger_record(&node, &id)["state"], "unknown");
+
+        // Neither End nor the owner's check can clear it while the node refuses.
+        let again = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap();
+        assert_eq!((again.op_id.as_str(), again.state), (id.as_str(), spend_journal::OperationState::Unknown));
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "payment_unknown");
+        assert_eq!(ledger_record(&node, &id)["state"], "unknown", "never marked unpaid");
+        assert_eq!(do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err().code, "spend_unknown", "the fence holds");
+        assert!(budget_now(&node.state).unsettled_msat > 0, "the reservation stays held");
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays);
+        assert!(admission_is_open(&node, &offer));
+
+        // A node that can prove it: the same check clears it, and no one is stuck.
+        can_abandon.store(true, Ordering::SeqCst);
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap(), NOTHING_PAID);
+        assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+    }
+
+    /// A status read that does not come back cannot stretch the wait past its bound.
+    #[tokio::test]
+    async fn a_read_in_progress_cannot_extend_ends_wait() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let slow = Arc::new(AtomicBool::new(false));
+        let stuck = slow.clone();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && stuck.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_secs(30)); }
+            routes(m, p, b)
+        })).await;
+        slow.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+        assert_eq!(error.code, "not_dispatched");
+        assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
+        assert_eq!(hangups(&node), 1);
+    }
+
+// A read can block while it takes the app's credential. The binding (and its
+// deadline) are checked again after that, right before the request leaves, so a
+// read that waited never reaches a node it no longer belongs to, or arrives late.
+// Contention on the network epoch while the credential is held is the signal
+// that the read is blocked there.
+fn wait_for_token_contention(state: &NodeState) {
+    let limit = Instant::now() + Duration::from_secs(2);
+    let mut busy_since = None;
+    loop {
+        match state.network_auth_epoch.try_lock() {
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let since = busy_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_millis(25) { return; }
+            }
+            Ok(epoch) => {
+                drop(epoch);
+                busy_since = None;
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("epoch poisoned"),
+        }
+        assert!(Instant::now() < limit, "read never blocked acquiring its credential");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn bound_status_read_does_not_dispatch_after_switch_during_token_acquisition() {
+    let rt = race_runtime();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let seen = read_count.clone();
+    let mut node = fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+        if p.starts_with("/calls?") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (200, "[]".into())
+        } else { (404, "{}".into()) }
+    }));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let bound = NodeBound::now(&node.state, OWN, None).unwrap();
+    let result = std::thread::scope(|s| {
+        let credential = node.state.token.lock().unwrap();
+        let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
+        wait_for_token_contention(&node.state);
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        drop(credential);
+        read.join().unwrap()
+    });
+    assert!(result.is_err(), "a changed binding preserves refusal");
+    assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after the binding changed");
+}
+
+#[test]
+fn end_does_not_dispatch_after_switch_during_token_acquisition() {
+    let rt = race_runtime();
+    let (routes, _) = node_with_callee_offline(usize::MAX);
+    let switched = Arc::new(AtomicBool::new(false));
+    let wrong_reads = Arc::new(AtomicUsize::new(0));
+    let (on, wrong) = (switched.clone(), wrong_reads.clone());
+    let mut node = rt.block_on(minute_ready(Arc::new(move |m, p, b| {
+        if p.starts_with("/calls?") && on.load(Ordering::SeqCst) {
+            wrong.fetch_add(1, Ordering::SeqCst);
+            return (200, "[]".into());
+        }
+        routes(m, p, b)
+    })));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let offer = offer_op(&node);
+    let (read, go_on) = pause_points::arm(&node.state.api_base, "end_wait_read");
+    let end = std::thread::scope(|s| {
+        let end = s.spawn(|| rt.block_on(do_op_end_call_when_node_ends(&node.state, CALL_ID, None)));
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), read.notified()).await.expect("End's first read completed");
+        });
+        let credential = node.state.token.lock().unwrap();
+        go_on.notify_one();
+        wait_for_token_contention(&node.state);
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        switched.store(true, Ordering::SeqCst);
+        drop(credential);
+        end.join().unwrap()
+    });
+    assert_eq!(end.unwrap_err().code, "not_dispatched");
+    assert!(admission_is_open(&node, &offer));
+    assert_eq!(wrong_reads.load(Ordering::SeqCst), 0, "End read after the binding changed while waiting for a credential");
+}
+
+#[test]
+fn bound_status_read_does_not_dispatch_after_deadline_during_token_acquisition() {
+    let rt = race_runtime();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let seen = read_count.clone();
+    let mut node = fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+        if p.starts_with("/calls?") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (200, "[]".into())
+        } else { (404, "{}".into()) }
+    }));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let bound = NodeBound::now(&node.state, OWN, Some(tokio::time::Instant::now() + Duration::from_millis(300))).unwrap();
+    let result = std::thread::scope(|s| {
+        let credential = node.state.token.lock().unwrap();
+        let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
+        wait_for_token_contention(&node.state);
+        std::thread::sleep(Duration::from_millis(350));
+        drop(credential);
+        read.join().unwrap()
+    });
+    assert!(result.is_err(), "a passed deadline preserves refusal");
+    assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after its deadline");
+}
+
+#[test]
+fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() {
+    let rt = race_runtime();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let seen = read_count.clone();
+    let mut node = fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+        if p.starts_with("/calls?") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (200, "[]".into())
+        } else { (404, "{}".into()) }
+    }));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let bound = NodeBound::now(&node.state, OWN, Some(deadline)).unwrap();
+    let (arrived, resume) = pause_points::arm(&node.state.api_base, "after_network_check");
+    let result = std::thread::scope(|s| {
+        let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), arrived.notified()).await.expect("credential acquired");
+        });
+        // The final check waits on the network epoch, held here past the deadline.
+        let epoch = node.state.network_auth_epoch.lock().unwrap();
+        assert!(tokio::time::Instant::now() < deadline, "resume before the deadline");
+        resume.notify_one();
+        std::thread::sleep(deadline.saturating_duration_since(tokio::time::Instant::now()) + Duration::from_millis(100));
+        assert!(!read.is_finished(), "read still waiting for validation");
+        drop(epoch);
+        read.join().unwrap()
+    });
+    assert!(result.is_err(), "a passed deadline preserves refusal");
+    assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after final validation blocked across its deadline");
+}
+
+
+    /// No status read starts at or after the wait's deadline: one begun there could
+    /// only time out. End's first read is answered "still live" and has completed:
+    /// End stops right after it. The deadline, set before that read, then passes,
+    /// and the node's credential is held elsewhere before End goes on. A read begun
+    /// now would wait for the credential. End returns the refusal at once instead,
+    /// and nothing more reaches the node.
+    #[test]
+    fn end_starts_no_status_read_at_its_deadline() {
+        let rt = race_runtime();
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let node = rt.block_on(minute_ready(routes));
+        let (read, go_on) = pause_points::arm(&node.state.api_base, "end_wait_read");
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let (holding, released) = (AtomicBool::new(false), AtomicBool::new(false));
+        std::thread::scope(|s| {
+            let end = s.spawn(|| rt.block_on(do_op_end_call_when_node_ends(&node.state, CALL_ID, None)));
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), read.notified()).await.expect("End's first read completed");
+            });
+            let before = reads(&node);
+            std::thread::sleep(END_WAIT_MAX);
+            s.spawn(|| {
+                let _token = node.state.token.lock().unwrap();
+                holding.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+                released.store(true, Ordering::SeqCst);
+            });
+            while !holding.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+            go_on.notify_one();
+            let error = end.join().unwrap().unwrap_err();
+            assert_eq!(error.code, "not_dispatched");
+            assert!(!released.load(Ordering::SeqCst), "a read began at the deadline and waited for the credential");
+            assert_eq!(reads(&node), before, "a read reached the node at the deadline");
+        });
+    }
+
+    /// Another node made active while End waits is never asked about this call.
+    #[tokio::test]
+    async fn end_asks_only_the_calls_own_node_while_it_waits() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let switched = Arc::new(AtomicBool::new(false));
+        let elsewhere = Arc::new(AtomicUsize::new(0));
+        let (on, asked) = (switched.clone(), elsewhere.clone());
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && on.load(Ordering::SeqCst) { asked.fetch_add(1, Ordering::SeqCst); }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            until_end_is_waiting(&node, before).await;
+            *node.state.node_id.lock().unwrap() = Some(C.into());
+            switched.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(end.unwrap_err().code, "not_dispatched");
+        assert_eq!(elsewhere.load(Ordering::SeqCst), 0, "a status read went to the other node");
+        assert!(admission_is_open(&node, &offer));
+        assert_eq!(hangups(&node), 1);
+    }
+
+    /// A switch of the active node ends the wait with the refusal, at once. The
+    /// call is never shown closed: not even when the call's own node is active
+    /// again by the time the other node's "no such call" comes back.
+    #[tokio::test]
+    async fn a_node_switch_during_ends_wait_leaves_the_refusal() {
+        let (routes, paid) = node_with_callee_offline(usize::MAX);
+        let switched = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(AtomicBool::new(false));
+        let back = Arc::new(AtomicBool::new(false));
+        let (on, seen, again) = (switched.clone(), asked.clone(), back.clone());
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && on.load(Ordering::SeqCst) {
+                // The other node has no such call. Its answer arrives once the
+                // call's own node is active again.
+                seen.store(true, Ordering::SeqCst);
+                while !again.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                return (200, "[]".into());
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let started = Instant::now();
+        // Time the operation itself: the driver below may keep sleeping after the refusal came back.
+        let ((end, took), ()) = tokio::join!(async {
+            let end = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await;
+            (end, started.elapsed())
+        }, async {
+            until_end_is_waiting(&node, before).await;
+            *node.state.node_id.lock().unwrap() = Some(C.into());
+            switched.store(true, Ordering::SeqCst);
+            for _ in 0..500 {
+                if asked.load(Ordering::SeqCst) { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            switched.store(false, Ordering::SeqCst);
+            *node.state.node_id.lock().unwrap() = Some(OWN.into());
+            back.store(true, Ordering::SeqCst);
+        });
+        let error = end.expect_err("a switch never shows the call closed");
+        assert_eq!(error.code, "not_dispatched");
+        assert!(took < END_WAIT_MAX / 2, "the switch ended the wait: {took:?}");
+        assert!(admission_is_open(&node, &offer));
+        assert!(pending(&node).is_none());
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays, "nothing was paid");
+    }
+
+    /// The node's first status read once `armed` is set is held until the test
+    /// has made another node active and the call's own node active again. Its
+    /// answer then is that the call is not listed.
+    fn read_held_across_a_switch(routes: Routes) -> (Routes, Arc<AtomicBool>, Arc<AtomicBool>, Arc<AtomicBool>) {
+        let (armed, asked, back) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (on, seen, again) = (armed.clone(), asked.clone(), back.clone());
+        (Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && on.load(Ordering::SeqCst) && !seen.swap(true, Ordering::SeqCst) {
+                while !again.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                return (200, "[]".into());
+            }
+            routes(m, p, b)
+        }), armed, asked, back)
+    }
+
+    /// Once the held read reached the node: another node is made active, then the
+    /// call's own again, and only then does the held read answer.
+    async fn switch_away_and_back(node: &Fake, asked: &AtomicBool, back: &AtomicBool) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !asked.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+        }).await.expect("the status read reached the node");
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        *node.state.node_id.lock().unwrap() = Some(OWN.into());
+        back.store(true, Ordering::SeqCst);
+    }
+
+    /// While End's read is with the node, another node is made active and then
+    /// the call's own again. The answer closes nothing: it is not known to be
+    /// the call's own node's.
+    #[tokio::test]
+    async fn ends_read_across_a_switch_and_back_closes_nothing() {
+        let (routes, paid) = node_with_callee_offline(usize::MAX);
+        let (routes, armed, asked, back) = read_held_across_a_switch(routes);
+        let node = minute_ready(routes).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        armed.store(true, Ordering::SeqCst);
+        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None),
+            switch_away_and_back(&node, &asked, &back));
+        assert_eq!(end.expect_err("a read across a switch never shows the call closed").code, "not_dispatched");
+        assert!(admission_is_open(&node, &offer));
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays, "nothing was paid");
+    }
+
+    /// End's read is refused for its token, and the node is switched before the
+    /// refusal comes back. No new token is asked for and the read is not tried
+    /// again on the other node: the refusal stays the answer.
+    #[tokio::test]
+    async fn ends_read_is_not_retried_after_a_node_switch() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let hanging_up = Arc::new(AtomicBool::new(false));
+        let (attempts, minted) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (switched, restored) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (armed, seen, mint, on, again) = (hanging_up.clone(), attempts.clone(), minted.clone(), switched.clone(), restored.clone());
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p == "/messages/compose"
+                && serde_json::from_str::<serde_json::Value>(b).unwrap_or_default()["kind"] == 403
+            {
+                armed.store(true, Ordering::SeqCst);
+            }
+            if !armed.load(Ordering::SeqCst) { return routes(m, p, b); }
+            if p == "/auth/local" {
+                mint.fetch_add(1, Ordering::SeqCst);
+                return (200, r#"{"token":"tok.2"}"#.into());
+            }
+            if p.starts_with("/calls?") {
+                if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // Refused only once another node is active.
+                    while !on.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                    return (401, "{}".into());
+                }
+                // A retry: answered once the call's own node is active again.
+                while !again.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                return (200, "[]".into());
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let done = AtomicBool::new(false);
+        let (end, ()) = tokio::join!(
+            async {
+                let end = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await;
+                done.store(true, Ordering::SeqCst);
+                end
+            },
+            async {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while attempts.load(Ordering::SeqCst) < 1 { tokio::time::sleep(Duration::from_millis(1)).await; }
+                }).await.expect("End's first read reached the node");
+                *node.state.node_id.lock().unwrap() = Some(C.into());
+                switched.store(true, Ordering::SeqCst);
+                // Until End is done, or a retry reached the node.
+                for _ in 0..2000 {
+                    if done.load(Ordering::SeqCst) || attempts.load(Ordering::SeqCst) > 1 { break; }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                *node.state.node_id.lock().unwrap() = Some(OWN.into());
+                restored.store(true, Ordering::SeqCst);
+            }
+        );
+        assert_eq!(end.expect_err("a read across a switch never shows the call closed").code, "not_dispatched");
+        assert!(admission_is_open(&node, &offer));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "the read was tried again");
+        assert_eq!(minted.load(Ordering::SeqCst), 0, "a token was asked for after the switch");
+    }
+
+    /// End with the price unavailable asks the node whether the call is over.
+    /// Another node made active, and the call's own again, while that read is
+    /// with the node: the answer closes nothing.
+    #[tokio::test]
+    async fn end_without_a_price_closes_nothing_on_a_read_across_a_switch() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (inner, _) = minutes_routes("live", serde_json::Value::Null);
+        let unreadable = Arc::new(AtomicBool::new(false));
+        let u = unreadable.clone();
+        let (routes, armed, asked, back) = read_held_across_a_switch(Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}/call") && u.load(SeqCst) {
+                return (400, r#"{"error":"their node did not answer with a call price; nothing was paid","code":400,"reason":"call_price_unknown"}"#.into());
+            }
+            inner(m, p, b)
+        }));
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let offer = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap().operation_id.unwrap();
+        unreadable.store(true, SeqCst);
+        armed.store(true, SeqCst);
+        let (end, ()) = tokio::join!(do_op_end_call(&node.state, CALL_ID), switch_away_and_back(&node, &asked, &back));
+        assert_eq!(end.expect_err("a read across a switch never shows the call over").code, "call_price_unknown");
+        assert_eq!(compose_kinds(&node), [400], "nothing was sent");
+        let records = spend_journal(&node.state).unwrap().call_operations(OWN, Some(A)).unwrap();
+        assert!(spend_journal::admission_open(records.iter().find(|r| r.op_id == offer).unwrap(), &records));
+    }
+
+    /// The check after a hangup: a read across a switch and back shows nothing
+    /// closed, and the call's consent stays as it was.
+    #[tokio::test]
+    async fn a_closed_check_across_a_switch_shows_nothing_closed() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let (routes, armed, asked, back) = read_held_across_a_switch(routes);
+        let node = minute_ready(routes).await;
+        armed.store(true, Ordering::SeqCst);
+        let (closed, ()) = tokio::join!(verify_call_closed(&node.state, OWN, A, CALL_ID), switch_away_and_back(&node, &asked, &back));
+        assert!(!closed, "another node's answer closed the call");
+        let consent = call_consent(&node.state, A, CALL_ID).unwrap();
+        assert!(!consent.node_closed && consent_closed(&consent.phase).is_none());
+    }
+
+    /// The hold check before a minute: a read across a switch and back is a failed
+    /// read. The call is not ended by it, and its next minute is not refused for it.
+    #[tokio::test]
+    async fn a_hold_check_across_a_switch_ends_nothing() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let (routes, armed, asked, back) = read_held_across_a_switch(routes);
+        let node = minute_ready(routes).await;
+        armed.store(true, Ordering::SeqCst);
+        let (hold, ()) = tokio::join!(do_call_hold(&node.state, A, CALL_ID, Some(600_000)), switch_away_and_back(&node, &asked, &back));
+        assert_ne!(hold.expect_err("a read across a switch checks nothing").code, "call_not_live");
+        let consent = call_consent(&node.state, A, CALL_ID).unwrap();
+        assert!(!consent.node_closed && consent_closed(&consent.phase).is_none(), "the call was ended on another node's word");
+    }
+
+    /// The approval runs out while End waits. The node's own "ended" is enough to
+    /// close the admission: nothing more is asked of it, and nothing is paid.
+    #[tokio::test]
+    async fn end_closes_on_the_nodes_word_when_the_approval_runs_out_during_the_wait() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (routes, paid) = node_ending_the_call(ended.clone());
+        let over = ended.clone();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 403 && !over.load(Ordering::SeqCst) {
+                return recipient_offline_reply(&body);
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let before = reads(&node);
+        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            for _ in 0..200 {
+                if hangups(&node) > 0 && reads(&node) > before { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            node.state.autopay.lock().unwrap().lock();
+            ended.store(true, Ordering::SeqCst);
+        });
+        let end = end.expect("End closes");
+        assert_eq!(end.op_id, offer, "the admission, closed");
+        assert_eq!(hangups(&node), 1, "nothing more was asked of the node");
+        assert_eq!(paid.lock().unwrap().pays, pays, "nothing was paid");
+        assert!(!admission_is_open(&node, &offer));
+        assert!(pending(&node).is_none());
+    }
+
+    /// A node that takes End's first hangup as offline, then ends the call when told.
+    /// `broken`: reads and quotes End's last request would need have stopped answering.
+    fn node_ending_after_an_offline_hangup(ended: Arc<AtomicBool>, broken: Arc<AtomicBool>) -> (Routes, Arc<Mutex<OpsNode>>) {
+        let (routes, paid) = node_ending_the_call(ended.clone());
+        (Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 403 && !ended.load(Ordering::SeqCst) {
+                return recipient_offline_reply(&body);
+            }
+            if broken.load(Ordering::SeqCst) && (p == "/status" || p.starts_with("/pricing") || p.starts_with("/pair")) {
+                return (500, "{}".into());
+            }
+            routes(m, p, b)
+        }), paid)
+    }
+
+    /// End's hangup was refused as offline and it is reading the call.
+    async fn until_end_is_waiting(node: &Fake, reads_before: usize) {
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        for _ in 0..400 {
+            if hangups(node) > 0 && reads(node) > reads_before { return; }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("End never began to wait");
+    }
+
+    /// Once the node shows the call ended, the admission closes whatever became of
+    /// the owner's authority meanwhile. Each of these would refuse a further request
+    /// before it leaves the host, and none of them is a reason to keep the call open.
+    #[tokio::test]
+    async fn the_nodes_word_closes_the_admission_whatever_refuses_a_further_request() {
+        for case in ["paused", "approval off", "contact left the book", "contact budget used up", "daily total used up", "quote unreadable", "connection waiting"] {
+            let ended = Arc::new(AtomicBool::new(false));
+            let broken = Arc::new(AtomicBool::new(false));
+            let (routes, paid) = node_ending_after_an_offline_hangup(ended.clone(), broken.clone());
+            let node = minute_ready(routes).await;
+            let offer = offer_op(&node);
+            let pays = paid.lock().unwrap().pays;
+            let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+            let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+                until_end_is_waiting(&node, before).await;
+                match case {
+                    "paused" => with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap(),
+                    "approval off" => node.state.autopay.lock().unwrap().lock(),
+                    "contact left the book" => with_book(&node.state, true, |b| b.set_limit(A, false, 0)).unwrap(),
+                    "contact budget used up" => with_book(&node.state, true, |b| b.set_limit(A, false, 1)).unwrap(),
+                    "daily total used up" => with_book(&node.state, true, |b| { b.set_ceiling(1); Ok(()) }).unwrap(),
+                    "quote unreadable" => broken.store(true, Ordering::SeqCst),
+                    "connection waiting" => node.state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable),
+                    _ => unreachable!(),
+                }
+                ended.store(true, Ordering::SeqCst);
+            });
+            let end = end.unwrap_or_else(|error| panic!("{case}: End closes: {}", error.code));
+            assert_eq!(end.op_id, offer, "{case}: the admission, closed");
+            assert!(!admission_is_open(&node, &offer), "{case}");
+            assert_eq!(hangups(&node), 1, "{case}: nothing more was asked of the node");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{case}: nothing was paid");
+            assert!(pending(&node).is_none(), "{case}");
+        }
+    }
+
+    /// Another send's unknown result, from while End waited, stays exactly as it was.
+    #[tokio::test]
+    async fn closing_on_the_nodes_word_leaves_another_sends_pending_result_alone() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (routes, paid) = node_ending_after_an_offline_hangup(ended.clone(), Arc::new(AtomicBool::new(false)));
+        let lose = Arc::new(AtomicBool::new(false));
+        let losing = lose.clone();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if losing.load(Ordering::SeqCst) && p == "/messages/compose" && body["kind"] != 403 {
+                return (502, r#"{"error":"no answer"}"#.into());
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let (end, sent) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            until_end_is_waiting(&node, before).await;
+            lose.store(true, Ordering::SeqCst);
+            let sent = do_message_send(&node.state, A, false, "hi", 7000, None).await;
+            ended.store(true, Ordering::SeqCst);
+            sent
+        });
+        assert_eq!(sent.unwrap_err().code, "spend_unknown");
+        let held = pending(&node).expect("the message's result stays pending");
+        let unsettled = budget_now(&node.state).unsettled_msat;
+        assert!(unsettled > 0);
+        let end = end.expect("End closes");
+        assert_eq!(end.op_id, offer);
+        assert!(!admission_is_open(&node, &offer));
+        let after = pending(&node).expect("still pending");
+        assert_eq!((after.id, after.operation_id.clone()), (held.id, held.operation_id.clone()));
+        assert_eq!(ledger_record(&node, held.operation_id.as_deref().unwrap())["state"], "unknown");
+        assert_eq!(budget_now(&node.state).unsettled_msat, unsettled);
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays);
+    }
+
+    /// Their word is needed: an approval that runs out on a call the node still
+    /// shows open closes nothing.
+    #[tokio::test]
+    async fn an_approval_running_out_closes_nothing_while_the_node_shows_the_call_open() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let node = minute_ready(routes).await;
+        let offer = offer_op(&node);
+        node.state.autopay.lock().unwrap().lock();
+        let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+        assert_ne!(error.code, "not_dispatched", "the approval is the refusal");
+        assert_eq!(hangups(&node), 0);
+        assert!(admission_is_open(&node, &offer));
+    }
+
+    /// The whole of the node's reply must say so. Anything else that could hold a
+    /// payment stays a fence: a hash, another state, another operation's id, a
+    /// retry refused, an amount, or a reply that is not this shape at all.
+    #[tokio::test]
+    async fn a_reply_short_of_the_nodes_proof_stays_unknown() {
+        type Change = fn(&mut serde_json::Value);
+        let changes: [(&str, Change); 11] = [
+            ("hash", |v| v["payment_hash"] = OP_HASH.into()),
+            ("no hash field", |v| { v.as_object_mut().unwrap().remove("payment_hash"); }),
+            ("prepared", |v| v["state"] = "prepared".into()),
+            ("paying", |v| v["state"] = "paying".into()),
+            ("payment_unknown", |v| v["state"] = "payment_unknown".into()),
+            ("no state", |v| { v.as_object_mut().unwrap().remove("state"); }),
+            ("another operation", |v| v["operation_id"] = "00000000-0000-4000-8000-000000000000".into()),
+            ("no retry", |v| v["retry_allowed"] = false.into()),
+            ("accepted", |v| v["accepted"] = true.into()),
+            ("amount", |v| v["amount_msat"] = 1000.into()),
+            ("admission", |v| v["readmission_msat"] = 1000.into()),
+        ];
+        for (name, change) in changes {
+            let (routes, paid) = ledger_call_routes();
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 403 {
+                    let mut reply: serde_json::Value = serde_json::from_str(&recipient_offline_reply(&body).1).unwrap();
+                    change(&mut reply);
+                    return (400, reply.to_string());
+                }
+                routes(m, p, b)
+            }));
+            approve_calls(&node).await;
+            do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            let unsettled = budget_now(&node.state).unsettled_msat;
+            let pays = paid.lock().unwrap().pays;
+            let error = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+            assert!(matches!(error.code, "spend_unknown" | "payment_unknown"), "{name}: {}", error.code);
+            assert!(pending(&node).is_some(), "{name}: the fence holds");
+            assert!(budget_now(&node.state).unsettled_msat > unsettled, "{name}: the reservation stays held");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{name}");
+        }
+    }
+
+    /// The node's proof covers the id it names only when this POST was that id's
+    /// first: a retry of an id the node already holds stays with the check.
+    #[tokio::test]
+    async fn a_released_reply_to_a_reused_operation_id_stays_unknown() {
+        let (routes, ops) = ops_node();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let refusing = refuse.clone();
+        ops.lock().unwrap().readmission_capped = true;
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && refusing.load(Ordering::SeqCst) {
+                return recipient_offline_reply(&serde_json::from_str(b).unwrap());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        // Held resumable, under its id: sending this very message again reuses it.
+        assert_eq!(do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err().code, "readmission_capped");
+        let held = pending(&node).unwrap().operation_id.unwrap();
+        refuse.store(true, Ordering::SeqCst);
+        let error = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(error.operation_id.as_deref(), Some(held.as_str()));
+        assert!(pending(&node).is_some());
+    }
+
+    /// A message to a contact who is offline gets the same reply, for the same
+    /// reason. It must not fence every other paid action behind it.
+    #[tokio::test]
+    async fn a_message_to_an_offline_contact_leaves_no_fence() {
+        let (routes, paid) = ops_node();
+        let offline = Arc::new(AtomicBool::new(true));
+        let gone = offline.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && gone.load(Ordering::SeqCst) {
+                return recipient_offline_reply(&serde_json::from_str(b).unwrap());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        let error = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+        assert_eq!(error.code, "not_dispatched");
+        assert_eq!(error.message, act::RECIPIENT_OFFLINE);
+        assert!(pending(&node).is_none());
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        offline.store(false, Ordering::SeqCst);
+        do_message_send(&node.state, A, false, "hi", 7000, None).await.expect("sent as a new attempt");
+        assert_eq!(paid.lock().unwrap().pays, 1, "paid once");
+        let ids = op_ids(&node);
+        assert_ne!(ids[0], ids[1], "the refused id is never posted again");
+    }
+
     #[tokio::test]
     async fn end_closes_a_call_the_node_ended_at_its_minute_cap() {
         let ended = Arc::new(AtomicBool::new(false));
@@ -19912,7 +23116,7 @@ mod control_act_tests {
             journal.record_outcome(&prior, spend_journal::OperationState::Unpaid, None).unwrap();
         }
         let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
-            confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None };
+            confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None, call_window: false };
         let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
             "/messages/compose", body, 15000, Some(charge), None).await.unwrap_err();
         assert_eq!(err.code, "not_dispatched");
@@ -20028,6 +23232,756 @@ mod control_act_tests {
         g1_node_with(&["read", "receive"], Some(first))
     }
 
+    /// A node-routed Ring is checked against the grant the node holds now: a
+    /// grant that ends before the call could is refused, unsent and unpaid.
+    #[tokio::test]
+    async fn a_paid_ring_is_checked_against_the_grant_the_node_holds_now() {
+        for (secs, sent) in [(3_600, false), (86_400, true)] {
+            let (node, _dir, g1) = call_grant_node(1_000);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
+            let mut grant = g1_grant(secs, 400_000, 400_000);
+            grant["per_call_max_msat"] = 10_000.into();
+            grant["call_per_payment_max_msat"] = 10_000.into();
+            grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+            *g1.grant.lock().unwrap() = grant;
+            let minute = control::MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+            let result = do_call_signal_bounded(&node.state, A, 400, OFFER, offer, None, Some(&minute), None).await;
+            if sent {
+                assert_eq!(composes(&node), 1, "{secs}: {:?}", result.err());
+            } else {
+                assert_eq!(result.unwrap_err().code, "call_window_short", "{secs}");
+                assert_eq!(composes(&node), 0, "nothing sent or paid");
+            }
+        }
+    }
+
+    fn call_window_grant(secs: i64) -> serde_json::Value {
+        let mut grant = g1_grant(secs, 400_000, 400_000);
+        grant["per_call_max_msat"] = 10_000.into();
+        grant["call_per_payment_max_msat"] = 10_000.into();
+        grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+        grant
+    }
+
+    /// A paid answer is checked against the grant the node holds when it is
+    /// paid: a short grant refuses it, unsent and unpaid; a whole day sends it.
+    #[tokio::test]
+    async fn a_paid_answer_is_checked_against_the_grant_the_node_holds_now() {
+        for (secs, sent) in [(5 * 60, false), (86_400, true)] {
+            let (node, _dir, g1) = call_grant_node(1_000);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let max = quote.signal_msat + quote.signal_max_routing_fee_msat;
+            *g1.grant.lock().unwrap() = call_window_grant(secs);
+            let result = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, OFFER, max, None, None).await;
+            if sent {
+                assert_eq!(composes(&node), 1, "{secs}: {:?}", result.err());
+            } else {
+                assert_eq!(result.unwrap_err().code, "call_window_short", "{secs}");
+                assert_eq!(composes(&node), 0, "nothing sent or paid");
+            }
+        }
+    }
+
+    /// The grant can change after every earlier check and before the paid
+    /// step: replaced by a short one while the send waits for the money lock,
+    /// a node-routed Ring and a paid Answer are both refused there, before
+    /// anything is reserved or sent.
+    #[test]
+    fn a_grant_shortened_under_the_money_lock_refuses_a_ring_and_an_answer() {
+        for kind in [act::KIND_CALL_OFFER, act::KIND_CALL_ANSWER] {
+            let rt = race_runtime();
+            let (node, _dir, g1) = call_grant_node(1_000);
+            let quote = rt.block_on(async {
+                g1_approved(&node, 500_000).await;
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+                read_call_quote(&node.state, A).await.unwrap()
+            });
+            *g1.grant.lock().unwrap() = call_window_grant(86_400);
+            let minute = control::MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+            let state = &node.state;
+            let (arrived, release) = pause_points::arm(&state.api_base, "after_lock");
+            let result = std::thread::scope(|s| {
+                let send = s.spawn(|| rt.block_on(async {
+                    if kind == act::KIND_CALL_OFFER {
+                        let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
+                        do_call_signal_bounded(state, A, kind, OFFER, offer, None, Some(&minute), None).await
+                    } else {
+                        do_call_signal_bounded(state, A, kind, OFFER, quote.signal_msat + quote.signal_max_routing_fee_msat, None, None, None).await
+                    }
+                }));
+                rt.block_on(arrived.notified());
+                *g1.grant.lock().unwrap() = call_window_grant(5 * 60);
+                release.notify_one();
+                send.join().unwrap()
+            });
+            assert_eq!(result.unwrap_err().code, "call_window_short", "{kind}");
+            assert_eq!(composes(&node), 0, "{kind}: nothing sent or paid");
+            assert_eq!(pending_operation_id(state).unwrap(), None, "{kind}: nothing pending");
+        }
+    }
+
+    /// [`call_grant_node`] on a node that also advertises `extra`.
+    fn call_grant_node_with(offer_msat: u64, extra: &'static [&'static str]) -> (Fake, tempfile::TempDir, G1) {
+        let routes = call_routes(Some(offer_msat));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                let mut caps = vec!["paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1", "message_operations_v1"];
+                caps.extend_from_slice(extra);
+                return (200, serde_json::json!({"api_capabilities": caps}).to_string());
+            }
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" {
+                routes(m, p, b)
+            } else { (0, String::new()) }
+        });
+        g1_node_with(&["read", "receive"], Some(first))
+    }
+
+    /// With `call_continuity_v1` the node keeps an admitted call through its
+    /// grant's expiry, so a Ring or an Answer near the window's end is sent;
+    /// the same grant on a node without it is refused (tests above).
+    #[tokio::test]
+    async fn capable_call_near_window_end_is_admitted_with_pinned_coverage() {
+        for (extra, sent) in [(&["call_continuity_v1"][..], true), (&[][..], false), (&["call_continuity_v2"][..], false), (&["standing_allowance_v1", "call_reply_free_v1"][..], false)] {
+            for kind in [act::KIND_CALL_OFFER, act::KIND_CALL_ANSWER] {
+                let (node, _dir, g1) = call_grant_node_with(1_000, extra);
+                g1_approved(&node, 500_000).await;
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+                let quote = read_call_quote(&node.state, A).await.unwrap();
+                // One minute left on the box approval.
+                *g1.grant.lock().unwrap() = call_window_grant(60);
+                let minute = control::MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+                let result = if kind == act::KIND_CALL_OFFER {
+                    let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
+                    do_call_signal_bounded(&node.state, A, kind, OFFER, offer, None, Some(&minute), None).await
+                } else {
+                    do_renderer_call_signal(&node.state, A, kind, OFFER, quote.signal_msat + quote.signal_max_routing_fee_msat, None, None).await
+                };
+                if sent {
+                    assert_eq!(composes(&node), 1, "{extra:?} {kind}: {:?}", result.err());
+                    // Still within the minutes the owner agreed to: the hold's ceilings go with the offer.
+                    if kind == act::KIND_CALL_OFFER {
+                        assert_eq!(compose_bodies(&node)[0]["max_hold_msat"], 240 * 15_000);
+                    }
+                } else {
+                    assert_eq!(result.unwrap_err().code, "call_window_short", "{extra:?} {kind}");
+                    assert_eq!(composes(&node), 0, "{extra:?} {kind}: nothing sent or paid");
+                }
+            }
+        }
+    }
+
+    /// The legacy guard is kept exactly: without `call_continuity_v1`, an
+    /// unknown call limit still needs 241 minutes of approval.
+    #[tokio::test]
+    async fn legacy_node_retains_241_minute_unknown_limit_guard() {
+        for (secs, sent) in [(240 * 60, false), (241 * 60 + 30, true)] {
+            let (node, _dir, g1) = call_grant_node_with(1_000, &[]);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            *g1.grant.lock().unwrap() = call_window_grant(secs);
+            let result = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, OFFER, quote.signal_msat + quote.signal_max_routing_fee_msat, None, None).await;
+            if !sent { assert_eq!(result.unwrap_err().code, "call_window_short", "{secs}"); }
+            assert_eq!(composes(&node), usize::from(sent), "{secs}");
+        }
+    }
+
+    const DECLINE: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","reason":"declined"}"#;
+
+    /// A fake node for free replies: `own` lists its capabilities, `peer` is
+    /// the caller as `GET /peers` reports it, and compose answers `compose`.
+    fn free_reply_node(own: &'static [&'static str], peer: serde_json::Value, compose: (u16, serde_json::Value)) -> Fake {
+        let inner = happy();
+        fake(AuthMode::Local, Arc::new(move |m, p, b| match p {
+            "/status" => {
+                let mut caps = vec!["paid_send_caps_v1", "room_terminal_outcomes_v1", "message_operations_v1"];
+                caps.extend_from_slice(own);
+                (200, serde_json::json!({"api_capabilities": caps}).to_string())
+            }
+            "/peers" => (200, serde_json::json!([peer.clone()]).to_string()),
+            "/messages/compose" => (compose.0, compose.1.to_string()),
+            _ => inner(m, p, b),
+        }))
+    }
+
+    fn free_peer() -> serde_json::Value {
+        serde_json::json!({"node_id": A, "connected": true, "capabilities": ["X3dh", "Custom(\"call_reply_free_v1\")"]})
+    }
+
+    fn free_receipt() -> (u16, serde_json::Value) {
+        (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 0, "max_routing_fee_msat": 0}))
+    }
+
+    /// On a capable node, to a caller whose node advertises free replies, a
+    /// Decline is one compose of the declined hangup with a zero cap: no
+    /// grant, no spend window, no spend request, nothing held in the journal
+    /// or the budget book. An Answer goes the same way.
+    #[tokio::test]
+    async fn a_free_reply_posts_the_declined_hangup_or_answer_with_a_zero_cap_and_no_grant() {
+        for (kind, plaintext) in [(act::KIND_CALL_HANGUP, DECLINE), (act::KIND_CALL_ANSWER, OFFER)] {
+            let node = free_reply_node(&["call_reply_free_v1"], free_peer(), free_receipt());
+            assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked, "no window open");
+            let receipt = do_call_free_reply(&node.state, A, kind, plaintext).await.unwrap();
+            assert_eq!((receipt.kind, receipt.amount_msat, receipt.total_msat, receipt.delivered), (kind, 0, 0, true));
+            assert_eq!(node.posts(), [("/messages/compose".to_string(), serde_json::json!({
+                "recipient": A, "is_room": false, "kind": kind, "plaintext": plaintext,
+                "max_total_msat": 0, "max_routing_fee_msat": 0}))]);
+            assert!(!node.targets().iter().any(|t| t.contains("/pair/")), "{:?}", node.targets());
+            assert!(pending(&node).is_none());
+            assert!(book(&node).is_empty(), "nothing reserved in the budget book");
+        }
+    }
+
+    /// Never free on a guess: our node and the caller's node must both
+    /// advertise it, the caller must be connected, and the names must match
+    /// exactly. Otherwise nothing is sent, and nothing is paid instead.
+    #[tokio::test]
+    async fn mixed_peer_capability_never_implies_free_or_continuous_call() {
+        let cases: [(&'static [&'static str], serde_json::Value); 7] = [
+            (&[], free_peer()),
+            (&["call_continuity_v1", "standing_allowance_v1"], free_peer()),
+            (&["call_reply_free_v2"], free_peer()),
+            (&["call_reply_free_v1"], serde_json::json!({"node_id": A, "connected": false, "capabilities": ["Custom(\"call_reply_free_v1\")"]})),
+            (&["call_reply_free_v1"], serde_json::json!({"node_id": A, "connected": true, "capabilities": ["call_reply_free_v1"]})),
+            (&["call_reply_free_v1"], serde_json::json!({"node_id": A, "connected": true})),
+            (&["call_reply_free_v1"], serde_json::json!({"node_id": C, "connected": true, "capabilities": ["Custom(\"call_reply_free_v1\")"]})),
+        ];
+        for (own, peer) in cases {
+            let node = free_reply_node(own, peer.clone(), free_receipt());
+            for (kind, plaintext) in [(act::KIND_CALL_HANGUP, DECLINE), (act::KIND_CALL_ANSWER, OFFER)] {
+                let error = do_call_free_reply(&node.state, A, kind, plaintext).await.unwrap_err();
+                assert_eq!(error.code, "call_reply_not_free", "{own:?} {peer}");
+            }
+            assert!(node.posts().is_empty(), "{own:?} {peer}: {:?}", node.posts());
+        }
+    }
+
+    /// Only the exact answer or declined hangup goes out free; anything else
+    /// is refused before any request, and a refusal by the node is final:
+    /// one compose, never a paid retry.
+    #[tokio::test]
+    async fn only_an_answer_or_a_declined_hangup_is_a_free_reply_and_it_is_never_retried_paid() {
+        let node = free_reply_node(&["call_reply_free_v1"], free_peer(), free_receipt());
+        for (kind, plaintext) in [
+            (act::KIND_CALL_HANGUP, r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","reason":"hangup"}"#),
+            (act::KIND_CALL_HANGUP, r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef"}"#),
+            (act::KIND_CALL_HANGUP, r#"{"v":1,"call_id":"not-a-call","reason":"declined"}"#),
+            (act::KIND_CALL_OFFER, OFFER),
+            (402, r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","candidate":""}"#),
+            (act::KIND_CALL_BLOCK, r#"{"call_id":"0123456789abcdef0123456789abcdef","seq":0}"#),
+            (act::KIND_CALL_ANSWER, r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef"}"#),
+        ] {
+            assert_eq!(do_call_free_reply(&node.state, A, kind, plaintext).await.unwrap_err().code, "invalid", "{kind} {plaintext}");
+        }
+        assert!(node.posts().is_empty());
+        let refused = free_reply_node(&["call_reply_free_v1"], free_peer(),
+            (409, serde_json::json!({"error": "price above max_total_msat", "code": "price_cap_exceeded"})));
+        let error = do_call_free_reply(&refused.state, A, act::KIND_CALL_HANGUP, DECLINE).await.unwrap_err();
+        assert_eq!(error.code, "call_reply_not_sent");
+        assert_eq!(compose_bodies(&refused).iter().map(|b| b["max_total_msat"].clone()).collect::<Vec<_>>(), [serde_json::json!(0)]);
+        assert!(pending(&refused).is_none());
+    }
+
+    /// A free reply is reported free only on a success whose receipt shows
+    /// nothing paid. A server failure, an unreadable success, or one that
+    /// names any amount, fee or re-admission is unknown: never free, never
+    /// retried, and still one compose.
+    #[tokio::test]
+    async fn a_free_reply_is_free_only_on_a_zero_receipt_and_otherwise_unknown() {
+        let cases = [
+            (500, serde_json::json!({"error": "internal"})),
+            (503, serde_json::json!({})),
+            (200, serde_json::json!("not a receipt")),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true})),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 1_000, "max_routing_fee_msat": 0})),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 0, "max_routing_fee_msat": 5_000})),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 0, "max_routing_fee_msat": 0, "readmission_msat": 1_500})),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 0, "max_routing_fee_msat": 0, "fee_paid_msat": 1})),
+        ];
+        for (status, body) in cases {
+            let node = free_reply_node(&["call_reply_free_v1"], free_peer(), (status, body.clone()));
+            let error = do_call_free_reply(&node.state, A, act::KIND_CALL_HANGUP, DECLINE).await.unwrap_err();
+            assert_eq!(error.code, "call_reply_unknown", "{status} {body}");
+            assert_eq!(composes(&node), 1, "{status} {body}: one compose, no retry");
+            assert!(pending(&node).is_none());
+        }
+    }
+
+    fn with_status_caps(routes: Routes, extra: &'static [&'static str]) -> Routes {
+        Arc::new(move |m, p, b| {
+            let (status, body) = routes(m, p, b);
+            if p == "/status" && status == 200 {
+                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                if let Some(caps) = value["api_capabilities"].as_array_mut() {
+                    caps.extend(extra.iter().map(|c| serde_json::json!(c)));
+                }
+                return (status, value.to_string());
+            }
+            (status, body)
+        })
+    }
+
+    /// A live call's next minute after the owner's approval ran out by time:
+    /// a continuity node draws it on the hold pinned at admission, so the app
+    /// pays it; a legacy node would refuse it, so the app does not try. A
+    /// spending lock (or a refused token) still stops it on both.
+    #[tokio::test]
+    async fn a_minute_after_the_approval_lapsed_is_paid_only_on_a_continuity_node() {
+        for (continuity, stop) in [(true, "none"), (false, "none"), (true, "window_lock"), (true, "pause"), (true, "token_refused"), (true, "both_gates_by_hand")] {
+            let (routes, _next, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+                closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+            let routes = with_status_caps(routes, if continuity { &["call_continuity_v1"] } else { &[] });
+            let node = paced_call(routes, reserved).await;
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            {
+                // The owner's approval runs out by time during the call.
+                let now = now_ms();
+                node.state.autopay.lock().unwrap().arm_until(now, now, 500_000, act::SpendBasis::AppLock);
+                node.state.spend.lock().unwrap().arm_until(now, now, act::SpendBasis::AppLock);
+            }
+            // Then, perhaps, spending is stopped on purpose. The lock command
+            // closes only the spend window; the expired budget stays expired.
+            match stop {
+                "window_lock" => { do_spend_lock(&node.state); }
+                "pause" => { do_budget_pause(&node.state).unwrap(); }
+                "token_refused" => { refuse_spend(&node.state); }
+                // A reconciliation closing both gates is not an explicit stop.
+                "both_gates_by_hand" => { node.state.autopay.lock().unwrap().lock(); node.state.spend.lock().unwrap().lock(); }
+                _ => {}
+            }
+            let result = do_call_block(&node.state, A, CALL_ID, 1).await;
+            if continuity && matches!(stop, "none" | "both_gates_by_hand") {
+                assert_eq!(result.map(|r| r.kind).unwrap(), act::KIND_CALL_BLOCK, "{stop}");
+                assert_eq!(compose_kinds(&node), [400, 404, 404]);
+                assert!(pending(&node).is_none());
+            } else {
+                let code = result.unwrap_err().code;
+                assert!(matches!(code, "spend_expired" | "spend_locked" | "budget_needed" | "budget_paused"), "{continuity} {stop}: {code}");
+                assert_eq!(compose_kinds(&node), [400, 404], "{continuity} {stop}: nothing more sent");
+            }
+        }
+    }
+
+    /// The owner locks spending while a held minute waits for the money lock:
+    /// the lock is checked again at dispatch, and that minute is not sent.
+    #[test]
+    fn a_lock_while_a_held_minute_waits_stops_it_at_dispatch() {
+        let rt = race_runtime();
+        let (routes, _next, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+            closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+        let node = rt.block_on(async {
+            let node = paced_call(with_status_caps(routes, &["call_continuity_v1"]), reserved).await;
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            let now = now_ms();
+            node.state.autopay.lock().unwrap().arm_until(now, now, 500_000, act::SpendBasis::AppLock);
+            node.state.spend.lock().unwrap().arm_until(now, now, act::SpendBasis::AppLock);
+            node
+        });
+        let state = &node.state;
+        let (arrived, release) = pause_points::arm(&state.api_base, "after_lock");
+        let result = std::thread::scope(|s| {
+            let send = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 1)));
+            rt.block_on(arrived.notified());
+            do_spend_lock(state);
+            release.notify_one();
+            send.join().unwrap()
+        });
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(compose_kinds(&node), [400, 404]);
+    }
+
+    /// The node grant really expires during the call and the budget poll
+    /// reconciles it (both local gates close, the grant is forgotten): on a
+    /// continuity node the call's next held minute is still paid; on a
+    /// legacy node it is not.
+    #[tokio::test]
+    async fn a_held_minute_survives_reconciliation_after_the_grant_expired_on_a_continuity_node() {
+        for continuity in [true, false] {
+            let (routes, _, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+                closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+            let first: Routes = Arc::new(move |m, p, b| {
+                if p == "/pair/elevation/ab12" {
+                    return (200, serde_json::json!({"op_id": "ab12", "status": "pending"}).to_string());
+                }
+                if p.starts_with("/pair/") { return (0, String::new()); }
+                let (status, body) = routes(m, p, b);
+                if p == "/status" {
+                    let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    let caps = value["api_capabilities"].as_array_mut().unwrap();
+                    caps.push(grant::CAPABILITY.into());
+                    if continuity { caps.push("call_continuity_v1".into()); }
+                    return (status, value.to_string());
+                }
+                (status, body)
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+            *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 5_000_000);
+            approve_calls(&node).await;
+            node.state.autopay.lock().unwrap().lock();
+            spend_advance(&node.state, true).await.unwrap();
+            do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+            remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+            do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap();
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            // The grant ends at the node; the poll reconciles it.
+            *g1.grant.lock().unwrap() = g1_grant(-5, 5_000_000, 4_000_000);
+            do_budget_status(&node.state).await.unwrap();
+            assert!(node.state.node_grant.lock().unwrap().is_none(), "reconciled");
+            let result = do_call_block(&node.state, A, CALL_ID, 1).await;
+            if continuity {
+                assert_eq!(result.map(|r| r.kind).unwrap(), act::KIND_CALL_BLOCK);
+                assert_eq!(compose_kinds(&node), [400, 404, 404]);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(compose_kinds(&node), [400, 404]);
+            }
+        }
+    }
+
+    const HELD_ANSWER: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","sdp":"v=0"}"#;
+    const HELD_RESTART: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","candidate":"","sdp_mid":"bitsov-restart-v1"}"#;
+    const HELD_HANGUP: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","reason":"hangup"}"#;
+
+    /// Both of the owner's approvals run out by time, as during a long call.
+    fn lapse_approvals(state: &NodeState) {
+        let now = now_ms();
+        state.autopay.lock().unwrap().arm_until(now, now, 500_000, act::SpendBasis::AppLock);
+        state.spend.lock().unwrap().arm_until(now, now, act::SpendBasis::AppLock);
+    }
+
+    /// End of an outgoing call after the owner's approval ran out. On a node
+    /// that keeps the call, the hangup goes on the call's own authority and
+    /// the minutes stop; without it, the lapse is the answer as before. An
+    /// explicit stop (a lock, a pause) is still the answer. Minutes stop in
+    /// every case.
+    #[tokio::test]
+    async fn end_after_the_approval_lapsed_sends_the_hangup_of_a_kept_call() {
+        for (continuity, stop) in [(true, "none"), (false, "none"), (true, "window_lock"), (true, "pause")] {
+            let (routes, _next, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+                closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+            let routes = with_status_caps(routes, if continuity { &["call_continuity_v1"] } else { &[] });
+            let node = paced_call(routes, reserved).await;
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            lapse_approvals(&node.state);
+            match stop {
+                "window_lock" => { do_spend_lock(&node.state); }
+                "pause" => { do_budget_pause(&node.state).unwrap(); }
+                _ => {}
+            }
+            let ended = do_op_end_call(&node.state, CALL_ID).await;
+            if continuity && stop == "none" {
+                let view = ended.unwrap();
+                assert_eq!(compose_kinds(&node), [400, 404, 403], "{view:?}");
+                assert!(pending(&node).is_none());
+            } else {
+                let code = ended.unwrap_err().code;
+                assert!(matches!(code, "spend_expired" | "spend_locked" | "budget_paused"), "{continuity} {stop}: {code}");
+                assert_eq!(compose_kinds(&node), [400, 404], "{continuity} {stop}: no hangup sent");
+            }
+            // Whatever became of the hangup, End stopped the minutes.
+            assert!(do_call_block(&node.state, A, CALL_ID, 1).await.is_err(), "{continuity} {stop}");
+            assert_eq!(compose_kinds(&node).iter().filter(|k| **k == 404).count(), 1, "{continuity} {stop}: no minute after End");
+        }
+    }
+
+    /// An answered incoming call after the owner's approval ran out: on a node
+    /// that keeps the call, its reconnect request and its hangup still go; an
+    /// offer or answer does not. Without the node's support both are refused
+    /// as before.
+    #[tokio::test]
+    async fn a_kept_incoming_call_sends_its_reconnect_request_and_hangup_after_the_lapse() {
+        for continuity in [true, false] {
+            let (routes, _) = ledger_call_routes();
+            let node = fake(AuthMode::Local, with_status_caps(routes, if continuity { &["call_continuity_v1"] } else { &[] }));
+            approve_calls(&node).await;
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
+            do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await.unwrap();
+            lapse_approvals(&node.state);
+            // Taking or starting a call still needs an approval.
+            let again = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await;
+            assert!(matches!(again.unwrap_err().code, "spend_expired" | "spend_locked"), "{continuity}");
+            let restart = do_renderer_call_signal(&node.state, A, 402, HELD_RESTART, signal, None, None).await;
+            let hangup = do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, signal, None, None).await;
+            if continuity {
+                assert_eq!(restart.unwrap().kind, 402);
+                assert_eq!(hangup.unwrap().kind, act::KIND_CALL_HANGUP);
+                assert_eq!(compose_kinds(&node), [401, 402, 403]);
+            } else {
+                assert!(matches!(restart.unwrap_err().code, "spend_expired" | "spend_locked"));
+                assert!(matches!(hangup.unwrap_err().code, "spend_expired" | "spend_locked"));
+                assert_eq!(compose_kinds(&node), [401]);
+            }
+        }
+    }
+
+    /// A call never kept here (another call id, or one answered after a lock)
+    /// has no authority of its own; a kept call has a few signals, not a
+    /// channel: past `HELD_CALL_SIGNALS` the lapse is the answer.
+    #[tokio::test]
+    async fn only_a_kept_call_signals_after_the_lapse_and_only_a_few_times() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, with_status_caps(routes, &["call_continuity_v1"]));
+        approve_calls(&node).await;
+        let quote = read_call_quote(&node.state, A).await.unwrap();
+        let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
+        let other = r#"{"v":1,"call_id":"fedcba9876543210fedcba9876543210","reason":"hangup"}"#;
+        do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await.unwrap();
+        lapse_approvals(&node.state);
+        assert!(do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, other, signal, None, None).await.is_err());
+        for _ in 0..HELD_CALL_SIGNALS {
+            do_renderer_call_signal(&node.state, A, 402, HELD_RESTART, signal, None, None).await.unwrap();
+        }
+        let past = do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, signal, None, None).await;
+        assert!(matches!(past.unwrap_err().code, "spend_expired" | "spend_locked"));
+        assert_eq!(compose_kinds(&node).len(), 1 + usize::from(HELD_CALL_SIGNALS));
+        // An explicit stop since the answer: nothing of that call goes any more.
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, with_status_caps(routes, &["call_continuity_v1"]));
+        approve_calls(&node).await;
+        do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await.unwrap();
+        stop_spending(&node.state);
+        lapse_approvals(&node.state);
+        assert!(do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, signal, None, None).await.is_err());
+        assert_eq!(compose_kinds(&node), [401]);
+    }
+
+    /// The kept call's own authority covers its hangup and reconnect request
+    /// only: never a minute (kind 404, which only `do_call_block` pays on the
+    /// pinned hold), an offer or an answer. Nothing is taken from its count.
+    #[tokio::test]
+    async fn held_call_plan_never_covers_a_minute_an_offer_or_an_answer() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, with_status_caps(routes, &["call_continuity_v1"]));
+        approve_calls(&node).await;
+        do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, 6_000, None, None).await.unwrap();
+        lapse_approvals(&node.state);
+        let block = r#"{"call_id":"0123456789abcdef0123456789abcdef","seq":0}"#;
+        for (kind, plaintext) in [(act::KIND_CALL_BLOCK, block), (act::KIND_CALL_OFFER, OFFER), (act::KIND_CALL_ANSWER, HELD_ANSWER), (405, HELD_HANGUP)] {
+            assert!(held_call_plan(&node.state, A, kind, plaintext, 15_000).await.unwrap().is_none(), "{kind}");
+        }
+        assert_eq!(node.state.held_calls.lock().unwrap().entries[0].signals, 0, "nothing counted");
+        assert!(held_call_plan(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, 6_000).await.unwrap().is_some());
+        assert_eq!(compose_kinds(&node), [401]);
+    }
+
+    /// A node with free replies and continuity, whose caller takes free
+    /// replies: a zero-cap compose is a free reply, any other a paid signal.
+    /// `compose_wait`: how long a free reply takes at the node.
+    fn free_answer_node(compose_wait: Duration) -> Fake {
+        let (routes, _) = ledger_call_routes();
+        let routes = with_status_caps(routes, &["call_continuity_v1", "call_reply_free_v1"]);
+        fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/peers" { return (200, serde_json::json!([free_peer()]).to_string()); }
+            if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["max_total_msat"] == 0 {
+                std::thread::sleep(compose_wait);
+                return (200, free_receipt().1.to_string());
+            }
+            let (status, body) = routes(m, p, b);
+            if p == "/status" && status == 200 {
+                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                value["node_id"] = OWN.into();
+                return (status, value.to_string());
+            }
+            (status, body)
+        }))
+    }
+
+    /// Only the owner's ten-minute window is open: no budget approval.
+    fn open_window_only(state: &NodeState) {
+        let now = now_ms();
+        state.spend.lock().unwrap().arm_until(now, now + 600_000, act::SpendBasis::AppLock);
+        with_book(state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+    }
+
+    /// After the free answer, the approval lapses by time; then a hangup.
+    async fn hangup_after_lapse(node: &Fake) -> Result<act::CallReceipt, ActionError> {
+        lapse_approvals(&node.state);
+        do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, 6_000, None, None).await
+    }
+
+    /// A free answer is no proof that this app could spend: sent while spending
+    /// is locked (never opened, or locked by the owner before it), it goes out
+    /// free but keeps no call, so no later hangup or reconnect is paid on its
+    /// authority. With spending open, the same answer keeps the call.
+    #[tokio::test]
+    async fn a_free_answer_while_spending_is_locked_keeps_no_call() {
+        for case in ["never_opened", "locked_before", "open"] {
+            let node = free_answer_node(Duration::ZERO);
+            match case {
+                "never_opened" => { with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap(); }
+                "locked_before" => { open_window_only(&node.state); do_spend_lock(&node.state); }
+                _ => open_window_only(&node.state),
+            }
+            let answer = do_call_free_reply(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER).await.unwrap();
+            assert_eq!((answer.kind, answer.total_msat), (act::KIND_CALL_ANSWER, 0), "{case}: the answer still goes, free");
+            let kept = node.state.held_calls.lock().unwrap().entries.len();
+            let hangup = hangup_after_lapse(&node).await;
+            if case == "open" {
+                assert_eq!(kept, 1);
+                assert_eq!(hangup.unwrap().kind, act::KIND_CALL_HANGUP);
+                assert_eq!(compose_kinds(&node), [401, 403]);
+            } else {
+                assert_eq!(kept, 0, "{case}");
+                assert!(matches!(hangup.unwrap_err().code, "spend_locked" | "spend_expired"), "{case}");
+                assert_eq!(compose_kinds(&node), [401], "{case}: no paid hangup");
+            }
+        }
+    }
+
+    /// The owner locks spending while the free answer is at the node (after
+    /// the app checked spending, before the reply is through): the call is not
+    /// kept, and nothing later is paid on its authority.
+    #[tokio::test]
+    async fn a_lock_while_a_free_answer_is_sent_keeps_no_call() {
+        let node = free_answer_node(Duration::from_millis(300));
+        open_window_only(&node.state);
+        let state = &node.state;
+        let (answer, ()) = tokio::join!(do_call_free_reply(state, A, act::KIND_CALL_ANSWER, HELD_ANSWER), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            do_spend_lock(state);
+        });
+        assert_eq!(answer.unwrap().total_msat, 0);
+        assert!(state.held_calls.lock().unwrap().entries.is_empty());
+        assert!(hangup_after_lapse(&node).await.is_err());
+        assert_eq!(compose_kinds(&node), [401]);
+    }
+
+    /// Before the app has cached its node's identity, a free answer keeps the
+    /// call under the identity its node's status gives, not under none.
+    #[tokio::test]
+    async fn a_free_answer_before_the_node_identity_is_cached_keeps_the_call_under_the_status_identity() {
+        let node = free_answer_node(Duration::ZERO);
+        open_window_only(&node.state);
+        *node.state.node_id.lock().unwrap() = None;
+        do_call_free_reply(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER).await.unwrap();
+        assert_eq!(node.state.held_calls.lock().unwrap().entries.iter().map(|c| c.node_id.clone()).collect::<Vec<_>>(), [OWN.to_string()]);
+        *node.state.node_id.lock().unwrap() = Some(OWN.into());
+        assert_eq!(hangup_after_lapse(&node).await.unwrap().kind, act::KIND_CALL_HANGUP);
+        assert_eq!(compose_kinds(&node), [401, 403]);
+    }
+
+    /// On a paired node the kept call's signal goes only while the node still
+    /// holds a live grant. Once the grant itself has ended, the token cannot
+    /// spend: nothing is sent, so no refusal by the node can stop anything,
+    /// and the answer says the node ends the call by itself.
+    #[tokio::test]
+    async fn a_kept_call_signals_only_under_a_live_grant_on_a_paired_node() {
+        for grant_live in [true, false] {
+            let (routes, _) = ledger_call_routes();
+            let first: Routes = Arc::new(move |m, p, b| {
+                if p.starts_with("/pair/") { return (0, String::new()); }
+                let (status, body) = routes(m, p, b);
+                if p == "/status" {
+                    let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    let caps = value["api_capabilities"].as_array_mut().unwrap();
+                    caps.push(grant::CAPABILITY.into());
+                    caps.push("call_continuity_v1".into());
+                    return (status, value.to_string());
+                }
+                (status, body)
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+            *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 5_000_000);
+            approve_calls(&node).await;
+            node.state.autopay.lock().unwrap().lock();
+            spend_advance(&node.state, true).await.unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
+            do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await.unwrap();
+            lapse_approvals(&node.state);
+            if !grant_live { *g1.grant.lock().unwrap() = g1_grant(-5, 5_000_000, 4_000_000); }
+            let stops = spend_stops(&node.state);
+            let hangup = do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, signal, None, None).await;
+            if grant_live {
+                assert_eq!(hangup.unwrap().kind, act::KIND_CALL_HANGUP);
+                assert_eq!(compose_kinds(&node), [401, 403]);
+            } else {
+                assert_eq!(hangup.unwrap_err().code, "call_grant_ended");
+                assert_eq!(compose_kinds(&node), [401], "nothing sent on an ended grant");
+                assert_eq!(spend_stops(&node.state), stops, "no refusal stopped anything");
+            }
+        }
+    }
+
+    /// End of a kept outgoing call after its grant itself ended: no hangup
+    /// can be sent, the minutes stop at once, and End waits for the node to
+    /// end the call at its paid time, then closes the admission. Nothing is
+    /// sent, and no refusal stops anything else.
+    #[tokio::test]
+    async fn end_of_a_kept_call_after_its_grant_ended_waits_for_the_node_to_end_it() {
+        let (routes, _, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+            closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+        let over = Arc::new(AtomicBool::new(false));
+        let seen = over.clone();
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p.starts_with("/pair/") { return (0, String::new()); }
+            if p.starts_with("/calls?") && seen.load(std::sync::atomic::Ordering::SeqCst) { return (200, "[]".into()); }
+            let (status, body) = routes(m, p, b);
+            if p == "/status" {
+                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let caps = value["api_capabilities"].as_array_mut().unwrap();
+                caps.push(grant::CAPABILITY.into());
+                caps.push("call_continuity_v1".into());
+                return (status, value.to_string());
+            }
+            (status, body)
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 5_000_000);
+        approve_calls(&node).await;
+        node.state.autopay.lock().unwrap().lock();
+        spend_advance(&node.state, true).await.unwrap();
+        do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+        remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+        do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap();
+        do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        lapse_approvals(&node.state);
+        *g1.grant.lock().unwrap() = g1_grant(-5, 5_000_000, 4_000_000);
+        let stops = spend_stops(&node.state);
+        let state = &node.state;
+        let (arrived, release) = pause_points::arm(&state.api_base, "end_wait_read");
+        let (ended, ()) = tokio::join!(do_op_end_call_when_node_ends(state, CALL_ID, None), async {
+            arrived.notified().await;
+            // While End waits, no minute goes; then the node ends the call at its paid time.
+            assert!(do_call_block(state, A, CALL_ID, 1).await.is_err());
+            over.store(true, std::sync::atomic::Ordering::SeqCst);
+            release.notify_one();
+        });
+        let view = ended.unwrap();
+        assert_eq!((view.kind.as_str(), view.call_id.as_deref()), ("call_offer", Some(CALL_ID)));
+        assert_eq!(compose_kinds(&node), [400, 404], "no hangup on an ended grant, no minute after End");
+        assert_eq!(spend_stops(state), stops);
+        let journal = spend_journal(state).unwrap();
+        let offer = journal.operation_record(&view.op_id).unwrap().unwrap();
+        assert!(!spend_journal::admission_open(&offer, &journal.call_operations_for(OWN, None, Some(CALL_ID)).unwrap()), "the admission is closed");
+    }
+
+    /// A node without grants (pre-G1) keeps its answer path: no grant read
+    /// is needed or made for the call window, and nothing new refuses it.
+    #[tokio::test]
+    async fn a_paid_answer_on_a_node_without_grants_keeps_its_old_path() {
+        let routes = call_routes(Some(1_000));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "message_operations_v1"]}).to_string());
+            }
+            if p == "/pair/grant" { return (404, serde_json::json!({"code": "not_found"}).to_string()); }
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" { routes(m, p, b) } else { (0, String::new()) }
+        });
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        let quote = read_call_quote(&node.state, A).await.unwrap();
+        let result = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, OFFER,
+            quote.signal_msat + quote.signal_max_routing_fee_msat, None, None).await;
+        let code = result.as_ref().err().map(|e| e.code);
+        assert!(!matches!(code, Some("grant_unknown" | "call_window_short")), "{:?}", result.err());
+    }
+
     /// A minute is compared at its price with the signed per-payment limit:
     /// the node pins no routing fee for a usable direct channel.
     #[tokio::test]
@@ -20040,7 +23994,7 @@ mod control_act_tests {
             let quote = read_call_quote(&node.state, A).await.unwrap();
             let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
             assert!(offer <= 10_000);
-            let mut grant = g1_grant(3600, 400_000, 400_000);
+            let mut grant = g1_grant(86_400, 400_000, 400_000);
             grant["per_call_max_msat"] = 10_000.into();
             grant["call_per_payment_max_msat"] = 10_000.into();
             grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
@@ -20097,7 +24051,7 @@ mod control_act_tests {
             let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
             for (cap, sent) in [(signal - 1, false), (signal, true)] {
                 let before = composes(&node);
-                let mut grant = g1_grant(3600, 400_000, 400_000);
+                let mut grant = g1_grant(86_400, 400_000, 400_000);
                 grant["per_call_max_msat"] = 50_000.into();
                 grant["call_per_payment_max_msat"] = 50_000.into();
                 grant["message_per_payment_max_msat"] = cap.into();
@@ -20326,7 +24280,7 @@ mod control_act_tests {
             issued_at: now,
             expires_at: now + 24 * 3600,
             prices: FrontDoorPrices { admission_msat: 100_000, message_msat: 10_000, page_msat: 1_000, price_epoch: 0 },
-            profile: FrontDoorProfile { kind: ProfileKind::Person, display_name: "Maya".into(), tagline: String::new(), about: String::new(), avatar: None },
+            profile: FrontDoorProfile { kind: ProfileKind::Person, display_name: "Robin".into(), tagline: String::new(), about: String::new(), avatar: None },
             cv: None,
             media: vec![],
             site: None,
@@ -20484,7 +24438,7 @@ mod control_act_tests {
         let read = do_porch_read(&node.state, &peer, porch::CARD_PATH, quote.total_msat).await.unwrap();
         assert_eq!((read.status, read.kind, read.amount_msat, read.total_msat), ("ok", "card", 1_000, 6_000));
         let shown = read.card.unwrap();
-        assert_eq!((shown.view.profile.display_name.as_str(), shown.view.seq, shown.cached), ("Maya", 2, false));
+        assert_eq!((shown.view.profile.display_name.as_str(), shown.view.seq, shown.cached), ("Robin", 2, false));
         assert_eq!(fetches(&node), [serde_json::json!({"node_id": peer, "path": "/front-door.json", "max_total_msat": 6000, "max_routing_fee_msat": 5000})]);
         assert_eq!(budget_now(&node.state).accounted_msat, 6_000);
         assert_eq!(budget_now(&node.state).spent_msat, 1_000);
@@ -20659,6 +24613,133 @@ mod control_act_tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"hi");
         assert!(node.posts().is_empty(), "save must never POST");
         assert_eq!(do_file_fetch(&node.state, &"99".repeat(32)).await.unwrap_err(), act::FILE_NOT_STORED);
+    }
+
+    const VOICE_WEBM: &str = "voice-note-1.webm";
+
+    /// A node whose only stored file is one voice note, replying `blob`.
+    fn one_voice_note(mid: &str, blob: String) -> Fake {
+        let listed = serde_json::json!([{"id": FILE_ID, "mime_type": "video/webm", "message_id": mid}]);
+        fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+            let (route, _) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                "/files" => (200, listed.to_string()),
+                r if r == format!("/files/{FILE_ID}") => (200, blob.clone()),
+                _ => (404, r#"{"error":"route","code":404}"#.into()),
+            }
+        }))
+    }
+
+    fn voice_blob(mime: &str, size_bytes: u64, data_b64: &str) -> String {
+        serde_json::json!({"filename": VOICE_WEBM, "mime_type": mime, "size_bytes": size_bytes, "data_b64": data_b64}).to_string()
+    }
+
+    #[tokio::test]
+    async fn a_voice_note_is_held_to_the_file_cap_on_every_size() {
+        let mid = "cd".repeat(32);
+        // Exactly the cap plays: 1 400 000 bytes, one padding character.
+        let at_cap = format!("{}=", "A".repeat(1_866_667));
+        for mime in ["video/webm", "audio/webm"] {
+            let cap = act::FILE_MAX_BYTES as u64;
+            let node = one_voice_note(&mid, voice_blob(mime, cap, &at_cap));
+            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap().size_bytes, cap);
+            // One byte declared over the cap, with a tiny payload.
+            let node = one_voice_note(&mid, voice_blob(mime, cap + 1, "aGk="));
+            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_TOO_LARGE);
+            // A small declared size over a payload above the cap.
+            let over = "A".repeat(1_866_668 + 4);
+            let node = one_voice_note(&mid, voice_blob(mime, 2, &over));
+            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_TOO_LARGE);
+            // A body past the read limit, whatever it says about itself.
+            let huge = "A".repeat(act::FILE_BODY_MAX + 1);
+            let node = one_voice_note(&mid, voice_blob(mime, 2, &huge));
+            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
+            assert!(node.posts().is_empty(), "playback must never POST");
+        }
+    }
+
+    /// A node that lists one voice note and then answers its read with no
+    /// length at all: `body`, then, if `endless`, more until the reader leaves.
+    /// The returned channel reports how many bytes the node managed to write.
+    fn voice_note_without_length(mid: &str, body: String, endless: bool) -> (NodeState, std::sync::mpsc::Receiver<usize>, tempfile::TempDir) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_ne!(port, 3141, "tests must never hold the node port");
+        let listed = serde_json::json!([{"id": FILE_ID, "mime_type": "video/webm", "message_id": mid}]).to_string();
+        let (sent, written) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() { continue; }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() { break; }
+                }
+                if line.contains("/files?") {
+                    let _ = write!(stream, "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{listed}", listed.len());
+                    continue;
+                }
+                let _ = write!(stream, "HTTP/1.1 200 X\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n");
+                let _ = stream.write_all(body.as_bytes());
+                let mut total = body.len();
+                let filler = [b'A'; 64 * 1024];
+                while endless && total < ENDLESS_STOP && stream.write_all(&filler).is_ok() {
+                    total += filler.len();
+                }
+                let _ = sent.send(total);
+            }
+        });
+        let state = NodeState::for_api(format!("http://127.0.0.1:{port}/api/v1"));
+        *state.token.lock().unwrap() = Some("tok.1".into());
+        *state.auth.lock().unwrap() = AuthMode::Local;
+        let dir = tempfile::tempdir().unwrap();
+        *state.config.lock().unwrap() = Some(dir.path().join("konsensus.toml"));
+        (state, written, dir)
+    }
+
+    /// The fake node gives up here so a broken limit fails the test, not the run.
+    const ENDLESS_STOP: usize = 64 * 1024 * 1024;
+
+    #[tokio::test]
+    async fn a_voice_note_with_no_length_is_read_only_up_to_the_limit() {
+        let mid = "cd".repeat(32);
+        // No length and a normal body: it still plays.
+        let (state, _written, _dir) = voice_note_without_length(&mid, voice_blob("video/webm", 2, "aGk="), false);
+        assert_eq!(do_voice_note_fetch(&state, &mid).await.unwrap().data_b64, "aGk=");
+        // No length and a body that never ends: the read stops and the node is cut off.
+        let (state, written, _dir) = voice_note_without_length(&mid, String::new(), true);
+        assert_eq!(do_voice_note_fetch(&state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
+        // Waits on the runtime: the connection only closes while its task can run.
+        let mut waited = 0;
+        let total = loop {
+            match written.try_recv() {
+                Ok(total) => break total,
+                Err(_) if waited < 400 => {
+                    waited += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("the node was never cut off: {e}"),
+            }
+        };
+        assert!(total < ENDLESS_STOP, "the reader kept going to {total} bytes");
+    }
+
+    #[tokio::test]
+    async fn a_file_within_the_cap_in_an_oversized_response_is_not_called_over_the_cap() {
+        let mid = "cd".repeat(32);
+        // A file at the cap, and a peer's long name that takes the response past the limit.
+        let at_cap = format!("{}=", "A".repeat(1_866_667));
+        let name = format!("voice-note-{}.webm", "a".repeat(act::FILE_BODY_MAX - at_cap.len()));
+        let blob = serde_json::json!({
+            "filename": name, "mime_type": "video/webm",
+            "size_bytes": act::FILE_MAX_BYTES as u64, "data_b64": at_cap
+        }).to_string();
+        assert!(blob.len() > act::FILE_BODY_MAX);
+        let node = one_voice_note(&mid, blob);
+        assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
+        assert_eq!(do_file_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -20992,25 +25073,24 @@ mod control_act_tests {
     }
 
     #[tokio::test]
-    async fn the_owner_command_names_the_nodes_config_when_the_node_does_not() {
+    async fn the_owner_command_never_names_the_boxs_config() {
+        // Whether the app knows the config, an attached node's config, or the node
+        // names its own: the view carries the bare command, never a file path.
         let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op}"));
         *node.state.config.lock().unwrap() = Some(PathBuf::from("/Users/owner/Bitsov Node/konsensus.toml"));
         let view = spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(
-            view.pending.unwrap().owner_action,
-            "konsensus grant --op ab01 --config '/Users/owner/Bitsov Node/konsensus.toml'"
-        );
-        // An attached external node's config wins over the one the app started.
+        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01");
         let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op}"));
         *node.state.config.lock().unwrap() = Some(PathBuf::from("/own/konsensus.toml"));
         *node.state.external_node.lock().unwrap() = Some(PathBuf::from("/ext"));
         let view = spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01 --config '/ext/konsensus.toml'");
-        // A node that already names its config is shown verbatim.
-        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op} --config /srv/n/konsensus.toml"));
+        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01");
+        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op} --config /data/umbrel/app-data/konsensus.toml"));
         *node.state.config.lock().unwrap() = Some(PathBuf::from("/elsewhere/konsensus.toml"));
         let view = spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01 --config /srv/n/konsensus.toml");
+        let json = serde_json::to_string(&view).unwrap();
+        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01");
+        assert!(!json.contains("konsensus.toml") && !json.contains("--config"), "{json}");
     }
 
     #[tokio::test]
@@ -21036,9 +25116,9 @@ mod control_act_tests {
         let view = spend_advance(&node.state, true).await.unwrap();
         assert_eq!(view.state, act::SpendState::Pending);
         let pending = view.pending.unwrap();
-        // The node named no config; the app adds the one it started the node with.
-        let config = node.state.config.lock().unwrap().clone().unwrap();
-        assert_eq!(pending.owner_action, format!("konsensus grant --op ab12 --config '{}'", config.display()));
+        // The node named no config, and the app adds none: no file path reaches the view.
+        assert!(node.state.config.lock().unwrap().is_some());
+        assert_eq!(pending.owner_action, "konsensus grant --op ab12");
         assert_eq!(node.posts()[0], ("/pair/elevation-request".to_string(), serde_json::json!({"scopes": ["spend"]})));
         assert_eq!(do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err().code, "spend_locked");
 
@@ -21429,6 +25509,49 @@ mod control_act_tests {
         let receipt = do_message_send(&proven, A, false, "hi", 7000, None).await.unwrap();
         assert_eq!(receipt.amount_msat, 2000);
         assert_eq!(budget_now(&proven).spent_msat, 4000);
+    }
+
+    /// The marker write after a committed book rename fails on every save: the
+    /// send still goes once and its reservation is counted once, not reported
+    /// as a failed write that a later send would reserve again.
+    #[tokio::test]
+    async fn a_marker_failure_after_the_book_lands_reserves_once() {
+        let routes: Routes = Arc::new(|m, p, b| {
+            if p == "/messages/compose" { return (200, serde_json::json!({"message_id": "m1",
+                "delivered": true, "amount_msat": 2000, "max_routing_fee_msat": 10000}).to_string()); }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let (dir, _) = budget_dir(&node.state).unwrap();
+        budget::faults::arm(&dir, budget::faults::Step::Marker);
+        let first = do_message_send(&node.state, A, false, "hi", 12000, None).await;
+        let second = do_message_send(&node.state, A, false, "hi", 12000, None).await;
+        budget::faults::disarm(&dir);
+        assert!(first.is_ok(), "{:?}", first.err().map(|e| e.code));
+        assert!(second.is_ok(), "{:?}", second.err().map(|e| e.code));
+        let view = budget_now(&node.state);
+        assert_eq!(view.unsettled_msat, 0, "no reservation left behind");
+        assert_eq!(view.accounted_msat, 24000, "two sends, each counted once");
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+    }
+
+    /// Reserving the same charge again (a retry after a reported failure)
+    /// leaves one reservation for it, never two.
+    #[tokio::test]
+    async fn reserving_the_same_charge_twice_holds_it_once() {
+        let node = fake(AuthMode::Local, happy());
+        spend_advance(&node.state, true).await.unwrap();
+        let (auth, plan) = plan_message(&node.state, A, false, 5000, None).unwrap();
+        let charge = Charge { target: A.into(), room: false, confirm: plan.confirm, readmission_possible: false,
+            confirmed: false, operation: false, envelope_ids: None, failure_final_on: None, call_window: false };
+        reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
+        reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
+        let rows = with_book(&node.state, false, |b| Ok(b.ledger.iter().filter(|e| e.id == "charge-1").count())).unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 5000);
+        close_charge(&node.state, "charge-1", None, None).unwrap();
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0, "one release clears it");
     }
 
     #[tokio::test]
@@ -22026,6 +26149,74 @@ mod control_act_tests {
             assert!(view.node_grant.is_none());
             assert!(device::load_pending(&approvals_file(&node.state).unwrap(), now_ms()).is_some());
             assert!(node.posts().is_empty(), "restoring a pending request must neither re-request nor refresh");
+        }
+    }
+
+    #[tokio::test]
+    async fn relaunch_preserves_a_saved_request_distinct_from_the_live_grant() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        let mut original = g1_grant(3600, 500_000, 499_000);
+        original["op_id"] = "cd34".into();
+        *g1.grant.lock().unwrap() = original.clone();
+        save_relaunch_pending(&node.state);
+        let path = approvals_file(&node.state).unwrap();
+        let saved = device::load_pending(&path, now_ms()).unwrap();
+        let restored = spend_advance(&node.state, false).await.unwrap();
+        assert_eq!(restored.pending, Some(saved.clone()));
+        assert_eq!(device::load_pending(&path, now_ms()), Some(saved));
+        assert_eq!(restored.state, act::SpendState::Pending);
+        assert!(node.targets().contains(&"GET /pair/elevation/ab12".into()));
+        assert!(node.posts().is_empty());
+        assert_eq!(composes(&node), 0);
+        assert_eq!(*g1.grant.lock().unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn replacement_pending_survives_relaunch_over_the_older_live_grant() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        let mut original = g1_grant(3600, 500_000, 499_000);
+        original["op_id"] = "cd34".into();
+        *g1.grant.lock().unwrap() = original.clone();
+        spend_advance(&node.state, true).await.unwrap();
+        let asked = do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+        assert_eq!(asked.state, act::SpendState::Open);
+        assert_eq!(asked.pending.as_ref().unwrap().op_id, "ab12");
+
+        let restarted = reopen(&node);
+        if let AuthMode::Paired(session) = &*node.state.auth.lock().unwrap() {
+            *restarted.auth.lock().unwrap() = AuthMode::Paired(session.clone());
+        } else { panic!("expected a paired session"); }
+        *restarted.pairing.lock().unwrap() = node.state.pairing.lock().unwrap().clone();
+        let restored = spend_advance(&restarted, false).await.unwrap();
+        assert_eq!(restored.pending.as_ref().map(|p| p.op_id.as_str()), Some("ab12"));
+        assert_eq!(restored.state, act::SpendState::Pending);
+        assert_eq!(device::load_pending(&approvals_file(&restarted).unwrap(), now_ms()), asked.pending);
+        assert!(node.targets().contains(&"GET /pair/elevation/ab12".into()));
+        assert_eq!(*g1.grant.lock().unwrap(), original);
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        assert_eq!(restarted.spend.lock().unwrap().check(now_ms()).unwrap_err().code, "spend_locked");
+        assert_eq!(check_node_grant_with_envelope_ids(&restarted, "/messages/compose",
+            &serde_json::json!({"recipient": A}), 601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err().code, "grant_exhausted");
+
+        *g1.grant.lock().unwrap() = g1_grant(3600, 601_000, 601_000);
+        let granted = spend_advance(&restarted, false).await.unwrap();
+        assert!(granted.pending.is_none());
+        assert!(!approvals_file(&restarted).unwrap().exists());
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        assert_eq!(composes(&node), 0);
+    }
+
+    #[tokio::test]
+    async fn replacement_request_does_not_repeat_a_budget_already_covered_by_a_live_grant() {
+        for (remaining, lifetime, posts) in [(601_000, 3600, 0), (600_999, 3600, 1), (601_000, -1, 1)] {
+            let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+            *g1.grant.lock().unwrap() = g1_grant(lifetime, 601_000, remaining);
+            do_budget_status(&node.state).await.unwrap();
+            let view = do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+            assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), posts);
+            assert_eq!(view.open_until_ms, None);
+            assert_eq!(view.pending.is_some(), posts == 1);
+            assert_eq!(composes(&node), 0);
         }
     }
 
@@ -22633,6 +26824,7 @@ mod control_act_tests {
         let now = now_unix();
         serde_json::json!({"op_id": "rel-1", "client_id": "c1", "granted_at": now, "expires_at": now + 86_400,
             "budget_msat": 200_000, "used_msat": 0, "remaining_msat": 200_000, "per_call_max_msat": 200_000,
+            "message_per_payment_max_msat": 200_000,
             "per_recipient_msat": {peer: 200_000}, "used_by_recipient": {}, "recipients_only": true,
             "per_act_max_by_recipient": {peer: per_act_msat}, "recipient_expires_at": {peer: now + 86_400}})
     }
@@ -22708,7 +26900,7 @@ mod control_act_tests {
         }
     }
 
-    /// Codex app#90: a status poll of request aa01 is still waiting on the node
+    /// A status poll of request aa01 is still waiting on the node
     /// when the owner cancels and sets up again (aa02). The delayed reply must
     /// not write aa01 back, nor clear aa02, in either direction.
     #[test]
@@ -22890,7 +27082,7 @@ mod control_act_tests {
         let sent = node.posts().into_iter().find(|(p, _)| p == "/pair/device-key").unwrap().1;
         assert!(!sent.to_string().contains(&hex::encode(&blob)));
 
-        // One tap for Maya: the node verified the signature over the exact terms.
+        // One tap for Robin: the node verified the signature over the exact terms.
         *g1.grant.lock().unwrap() = relation_grant(A, 7000);
         let view = do_relation_approve(s, A, None, Some(7000)).await.unwrap();
         assert_eq!((view.state, view.basis), (act::SpendState::Open, Some(act::SpendBasis::NodeGrant)));
@@ -23916,7 +28108,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn a_room_leg_never_pays_above_its_confirmed_cap_even_when_the_budget_would_readmit() {
-        // Codex #101 P1: the same budgeted reconnect that the 1:1 path pays under
+        // The same budgeted reconnect that the 1:1 path pays under
         // the contact's fresh quote. A room leg keeps its confirmed 7,000 msat.
         let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
         let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(readmit_routes(readmit.clone())));
@@ -24444,16 +28636,550 @@ mod control_act_tests {
         assert!(read_first_contact_quote(&node.state, "not-a-node").await.is_err());
     }
 
+    /// The owner's one approval at the box covers a whole day, not ten minutes:
+    /// a call that starts late in a short window would die mid-way.
+    #[tokio::test]
+    async fn a_window_ask_and_a_replacement_propose_a_whole_day() {
+        let (node, _dir, _g1) = g1_node(&["read", "receive"]);
+        with_book(&node.state, true, |b| { b.ceiling_msat = 2_000_000; Ok(()) }).unwrap();
+        assert_eq!(spend_advance(&node.state, true).await.unwrap().state, act::SpendState::Pending);
+        assert_eq!(node.posts(), vec![("/pair/elevation-request".into(), serde_json::json!({
+            "scopes": ["spend"], "budget": {"budget_msat": 2_000_000, "ttl_secs": 86_400},
+        }))]);
+        let budget = budget_proposal(&node.state, Want::Window, None).unwrap();
+        assert_eq!(budget["ttl_secs"], grant::MAX_TTL_SECS);
+        // Never more than the owner's own daily ceiling unless a call needs it.
+        assert_eq!(budget["budget_msat"], 2_000_000);
+        assert_eq!(budget_proposal(&node.state, Want::Window, Some(700_000)).unwrap()["budget_msat"], 2_000_000);
+    }
+
+    /// Right after a pairing link is imported the app asks once for the day's
+    /// budget, so the owner's one step comes up front instead of at the first
+    /// Accept or Ring. The ask opens nothing in the app by itself.
+    #[tokio::test]
+    async fn a_new_pairing_asks_once_for_the_days_budget() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        // A fresh pairing: the node holds no grant for it yet.
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let asks = |node: &Fake| node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count();
+        // An ordinary status poll asks nothing.
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 0);
+        pairing_imported(&node.state);
+        let view = spend_status_now(&node.state).await.unwrap();
+        assert_eq!(view.state, act::SpendState::Pending);
+        assert_eq!(asks(&node), 1);
+        assert_eq!(node.posts()[0].1["budget"]["ttl_secs"], 86_400);
+        // Once: later polls only follow it, also after the box said yes.
+        *g1.grant.lock().unwrap() = g1_grant(86_400, 2_000_000, 2_000_000);
+        spend_status_now(&node.state).await.unwrap();
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 1);
+        // The box said yes: the app keeps its own lock closed until the owner taps.
+        assert!(!node.state.wants.lock().unwrap().window && node.state.wants.lock().unwrap().budget.is_none());
+        assert_ne!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Open);
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+
+        // A pairing that already has spending, or paused payments, asks nothing.
+        let (node, _dir, _g1) = g1_node(&["read", "receive", "spend"]);
+        pairing_imported(&node.state);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 0);
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
+        pairing_imported(&node.state);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 0);
+        // Not signed in yet: the ask waits for the session instead of being lost.
+        let node = fake(AuthMode::Unauthenticated, happy());
+        pairing_imported(&node.state);
+        let _ = spend_status_now(&node.state).await;
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst));
+    }
+
+    /// A read that fails before the request (here `/status`) keeps the one
+    /// pairing ask: the next healthy poll sends it, exactly once.
+    #[tokio::test]
+    async fn a_failed_read_before_the_budget_ask_keeps_it_for_the_next_poll() {
+        let down = Arc::new(AtomicBool::new(true));
+        let flag = down.clone();
+        let first: Routes = Arc::new(move |_m, p, _b| {
+            if p == "/status" && flag.load(Ordering::SeqCst) {
+                return (503, serde_json::json!({"code": "unavailable"}).to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let asks = |node: &Fake| node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count();
+        pairing_imported(&node.state);
+        let _ = spend_status_now(&node.state).await;
+        assert_eq!(asks(&node), 0);
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst), "a failed read must not use up the ask");
+        down.store(false, Ordering::SeqCst);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 1);
+        // The box said yes; later polls only follow the request.
+        *g1.grant.lock().unwrap() = g1_grant(86_400, 2_000_000, 2_000_000);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 1);
+        assert!(!node.state.budget_after_pairing.load(Ordering::SeqCst));
+        // Nothing opens in the app by itself.
+        assert_ne!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Open);
+    }
+
+    /// Desktop Import saves the link for the next start: the ask goes with it
+    /// in a file, is picked up at that start, and is removed once sent.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    #[tokio::test]
+    async fn a_desktop_import_keeps_the_budget_ask_for_the_next_start() {
+        use base64::Engine;
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let state = NodeState::for_identifier("app.bitsov.desktop");
+        let dir = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"v": 2, "endpoint": "127.0.0.1:9", "endpoints": ["127.0.0.1:9"],
+            "box_transport_pubkey": "22".repeat(32),
+            "code": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32])});
+        let link = format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()));
+        remote_access_import_at(app.handle(), &state, dir.path(), &link).await.unwrap();
+        assert!(budget_ask_path(dir.path()).is_file(), "the ask must outlive this process");
+        // The next start: a fresh process picks the ask up.
+        let (node, _node_dir, g1) = g1_node(&["read", "receive"]);
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        assert!(!node.state.budget_after_pairing.load(Ordering::SeqCst));
+        restore_budget_ask(&node.state, dir.path());
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst));
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        assert!(!budget_ask_path(dir.path()).exists(), "sent: the next start asks nothing");
+        // Every startup with that saved link picks the ask up through the
+        // normal connect route (any OS), and a live import keeps it on disk
+        // until it is sent.
+        save_budget_ask(dir.path());
+        let fresh = NodeState::for_identifier("app.bitsov.desktop");
+        let _ = tokio::time::timeout(Duration::from_secs(5), connect_remote_at(&fresh, dir.path(), false)).await;
+        assert!(fresh.budget_after_pairing.load(Ordering::SeqCst), "startup restores the ask");
+        let joined = NodeState::for_identifier("app.bitsov.desktop");
+        let other = tempfile::tempdir().unwrap();
+        pairing_imported_at(&joined, other.path());
+        assert!(budget_ask_path(other.path()).is_file() && joined.budget_after_pairing.load(Ordering::SeqCst));
+        // Forget drops a waiting ask with the link.
+        save_budget_ask(dir.path());
+        remote_access_forget_at(&state, dir.path()).await.unwrap();
+        assert!(!budget_ask_path(dir.path()).exists());
+    }
+
+    /// A node-routed call needs a grant that outlasts this node's call limit:
+    /// 240 minutes while the limit is unknown, the limit once seen on a hold
+    /// of this node (another node's limit does not count).
+    #[test]
+    fn the_call_window_uses_the_known_limit_of_this_node_or_the_most_any_node_allows() {
+        let node = fake(AuthMode::Unauthenticated, happy());
+        let own = node.state.node_id.lock().unwrap().clone().unwrap_or_default();
+        let minutes = |m: u64| now_ms() + m * 60_000;
+        assert_eq!(call_window_fits(&node.state, minutes(200)).unwrap_err().code, "call_window_short");
+        assert!(call_window_fits(&node.state, minutes(242)).is_ok());
+        *node.state.call_limit_seen.lock().unwrap() = Some((own.clone(), 60));
+        assert!(call_window_fits(&node.state, minutes(62)).is_ok());
+        assert_eq!(call_window_fits(&node.state, minutes(60)).unwrap_err().code, "call_window_short");
+        *node.state.call_limit_seen.lock().unwrap() = Some(("another-node".into(), 60));
+        assert_eq!(call_window_fits(&node.state, minutes(62)).unwrap_err().code, "call_window_short");
+    }
+
+    /// A read that fails while the request is prepared (the budget proposal,
+    /// read after the capability check) keeps the ask: nothing is posted
+    /// without the day's budget, and the next healthy poll sends it once.
+    #[tokio::test]
+    async fn a_failed_budget_read_while_preparing_the_ask_keeps_it() {
+        let spoil: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let hook = spoil.clone();
+        let first: Routes = Arc::new(move |_m, p, _b| {
+            // Between the pause check and the proposal: the book becomes unreadable once.
+            if p == "/status" {
+                if let Some(book) = hook.lock().unwrap().take() {
+                    std::fs::write(book, b"not a budget book").unwrap();
+                }
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        with_book(&node.state, true, |b| { b.ceiling_msat = 2_000_000; Ok(()) }).unwrap();
+        let (dir, node_id) = budget_dir(&node.state).unwrap();
+        let book = budget::book_path(&dir, &node_id);
+        let healthy = std::fs::read(&book).unwrap();
+        node.state.approvals_restored.store(true, Ordering::SeqCst);
+        *spoil.lock().unwrap() = Some(book.clone());
+        pairing_imported(&node.state);
+        let _ = spend_status_now(&node.state).await;
+        assert!(spoil.lock().unwrap().is_none(), "the book was spoiled during preparation");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/pair/elevation-request"), "no request without its budget");
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst), "the ask is kept");
+        std::fs::write(&book, healthy).unwrap();
+        let _ = spend_status_now(&node.state).await;
+        let asks: Vec<_> = node.posts().into_iter().filter(|(p, _)| p == "/pair/elevation-request").collect();
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].1["budget"]["ttl_secs"], 86_400);
+    }
+
+    /// The automatic ask and an explicit ask share one request: an explicit
+    /// ask that arrives while the automatic one is being sent follows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_automatic_and_an_explicit_ask_never_post_twice() {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let a = arrived.clone();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        let first: Routes = Arc::new(move |m, p, _b| {
+            if m == "POST" && p == "/pair/elevation-request" {
+                a.notify_one();
+                let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(5));
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let state: &'static NodeState = Box::leak(Box::new(node.state));
+        pairing_imported(state);
+        let auto = tokio::spawn(async move { spend_status_now(state).await });
+        arrived.notified().await;
+        let explicit = tokio::spawn(async move { do_spend_request(state, None, None).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.send(()).unwrap();
+        auto.await.unwrap().unwrap();
+        let view = explicit.await.unwrap().unwrap();
+        let pending = state.spend.lock().unwrap().pending().map(|p| p.op_id.clone());
+        assert!(pending.is_some());
+        assert_eq!(view.request_id, pending, "the explicit ask follows the one request");
+        assert_eq!(node.seen.lock().unwrap().iter()
+            .filter(|(m, p, _, _)| m == "POST" && p == "/api/v1/pair/elevation-request").count(), 1);
+    }
+
     #[tokio::test]
     async fn g1_a_window_never_outlives_the_node_grant() {
         let (node, _dir, g1) = g1_node(&["read", "receive"]);
         *g1.grant.lock().unwrap() = g1_grant(120, 400_000, 400_000);
         spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(node.posts()[0].1["budget"], serde_json::json!({"budget_msat": 500_000, "ttl_secs": 600}));
+        assert_eq!(node.posts()[0].1["budget"], serde_json::json!({"budget_msat": 500_000, "ttl_secs": 86_400}));
         spend_advance(&node.state, false).await.unwrap();
         let view = spend_advance(&node.state, false).await.unwrap();
         let expires = g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000;
         assert_eq!((view.state, view.open_until_ms), (act::SpendState::Open, Some(expires)));
+    }
+
+    fn call_budget_node(block: Option<u64>) -> (Fake, tempfile::TempDir, G1) {
+        let routes = call_routes(Some(10_000));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}") {
+                return (200, serde_json::json!({"peer_id": A, "prices": {"kind:404": block}, "age_secs": 1, "stale": false}).to_string());
+            }
+            if p == format!("/pricing/peers/{A}/call") || p == "/payments/price/401" {
+                return routes(m, p, b);
+            }
+            (0, String::new())
+        });
+        g1_node_with(&["read", "receive"], Some(first))
+    }
+
+    #[test]
+    fn call_budget_proposal_command_covers_one_reservation() {
+        let (node, _dir, _g1) = call_budget_node(Some(10_000));
+        let seen = node.seen.clone();
+        let app = tauri::test::mock_builder()
+            .manage(node.state)
+            .invoke_handler(tauri::generate_handler![super::spend_request])
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let origin = if cfg!(windows) { format!("{}://tauri.localhost", "http") } else { "tauri://localhost".into() };
+        let reply = tauri::test::get_ipc_response(&window, tauri::webview::InvokeRequest {
+            cmd: "spend_request".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: origin.parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({"call_peer": A})),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.into(),
+        }).unwrap();
+        let view: serde_json::Value = reply.deserialize().unwrap();
+        assert_eq!(view["state"], "pending");
+        let seen = seen.lock().unwrap();
+        let (_, _, _, body) = seen.iter().find(|(method, path, _, _)|
+            method == "POST" && path == "/api/v1/pair/elevation-request").unwrap();
+        let asked: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(asked["budget"], serde_json::json!({"budget_msat": 3_621_000, "ttl_secs": 86_400}));
+        assert!(!seen.iter().any(|(method, path, _, _)| method == "POST" && path.contains("/messages/")));
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_covers_the_reservation_and_signals() {
+        for (block, ceiling, expected) in [
+            (1_000, 500_000, 1_461_000),
+            (10_000, 500_000, 3_621_000),
+            (20_000, 500_000, 6_021_000),
+            (10_000, 8_000_000, 8_000_000),
+        ] {
+            let (node, _dir, _g1) = call_budget_node(Some(block));
+            with_book(&node.state, true, |b| { b.ceiling_msat = ceiling; Ok(()) }).unwrap();
+            let quote = read_call_quote_with_blocks(&node.state, A).await.unwrap();
+            let view = do_spend_request(&node.state, None, Some(A)).await.unwrap();
+            assert_eq!(view.state, act::SpendState::Pending);
+            assert_eq!(node.posts(), vec![("/pair/elevation-request".into(), serde_json::json!({
+                "scopes": ["spend"], "budget": {"budget_msat": expected, "ttl_secs": 86_400},
+            }))]);
+            assert!(expected >= quote.reservation_max_msat.unwrap() + quote.call_total_msat.unwrap());
+            assert_eq!(with_book(&node.state, false, |b| Ok(b.ceiling_msat)).unwrap(), ceiling);
+            assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+            assert!(pending(&node).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_keeps_the_owners_smaller_grant_and_expiry() {
+        let (node, _dir, g1) = call_budget_node(Some(10_000));
+        let grant = g1_grant(120, 400_000, 400_000);
+        *g1.grant.lock().unwrap() = grant.clone();
+        do_spend_request(&node.state, None, Some(A)).await.unwrap();
+        spend_advance(&node.state, false).await.unwrap();
+        let view = spend_advance(&node.state, false).await.unwrap();
+        assert_eq!((view.state, view.open_until_ms), (act::SpendState::Open, Some(grant["expires_at"].as_u64().unwrap() * 1000)));
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+        let error = check_node_grant_with_envelope_ids(&node.state, "/messages/compose",
+            &serde_json::json!({"recipient": A}), 601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err();
+        assert_eq!(error.code, "grant_exhausted");
+        assert_eq!(*g1.grant.lock().unwrap(), grant);
+        assert_eq!(node.posts().iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+            ["/pair/elevation-request", "/pair/token"]);
+        assert_eq!(budget_now(&node.state).spent_msat, 0);
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_requires_a_safe_current_minute_price() {
+        for block in [None, Some(0), Some(u64::MAX), Some(control::MAX_SAFE_MSAT / control::CALL_MAX_BLOCKS - 5_000)] {
+            let (node, _dir, _g1) = call_budget_node(block);
+            assert_eq!(do_spend_request(&node.state, None, Some(A)).await.unwrap_err().code, "call_price_unknown");
+            assert!(node.posts().is_empty());
+            assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
+        }
+        let (node, _dir, _g1) = call_budget_node(Some(10_000));
+        assert!(do_spend_request(&node.state, None, Some("invalid")).await.is_err());
+        assert!(node.targets().is_empty());
+        with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
+        assert_eq!(do_spend_request(&node.state, None, Some(A)).await.unwrap_err().code, "budget_paused");
+        assert!(node.targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_cannot_reopen_after_lock_during_the_quote() {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let a = arrived.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = Mutex::new(wait);
+        let calls = call_routes(Some(10_000));
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p == "/payments/price/401" {
+                a.notify_one();
+                wait.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            if p == format!("/pricing/peers/{A}") {
+                return (200, serde_json::json!({"peer_id": A, "prices": {"kind:404": 10_000}, "age_secs": 1, "stale": false}).to_string());
+            }
+            calls(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        let (result, ()) = tokio::join!(do_spend_request(&node.state, None, Some(A)), async {
+            arrived.notified().await;
+            node.state.spend.lock().unwrap().lock();
+            release.send(()).unwrap();
+        });
+        assert_eq!(result.unwrap_err().code, "budget_needed");
+        assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_replaces_the_proposal_without_raising_active_authority() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        let original = g1_grant(3600, 500_000, 499_000);
+        *g1.grant.lock().unwrap() = original.clone();
+        spend_advance(&node.state, true).await.unwrap();
+        let requested = do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+        assert_eq!(requested.state, act::SpendState::Open);
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        assert_eq!(node.posts().last().unwrap().1, serde_json::json!({
+            "scopes": ["spend"], "budget": {"budget_msat": 601_000, "ttl_secs": 86_400}
+        }));
+        assert_eq!(*g1.grant.lock().unwrap(), original);
+        assert_eq!(check_node_grant_with_envelope_ids(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}), 601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err().code, "grant_exhausted");
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Open);
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        *g1.grant.lock().unwrap() = g1_grant(3600, 601_000, 601_000);
+        let approved = spend_advance(&node.state, false).await.unwrap();
+        assert_eq!(approved.state, act::SpendState::Open);
+        assert!(approved.pending.is_none());
+        check_node_grant(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}), 601_000).await.unwrap();
+        assert_eq!(composes(&node), 0);
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_keeps_live_call_minutes_and_hangup_authorized() {
+        let (routes, _, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+            closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/pair/elevation/ab12" {
+                return (200, serde_json::json!({"op_id": "ab12", "status": "pending"}).to_string());
+            }
+            if p.starts_with("/pair/") { return (0, String::new()); }
+            let (status, body) = routes(m, p, b);
+            if p == "/status" {
+                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                value["api_capabilities"].as_array_mut().unwrap().push(grant::CAPABILITY.into());
+                return (status, value.to_string());
+            }
+            (status, body)
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        let original = g1_grant(3600, 5_000_000, 5_000_000);
+        *g1.grant.lock().unwrap() = original.clone();
+        approve_calls(&node).await;
+        node.state.autopay.lock().unwrap().lock();
+        spend_advance(&node.state, true).await.unwrap();
+        do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+        remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+        do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap();
+        let before = node.state.spend.lock().unwrap().view(now_ms());
+        let generation = node.state.spend.lock().unwrap().generation();
+        let requested = do_spend_request(&node.state, Some(6_000_000), None).await.unwrap();
+        assert_eq!(requested.state, act::SpendState::Open);
+        assert_eq!(requested.open_until_ms, before.open_until_ms);
+        assert_eq!(requested.granted_op, before.granted_op);
+        assert_eq!(requested.armed_by_request, before.armed_by_request);
+        assert_eq!(requested.basis, before.basis);
+        assert!(requested.pending.is_some());
+        node.state.spend.lock().unwrap().check_generation(generation, now_ms()).unwrap();
+        assert_eq!(*g1.grant.lock().unwrap(), original);
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Open);
+        assert_eq!(check_node_grant_with_envelope_ids(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}),
+            6_000_000, None, grant::PaymentCap::CallTotal).await.unwrap_err().code, "grant_exhausted");
+        do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!(compose_kinds(&node), [400, 404, 403]);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert!(pending(&node).is_none());
+        assert!(node.state.spend.lock().unwrap().pending().is_some());
+        assert_eq!(node.state.spend.lock().unwrap().check(before.open_until_ms.unwrap()).unwrap_err().code, "spend_expired");
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_cancellation_preserves_the_existing_window() {
+        let (node, _dir, _) = g1_node(&["read", "receive", "spend"]);
+        let before = spend_advance(&node.state, true).await.unwrap();
+        let generation = node.state.spend.lock().unwrap().generation();
+        do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+        let cancelled = do_spend_cancel(&node.state).await.unwrap();
+        assert_eq!(cancelled.state, act::SpendState::Open);
+        assert_eq!(cancelled.open_until_ms, before.open_until_ms);
+        assert_eq!(cancelled.granted_op, before.granted_op);
+        assert!(cancelled.pending.is_none());
+        node.state.spend.lock().unwrap().check_generation(generation, now_ms()).unwrap();
+        assert_eq!(check_node_grant_with_envelope_ids(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}),
+            601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err().code, "grant_exhausted");
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_cancel_does_not_keep_a_window_opened_by_a_racing_approval() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        let first: Routes = Arc::new(move |method, path, _| {
+            if method == "DELETE" && path == "/pair/elevation/ab12" {
+                e.store(true, Ordering::SeqCst);
+                while !r.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                return (200, "{}".into());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, _) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        spend_advance(&node.state, true).await.unwrap();
+        do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+        let approve = async {
+            while !entered.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+            spend_advance(&node.state, false).await.unwrap();
+            let granted = spend_advance(&node.state, false).await.unwrap();
+            release.store(true, Ordering::SeqCst);
+            assert_eq!(granted.state, act::SpendState::Open);
+            assert!(granted.pending.is_none());
+        };
+        let (cancelled, ()) = tokio::join!(do_spend_cancel(&node.state), approve);
+        assert_eq!(cancelled.unwrap().state, act::SpendState::Locked);
+        assert_eq!(node.state.spend.lock().unwrap().check(now_ms()).unwrap_err().code, "spend_locked");
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_rejects_invalid_amounts_and_unsupported_nodes() {
+        let (node, _dir, _) = g1_node(&["read", "receive", "spend"]);
+        for amount in [0, budget::MAX_DAILY_MSAT + 1, u64::MAX] {
+            assert_eq!(do_spend_request(&node.state, Some(amount), None).await.unwrap_err().code, "invalid");
+        }
+        assert!(node.posts().is_empty());
+        let node = fake(AuthMode::Local, happy());
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap_err().code, "invalid");
+        assert!(node.posts().is_empty());
+        let (node, _dir) = paired_fake(happy());
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap_err().code, "invalid");
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_respects_pause_and_cancellation() {
+        let (node, _dir, _) = g1_node(&["read", "receive", "spend"]);
+        do_budget_pause(&node.state).unwrap();
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap_err().code, "budget_paused");
+        assert!(node.posts().is_empty());
+        let (node, _dir, _) = g1_node(&["read", "receive", "spend"]);
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap().state, act::SpendState::Pending);
+        do_spend_cancel(&node.state).await.unwrap();
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Locked);
+        assert_eq!(composes(&node), 0);
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_cannot_outlive_cancel_during_capability_read() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        let first: Routes = Arc::new(move |_, path, _| {
+            if path == "/status" {
+                e.store(true, Ordering::SeqCst);
+                while !r.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+            }
+            (0, String::new())
+        });
+        let (node, _dir, _) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        let cancel = async {
+            while !entered.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+            do_spend_cancel(&node.state).await.unwrap();
+            release.store(true, Ordering::SeqCst);
+        };
+        let (requested, ()) = tokio::join!(do_spend_request(&node.state, Some(601_000), None), cancel);
+        assert_eq!(requested.unwrap_err().code, "budget_needed");
+        assert!(node.posts().is_empty());
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Locked);
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_preserves_the_amount_after_capability_verification() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let first: Routes = Arc::new(move |_, path, _| {
+            if path == "/status" && reads.fetch_add(1, Ordering::SeqCst) > 0 {
+                return (503, "status unavailable".into());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, _) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap().state, act::SpendState::Pending);
+        assert_eq!(node.posts().last().unwrap().1["budget"]["budget_msat"], 601_000);
     }
 
     #[tokio::test]
@@ -25316,7 +30042,7 @@ mod stop_adapter_tests {
 
     #[test]
     fn quit_during_a_restart_stop_still_stops_the_node() {
-        // Codex R2G on 3ff4e60e: the restore deregistered the old node before its
+        // The restore deregistered the old node before its
         // stop, so a quit meanwhile found nothing, the host exited and took the restore
         // worker — and its SIGKILL fallback — with it, leaving the node running.
         let state = NodeState::default();
@@ -25644,6 +30370,7 @@ mod assistant_acl_tests {
                 "local_owner_cancel",
                 "local_owner_finalize",
                 "local_owner_reconcile",
+                "node_setup_local",
                 "node_repair_initialized",
                 "node_repair_price_floor",
                 "fund_state",
@@ -25742,6 +30469,7 @@ mod assistant_acl_tests {
                 "call_audio_session",
                 "call_quote",
                 "call_signal",
+                "call_free_reply",
                 // M6 A2: a call's paid minutes (status read, one block payment).
                 "call_status",
                 "call_block",
@@ -25749,6 +30477,7 @@ mod assistant_acl_tests {
                 // M6 A1: the host-owned node-routed media socket.
                 "call_media_open",
                 "call_media_send",
+                "call_media_video_send",
                 "call_media_close",
                 "porch_quote",
                 "porch_read",
@@ -26063,7 +30792,7 @@ mod assistant_acl_tests {
         }
 
         let main_caps: Vec<_> = caps.iter().filter(|cap| applies_to(cap, "main")).collect();
-        assert_eq!(main_caps.len(), 2, "main has its app and macOS notification capabilities");
+        assert_eq!(main_caps.len(), 3, "main has its app, macOS notification and Windows/Linux message notification capabilities");
         for cap in &main_caps {
             assert_eq!(string_list(cap, "windows"), vec!["main".to_string()]);
             assert!(cap.get("remote").map(|v| v.is_null()).unwrap_or(true));
@@ -26073,6 +30802,23 @@ mod assistant_acl_tests {
         let notification_perms = permission_identifiers(notification);
         assert_eq!(notification_perms.len(), 10, "only local delivery, action/listener and window restoration grants");
         assert!(notification_perms.iter().all(|id| id.starts_with("notification:allow-") || id.starts_with("core:window:allow-")));
+        // Windows and Linux get plain message delivery only: no action types, listeners
+        // or window restoration, and never the macOS approval capability.
+        let message = main_caps.iter().find(|cap| cap["identifier"] == "message-notification").expect("message notification capability");
+        assert_eq!(string_list(message, "platforms"), vec!["windows".to_string(), "linux".to_string()]);
+        assert_eq!(
+            permission_identifiers(message).into_iter().collect::<BTreeSet<_>>(),
+            [
+                "notification:allow-is-permission-granted",
+                "notification:allow-request-permission",
+                "notification:allow-notify",
+                "core:window:allow-is-focused",
+            ]
+            .map(String::from)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+            "message notifications grant only permission checks, delivery and a focus read"
+        );
         let main = *main_caps.iter().find(|cap| cap["identifier"] == "default").expect("main app capability");
         assert_eq!(string_list(main, "windows"), vec!["main".to_string()]);
         assert!(!applies_to(main, "assistant"));
@@ -26111,6 +30857,41 @@ mod assistant_acl_tests {
                 "inline capability objects would bypass this directory scan"
             );
         }
+    }
+
+    #[test]
+    fn notification_plugin_is_registered_on_mac_windows_and_linux() {
+        let desktop = r#"any(target_os = "macos", target_os = "windows", target_os = "linux")"#;
+        let cargo = fs::read_to_string(manifest_dir().join("Cargo.toml")).expect("Cargo.toml");
+        let section = format!("[target.'cfg({desktop})'.dependencies]");
+        let deps = cargo.split(&section).nth(1).expect("notification target dependency").split("\n[").next().unwrap();
+        assert!(deps.contains("tauri-plugin-notification = "), "the plugin is a dependency on every desktop target");
+        let source = production_source();
+        let builder = function_source(&source, "app_builder");
+        assert!(
+            builder.contains(&format!("#[cfg(all({desktop}, not(feature = \"mobile\")))]\n    let builder = builder.plugin(tauri_plugin_notification::init());")),
+            "app_builder registers the plugin on the same desktop targets"
+        );
+    }
+
+    #[cfg(all(any(target_os = "windows", target_os = "linux"), not(feature = "mobile")))]
+    #[test]
+    fn notification_plugin_links_on_windows_and_linux() {
+        let init: fn() -> tauri::plugin::TauriPlugin<tauri::Wry> = tauri_plugin_notification::init;
+        let _ = init;
+    }
+
+    #[test]
+    fn uplink_audio_sends_run_off_the_main_thread_in_send_order() {
+        let source = production_source();
+        // A sync command runs on the main thread, where a busy UI bunches frames.
+        assert!(source.contains("async fn call_media_send("), "call_media_send must stay async");
+        let send = function_source(&source, "call_media_send");
+        assert!(send.contains("admit_media_send("), "sends go through the order, not straight onto the queue");
+        assert!(!send.contains("uplink.push("));
+        let admit = function_source(&source, "admit_media_send");
+        assert!(admit.contains("send_order.admit("), "sends go through the order, not straight onto the queue");
+        assert!(!admit.contains("uplink.push("));
     }
 
     #[test]
@@ -26430,6 +31211,7 @@ mod assistant_acl_tests {
             .invoke_handler(tauri::generate_handler![
                 super::node_status,
                 super::node_unlock,
+                super::node_setup_local,
                 super::node_repair_initialized,
                 super::node_repair_price_floor,
                 super::fund_state,
@@ -26511,6 +31293,15 @@ mod assistant_acl_tests {
         for cmd in ["fund_state", "funding_address", "payments_balance"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
+
+        assert_handler_ran(
+            invoke(&main, "node_setup_local", serde_json::json!({ "confirmed": false })),
+            "explicit agreement",
+        );
+        assert_acl_denied(
+            invoke(&assistant, "node_setup_local", serde_json::json!({ "confirmed": true })),
+            "node_setup_local",
+        );
 
         assert_handler_ran(
             invoke(&main, "node_repair_initialized", serde_json::json!({ "confirmed": false })),

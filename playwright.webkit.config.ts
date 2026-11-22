@@ -6,7 +6,7 @@ import { defineConfig } from '@playwright/test';
 const port = 1423;
 export default defineConfig({
   testDir: 'tests/a11y',
-  testMatch: ['safe-areas*.spec.ts', 'dynamic-type.spec.ts', 'inputs.spec.ts', 'chain-warnings.spec.ts'],
+  testMatch: ['safe-areas*.spec.ts', 'dynamic-type.spec.ts', 'inputs.spec.ts', 'chain-warnings.spec.ts', 'call-self-tile.spec.ts', 'money-notice-desktop.spec.ts', 'rail-labels.spec.ts', 'contact-panel-modal.spec.ts', 'thread-read.spec.ts', 'call-confirm-sheet.spec.ts', 'call-sheet.spec.ts'],
   forbidOnly: !!process.env.CI,
   workers: 1,
   retries: 0,
@@ -19,7 +19,7 @@ export default defineConfig({
     viewport: { width: 393, height: 852 },
     isMobile: true,
     hasTouch: true,
-    reducedMotion: 'reduce',
+    contextOptions: { reducedMotion: 'reduce' },
     baseURL: `http://127.0.0.1:${port}`,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',

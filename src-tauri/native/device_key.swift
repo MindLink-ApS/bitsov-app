@@ -432,8 +432,9 @@ private func statusForPairingError(_ error: Error, sealing: Bool) -> Int32 {
 private func passwordNode(_ service: String) -> String? {
     // Strip only for node validation/AAD. Every Keychain query keeps the full
     // service, including wrapped-envelope and old biometric-item fallbacks.
-    let profile = "tech.mindlink.bitsov.remotetest."
-    let service = service.hasPrefix(profile) ? String(service.dropFirst(profile.count)) : service
+    let profiles = ["tech.mindlink.bitsov.remotetest.", "tech.mindlink.bitsov.beta."]
+    let profile = profiles.first { service.hasPrefix($0) }
+    let service = profile.map { String(service.dropFirst($0.count)) } ?? service
     let prefix = "bitsov.node."
     let suffix = ".seed-password"
     guard service.hasPrefix(prefix), service.hasSuffix(suffix) else { return nil }

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-// The mic and camera prompts are written twice: Info.plist (macOS) and
+// The mic, camera and local network prompts are written twice: Info.plist (macOS) and
 // Info.ios.plist (iOS). Keep them word-for-word identical so the two
 // platforms never ask for the same permission in different words.
 
@@ -16,7 +16,7 @@ function usage(src: string, key: string): string | undefined {
 describe('permission usage strings', () => {
   const mac = plist('Info.plist');
   const ios = plist('Info.ios.plist');
-  for (const key of ['NSMicrophoneUsageDescription', 'NSCameraUsageDescription']) {
+  for (const key of ['NSMicrophoneUsageDescription', 'NSCameraUsageDescription', 'NSLocalNetworkUsageDescription']) {
     it(`${key} matches between macOS and iOS`, () => {
       const m = usage(mac, key);
       expect(m, `${key} missing in Info.plist`).toBeTruthy();
