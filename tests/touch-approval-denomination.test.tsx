@@ -18,7 +18,7 @@ describe('Touch ID approval terms', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     const actions = { approveContact: async () => {} } as never;
-    dispose = render(() => <TouchApproval peer={'a'.repeat(64)} name="Maya" priceMsat={2000} actions={actions} />, mount);
+    dispose = render(() => <TouchApproval peer={'a'.repeat(64)} name="Robin" priceMsat={2000} actions={actions} />, mount);
     return mount.querySelector('[data-touch-approval]')!.textContent!;
   };
 

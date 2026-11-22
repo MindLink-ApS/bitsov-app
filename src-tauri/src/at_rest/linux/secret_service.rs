@@ -52,7 +52,7 @@ impl Keyring for ServiceKeyring {
             let items = collection.search_items(attributes.clone()).map_err(classify)?;
             let created = if items.is_empty() && create {
                 let mut key = Zeroizing::new(vec![0; 32]);
-                getrandom::getrandom(&mut key).map_err(|_| ProviderError::Failed)?;
+                getrandom::fill(&mut key).map_err(|_| ProviderError::Failed)?;
                 collection.create_item("BitSov protected storage", attributes.clone(), &key, false, "application/octet-stream")
                     .map_err(classify)?;
                 Some(key)

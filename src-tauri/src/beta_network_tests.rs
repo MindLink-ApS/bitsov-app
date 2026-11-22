@@ -447,7 +447,7 @@ async fn beta_restart_adoption_requires_reported_signet() {
         let (state, dir, _server) = auth_fixture(network.map(serde_json::Value::from));
         authenticate(&state, dir.path()).await.unwrap();
         let result = adopt_matching_identity(&state, mock_node::NODE_ID).await;
-        if network == Some("signet") { assert_eq!(result.unwrap(), true); }
+        if network == Some("signet") { assert!(result.unwrap()); }
         else {
             assert!(!matches!(result, Ok(true)), "{network:?}");
             assert!(!state.status_snapshot().ready);

@@ -54,7 +54,10 @@ export function nodeRoutedSdp(type: 'offer' | 'answer', callId: string | null, s
 export const isNodeRoutedSdp = (sdp: string | null | undefined) =>
   typeof sdp === 'string' && sdp.split(/\r?\n/).includes(NODE_ROUTED_MARKER);
 
-export type MediaSessionEvent = { callId: string; state: 'open' | 'closed'; at: number };
+/** `refused`: the node refused the media socket for good (401 or 403), as opposed to a drop or an audio failure. */
+export type MediaSessionEvent = { callId: string; state: 'open' | 'closed'; at: number; refused?: boolean };
+/** How the host words a node's refusal of the media socket for this pairing's authority. */
+const AUTH_REFUSED = /refused the media socket \((401|403)\)/;
 
 /**
  * What the call label may say, on a build with sealing on.
@@ -173,6 +176,8 @@ export class NodeRoutedConnection {
   private wasOpen = false;
   /** `onSession` closed was emitted for this session (exactly once). */
   private sessionEnded = false;
+  /** The node refused the media socket (401/403) when the link ended. */
+  private refused = false;
   /** The node link is up (the host said `open`); `connected` also needs `audioReady`. */
   private linkOpen = false;
   private audioReady = false;
@@ -422,7 +427,7 @@ export class NodeRoutedConnection {
     if (!this.wasOpen || this.sessionEnded) return;
     this.sessionEnded = true;
     const callId = this.deps.callId();
-    if (callId) this.deps.onSession?.({ callId, state: 'closed', at: this.now() });
+    if (callId) this.deps.onSession?.({ callId, state: 'closed', at: this.now(), ...(this.refused ? { refused: true } : {}) });
   }
 
   /** The audio engine could not start, or broke mid-call: release it, close the socket, end the call. */
@@ -534,8 +539,11 @@ export class NodeRoutedConnection {
       case 'ended':
         // The call could not stay sealed: say so. It does not go on in the clear.
         if (link.detail && SEAL_DETAIL.test(link.detail)) this.endDetail = SEAL_ENDED;
-        // The node refused or dropped the media session for good.
+        if (link.detail && AUTH_REFUSED.test(link.detail)) this.refused = true;
+        // The node refused or dropped the media session for good. A refusal
+        // reaches the shell first, with its reason, before the generic close.
         this.stopWatching();
+        if (this.refused) this.endSession();
         this.setState('closed');
         this.endSession();
         break;
