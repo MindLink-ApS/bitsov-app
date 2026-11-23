@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { OwnerApprovals, OwnerApprovalWait } from '../src/control/OwnerApprovals';
-import { APPROVAL_ERROR_CODES, refusalText, type ApprovalView } from '../src/control/ownerApproval';
+import { APPROVAL_ERROR_CODES, approvalReason, refusalText, type ApprovalView } from '../src/control/ownerApproval';
+import { languagePref, setLanguagePref } from '../src/i18n';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
@@ -27,6 +28,28 @@ describe('owner side: approvals waiting for this device', () => {
     expect($('[data-approval-client]')!.textContent).toContain('does not name the app');
     expect($('[data-approval-expires]')!.textContent).toContain('3:20');
     expect($('[data-approval-message] pre')!.textContent).toBe(view().approval_message);
+  });
+
+  it('approving here shows the exact signed terms, as the review sheet does; a list that opens the sheet does not', () => {
+    show(() => <OwnerApprovals approvals={[view()]} now={NOW} nameOf={() => 'Robin'} approve={vi.fn()} mobile />);
+    const exact = $('[data-approval-terms-exact]')!;
+    expect(exact.textContent).toBe(approvalReason(view()));
+    expect(exact.getAttribute('lang')).toBe('en');
+    // The names shown above are a reading aid; the exact block is what the device signs.
+    expect(exact.textContent).not.toContain('Robin');
+    dispose?.(); mount.remove();
+    show(() => <OwnerApprovals approvals={[view()]} now={NOW} approve={vi.fn()} onReview={vi.fn()} />);
+    expect($('[data-approval-terms-exact]')).toBeNull();
+  });
+
+  it('in Danish, says the exact terms are English, as signed by this phone', () => {
+    const before = languagePref();
+    setLanguagePref('da');
+    try {
+      show(() => <OwnerApprovals approvals={[view()]} now={NOW} approve={vi.fn()} mobile />);
+      expect($('[data-approval-terms-language]')!.textContent).toBe('Vilkårene vises på engelsk, præcis som denne telefon signerer dem.');
+      expect($('[data-approval-terms-exact]')!.textContent).toBe(approvalReason(view()));
+    } finally { setLanguagePref(before); }
   });
 
   it('Approve sends exactly the message that was shown (terms shown == terms signed)', async () => {
