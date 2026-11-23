@@ -163,7 +163,7 @@ describe('node money readiness', () => {
   });
 
   it('maps the node refusal to the common calm message', () => {
-    expect(asActionError({ code: 'not_ready', message: 'backend unavailable' }).message).toBe('Money is not ready yet. Your node will retry automatically.');
+    expect(asActionError({ code: 'not_ready', message: 'backend unavailable' }).message).toBe('Money is not ready yet. Your box will retry automatically.');
   });
 
   it.each([
@@ -241,7 +241,7 @@ describe('shared money guard', () => {
     const refused = vi.fn();
     source.pay = vi.fn().mockRejectedValue({ code: 'not_ready', message: 'offline' });
     const guarded = readinessSource(() => source, () => false, refused);
-    await expect(guarded.pay('invoice', 1000, 6000)).rejects.toMatchObject({ code: 'not_ready', message: 'Money is not ready yet. Your node will retry automatically.' });
+    await expect(guarded.pay('invoice', 1000, 6000)).rejects.toMatchObject({ code: 'not_ready', message: 'Money is not ready yet. Your box will retry automatically.' });
     expect(refused).toHaveBeenCalledTimes(1);
     expect(source.pay).toHaveBeenCalledTimes(1);
   });

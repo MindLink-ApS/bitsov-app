@@ -173,7 +173,7 @@ pub struct AdmissionView {
     pub quoted: bool,
 }
 
-pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your node will retry automatically.";
+pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your box will retry automatically.";
 pub const CHAIN_UNAVAILABLE: &str = "Your box can't see the Bitcoin chain right now; nothing was paid; try again later.";
 
 pub fn chain_unavailable_refusal(status: u16, body: &str) -> bool {

@@ -23,7 +23,7 @@ const protocol: Record<string, Record<string, string[]>> = {
   'control/callReport.ts': {
     callReportLines: ['BitSov call report', 'app record; compare with the node journal', 'clock: this device', 'block_receipts: count and sum only; seq, amount and time of each are in the node journal'],
   },
-  'control/readiness.ts': { readinessSource: ['not_ready'], MONEY_NOT_READY: ['Money is not ready yet. Your node will retry automatically.'] },
+  'control/readiness.ts': { readinessSource: ['not_ready'], MONEY_NOT_READY: ['Money is not ready yet. Your box will retry automatically.'] },
   'control/polling.ts': { pollingSource: ['Shell closed', 'Shell stopped'] },
   'control/wallet.ts': { artifactActivity: ['Paid an invoice', 'Paid a node directly', 'Invoice · {0}'], activityLabel: ['Invoice · '] },
   'control/StarterBalance.tsx': { StarterStep: ['storage', 'request', 'read'] },
