@@ -1,8 +1,9 @@
 name: Windows Tests
 
-# Native Windows run of the Rust unit tests, including the private-file layer
-# and the DPAPI sealer, which were only type-checked before. Not a merge gate
-# yet: it starts informational until it has a green baseline on main.
+# Native Windows run of the private-file layer, the DPAPI sealer and the
+# Windows store tests, which were only type-checked before, as a standard
+# (not elevated) user. The full app suite is not run here yet: most of it
+# was written for Unix. Not a merge gate until it has a green baseline.
 on:
   workflow_dispatch:
   pull_request:
@@ -48,22 +49,64 @@ jobs:
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/bin
           : > "src-tauri/bin/konsensus-${TRIPLE}.exe"
-      # Tests that need an unelevated process return early when elevated, so
-      # record the integrity level the tests run at.
-      - name: Process integrity level
+      # Hosted runners are elevated, and the private-file layer refuses an
+      # elevated process (its store tests then return early and prove nothing).
+      # Build the test executables here, then run the private-file layer and
+      # the Windows store tests as a throwaway standard user (medium integrity).
+      # Test executables also need the Common Controls v6 manifest that
+      # tauri_build embeds only into the app executable (link time, this job only).
+      - name: Build test executables
+        working-directory: src-tauri
+        shell: bash
+        env:
+          RUSTFLAGS: -C link-arg=/MANIFEST:EMBED -C link-arg=/MANIFESTINPUT:${{ github.workspace }}\scripts\ci\windows-test.manifest
+        run: |
+          set -euo pipefail
+          sel='select(.profile.test == true and .executable != null) | .executable'
+          cargo test --locked -p bitsov-ffi --no-run --message-format=json | jq -r "$sel" > "$RUNNER_TEMP/ffi-tests.txt"
+          cargo test --locked -p bitsov-app --lib --no-run --message-format=json | jq -r "$sel" > "$RUNNER_TEMP/app-tests.txt"
+          cat "$RUNNER_TEMP/ffi-tests.txt" "$RUNNER_TEMP/app-tests.txt"
+      - name: Windows store tests as a standard user (not elevated)
         shell: pwsh
         run: |
-          $groups = whoami /groups
-          if ($groups -match 'S-1-16-12288') { 'integrity: high (elevated)' } elseif ($groups -match 'S-1-16-8192') { 'integrity: medium (not elevated)' } else { 'integrity: unknown' }
-      # Test executables need the Common Controls v6 manifest that tauri_build
-      # embeds only into the app executable. Applied to this job's links only.
-      - name: Private-file layer and DPAPI (bitsov-ffi)
-        working-directory: src-tauri
-        env:
-          RUSTFLAGS: -C link-arg=/MANIFEST:EMBED -C link-arg=/MANIFESTINPUT:${{ github.workspace }}\scripts\ci\windows-test.manifest
-        run: cargo test --locked -p bitsov-ffi
-      - name: App library tests
-        working-directory: src-tauri
-        env:
-          RUSTFLAGS: -C link-arg=/MANIFEST:EMBED -C link-arg=/MANIFESTINPUT:${{ github.workspace }}\scripts\ci\windows-test.manifest
-        run: cargo test --locked -p bitsov-app --lib
+          $ErrorActionPreference = 'Stop'
+          $dir = 'C:\bitsov-tests'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $ffi = @(Get-Content "$env:RUNNER_TEMP\ffi-tests.txt")
+          $app = @(Get-Content "$env:RUNNER_TEMP\app-tests.txt")
+          foreach ($e in $ffi + $app) { Copy-Item $e $dir }
+          Get-ChildItem src-tauri\target\debug -Filter *.dll -ErrorAction SilentlyContinue | Copy-Item -Destination $dir
+          Get-ChildItem src-tauri\target\debug\deps -Filter *.dll -ErrorAction SilentlyContinue | Copy-Item -Destination $dir
+          icacls $dir /grant '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+          # A random credential that is never printed; the account exists only on this runner.
+          $sec = ConvertTo-SecureString ('Bt1!' + [guid]::NewGuid().ToString('N')) -AsPlainText -Force
+          New-LocalUser -Name 'bitsovtest' -Password $sec -PasswordNeverExpires | Out-Null
+          $cred = [pscredential]::new("$env:COMPUTERNAME\bitsovtest", $sec)
+          function Run-AsTester([string]$exe, [string[]]$arguments, [string]$name) {
+            $out = Join-Path $env:RUNNER_TEMP "$name.out"
+            $err = Join-Path $env:RUNNER_TEMP "$name.err"
+            $p = Start-Process -FilePath $exe -ArgumentList $arguments -Credential $cred -LoadUserProfile `
+              -WorkingDirectory $dir -RedirectStandardOutput $out -RedirectStandardError $err -Wait -PassThru
+            Get-Content $out
+            Get-Content $err
+            return $p.ExitCode
+          }
+          # The tests must not run elevated, or the store tests skip themselves.
+          $null = Run-AsTester "$env:SystemRoot\System32\whoami.exe" @('/groups') 'whoami'
+          $groups = Get-Content (Join-Path $env:RUNNER_TEMP 'whoami.out') -Raw
+          if ($groups -notmatch 'S-1-16-8192') { throw 'the test user is not at medium integrity' }
+          'integrity: medium (not elevated)'
+          $failed = 0
+          foreach ($e in $ffi) {
+            $name = 'ffi-' + [IO.Path]::GetFileNameWithoutExtension($e)
+            $code = Run-AsTester (Join-Path $dir ([IO.Path]::GetFileName($e))) @('--test-threads=1') $name
+            if ($code -ne 0) { $failed++ }
+          }
+          $filters = @('--test-threads=1', 'budget::tests::windows_store', 'spend_journal::windows_journal_tests',
+                       'pairing::windows_store_tests', 'trust::windows_store_tests', 'app::windows_ai_storage_tests')
+          foreach ($e in $app) {
+            $name = 'app-' + [IO.Path]::GetFileNameWithoutExtension($e)
+            $code = Run-AsTester (Join-Path $dir ([IO.Path]::GetFileName($e))) $filters $name
+            if ($code -ne 0) { $failed++ }
+          }
+          if ($failed -ne 0) { throw "$failed test executable(s) failed" }
