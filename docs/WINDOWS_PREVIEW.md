@@ -27,8 +27,9 @@ writing keys or payment records into files that other Windows users could read.
 Stored objects must be owned by the current user with a private access list and
 no links; anything else is refused and left unchanged. If an interrupted save
 leaves a scratch file behind, later saves of that record are refused until it is
-removed, so nothing is written over it. The Windows Tests workflow runs these
-checks natively on a hosted Windows machine.
+removed, so nothing is written over it. These checks have Windows tests; they
+compile on Windows, and a native run as a normal (not administrator) user is
+still being set up.
 
 ## Install (unsigned installer)
 
