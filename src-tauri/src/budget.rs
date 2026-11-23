@@ -58,6 +58,10 @@ pub const MAX_DAILY_MSAT: u64 = 100_000_000;
 pub const LEDGER_MAX: usize = 20_000;
 
 const BOOK_VERSION: u32 = 1;
+/// Upper bound for one book read through the Windows private-file layer. The
+/// ledger is capped at [`LEDGER_MAX`] entries; this leaves ample headroom.
+#[cfg(windows)]
+const BOOK_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 // ---- presets ------------------------------------------------------------------
 
@@ -567,9 +571,22 @@ pub fn established_path(dir: &Path, node_id: &str) -> PathBuf {
     book_path(dir, node_id).with_extension("established")
 }
 
+/// The book's bytes. Windows reads through one verified handle of the
+/// private-file layer, so a widened access list, a foreign owner, a link or a
+/// reparse point is refused instead of read.
+#[cfg(not(windows))]
+fn read_book(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+#[cfg(windows)]
+fn read_book(path: &Path) -> std::io::Result<Vec<u8>> {
+    crate::private_fs::read(path, BOOK_MAX_BYTES).map(|bytes| bytes.to_vec())
+}
+
 pub fn load(dir: &Path, node_id: &str) -> Result<Book, ActionError> {
     let established = established_path(dir, node_id);
-    match std::fs::read(book_path(dir, node_id)) {
+    match read_book(&book_path(dir, node_id)) {
         Ok(bytes) => {
             let book: Book = serde_json::from_slice(&bytes).map_err(unreadable)?;
             if book.version != BOOK_VERSION || !book.node_id.eq_ignore_ascii_case(node_id) {
@@ -600,7 +617,14 @@ fn mark_established(dir: &Path, node_id: &str) -> std::io::Result<()> {
     std::fs::File::open(dir).and_then(|f| f.sync_all())
 }
 
-#[cfg(not(unix))]
+/// Windows: an empty private marker, created durable or verified if present.
+#[cfg(windows)]
+fn mark_established(dir: &Path, node_id: &str) -> std::io::Result<()> {
+    crate::private_fs::verify_dir(dir)?;
+    crate::private_fs::ensure_marker(&established_path(dir, node_id))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn mark_established(_dir: &Path, _node_id: &str) -> std::io::Result<()> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "private budget storage is not supported on this platform"))
 }
@@ -643,7 +667,7 @@ pub fn save(dir: &Path, book: &Book) -> Result<(), ActionError> {
 }
 
 /// The marker write that follows a committed book rename. True when written.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn mark_after_commit(dir: &Path, node_id: &str) -> bool {
     #[cfg(test)]
     if faults::hit(dir, faults::Step::Marker) { return false; }
@@ -679,7 +703,34 @@ pub(crate) mod faults {
     }
 }
 
-#[cfg(not(unix))]
+/// Windows: write a private scratch file, check it reads back byte for byte
+/// through the same handle, then publish it over the book by handle and flush
+/// the folder (the private-file layer). An existing book must verify first,
+/// and a leftover scratch from an interrupted save is refused and left as it
+/// is, never reused: the save fails closed and nothing is reserved.
+#[cfg(windows)]
+pub fn save(dir: &Path, book: &Book) -> Result<(), ActionError> {
+    crate::pairing::key::restrict_dir(dir).map_err(unreadable)?;
+    let path = book_path(dir, &book.node_id);
+    let bytes = serde_json::to_vec(book).map_err(unreadable)?;
+    #[cfg(test)]
+    if faults::hit(dir, faults::Step::Rename) { return Err(unreadable("injected rename failure")); }
+    crate::private_fs::write_replacing_verified(
+        &path.with_extension("json.tmp"),
+        &path,
+        &bytes,
+        unreadable,
+        |readback| if readback == bytes.as_slice() { Ok(()) } else { Err(unreadable("the saved book does not read back")) },
+    )?;
+    // Committed from here on; see the Unix save for why the marker follows.
+    if !mark_after_commit(dir, &book.node_id) {
+        eprintln!("budget: book saved; its first-write marker was not, and is written again on the next load or save");
+        let _ = crate::private_fs::sync_dir(dir);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn save(_dir: &Path, _book: &Book) -> Result<(), ActionError> {
     Err(unreadable("private budget storage is not supported on this platform"))
 }
@@ -829,6 +880,16 @@ mod tests {
             window: Err(ActionError::new("spend_locked", "approve")),
             now_ms: T,
         }
+    }
+
+    /// Plant a book file as the platform store would hold it: plain on Unix,
+    /// through the private-file layer on Windows (a plain file there is not
+    /// private and is refused before its contents are read).
+    fn plant(path: &Path, bytes: &[u8]) {
+        #[cfg(windows)]
+        crate::private_fs::write_replacing_verified(&path.with_extension("plant"), path, bytes, |e| e, |_| Ok(())).unwrap();
+        #[cfg(not(windows))]
+        std::fs::write(path, bytes).unwrap();
     }
 
     fn book_with_robin(limit: u64) -> Book {
@@ -990,7 +1051,7 @@ mod tests {
         book.reserve("pending", ROBIN, false, 3000, T);
         let mut legacy = serde_json::to_value(&book).unwrap();
         legacy.as_object_mut().unwrap().remove("accounted_payments");
-        std::fs::write(book_path(dir.path(), ME), legacy.to_string()).unwrap();
+        plant(&book_path(dir.path(), ME), legacy.to_string().as_bytes());
         let loaded = load(dir.path(), ME).unwrap();
         assert_eq!(loaded.spent_total(T), 4500);
         assert!(loaded.accounted_payments.is_empty());
@@ -1000,15 +1061,15 @@ mod tests {
     #[test]
     fn a_damaged_or_foreign_book_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(book_path(dir.path(), ME), b"{not json").unwrap();
+        plant(&book_path(dir.path(), ME), b"{not json");
         assert_eq!(load(dir.path(), ME).unwrap_err().code, "budget_unreadable");
         let mut other = Book::new(ME);
         other.node_id = ROBIN.into();
-        std::fs::write(book_path(dir.path(), ME), serde_json::to_vec(&other).unwrap()).unwrap();
+        plant(&book_path(dir.path(), ME), &serde_json::to_vec(&other).unwrap());
         assert_eq!(load(dir.path(), ME).unwrap_err().code, "budget_unreadable");
         let mut planted = serde_json::to_value(Book::new(ME)).unwrap();
         planted["grant"] = serde_json::json!(true);
-        std::fs::write(book_path(dir.path(), ME), planted.to_string()).unwrap();
+        plant(&book_path(dir.path(), ME), planted.to_string().as_bytes());
         assert_eq!(load(dir.path(), ME).unwrap_err().code, "budget_unreadable", "unknown fields are refused");
         assert_eq!(load(tempfile::tempdir().unwrap().path(), ME).unwrap(), Book::new(ME));
     }
@@ -1041,5 +1102,79 @@ mod tests {
         assert_eq!(v.rows.iter().find(|r| r.target == KIM).unwrap(), &Row { target: KIM.into(), room: false, limit_msat: None, spent_msat: 0, accounted_msat: 1000, unsettled_msat: 1000, fee_unknown: false });
         assert_eq!(v.rows.iter().find(|r| r.target == ROBIN).unwrap().limit_msat, Some(50_000));
         assert_eq!(v.unsettled_msat, 1000);
+    }
+
+    /// The book on the Windows private-file layer: saved and reloaded through
+    /// verified handles, and refused (left unchanged) when the object is not
+    /// private or a save was interrupted. Elevated runs are refused by the
+    /// layer before any storage, so these tests return early there.
+    #[cfg(windows)]
+    mod windows_store {
+        use super::*;
+        use crate::private_fs::fixtures::{elevated, grant_everyone_read, temp_root};
+
+        fn store(name: &str) -> PathBuf {
+            temp_root(name).join("app-spend")
+        }
+
+        #[test]
+        fn a_saved_book_reloads_exactly_and_every_object_is_private() {
+            if elevated() { return; }
+            let dir = store("budget-w01");
+            let mut book = book_with_robin(50_000);
+            book.reserve("a", ROBIN, false, 2000, T);
+            save(&dir, &book).unwrap();
+            assert_eq!(load(&dir, ME).unwrap(), book);
+            crate::private_fs::verify_dir(&dir).unwrap();
+            crate::private_fs::verify_file(&book_path(&dir, ME)).unwrap();
+            crate::private_fs::verify_file(&established_path(&dir, ME)).unwrap();
+            assert!(!book_path(&dir, ME).with_extension("json.tmp").exists());
+            // A second save replaces the verified book.
+            book.settle("a", 1500, T);
+            save(&dir, &book).unwrap();
+            assert_eq!(load(&dir, ME).unwrap(), book);
+        }
+
+        #[test]
+        fn a_widened_book_is_refused_and_left_unchanged() {
+            if elevated() { return; }
+            let dir = store("budget-w02");
+            let book = book_with_robin(50_000);
+            save(&dir, &book).unwrap();
+            let path = book_path(&dir, ME);
+            let before = std::fs::read(&path).unwrap();
+            grant_everyone_read(&path);
+            assert!(load(&dir, ME).is_err(), "a book others can read is not loaded");
+            let mut next = book.clone();
+            next.reserve("b", ROBIN, false, 1000, T);
+            assert!(save(&dir, &next).is_err(), "a book others can read is not replaced");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+
+        #[test]
+        fn a_leftover_scratch_fails_the_save_and_is_left_untouched() {
+            if elevated() { return; }
+            let dir = store("budget-w03");
+            let book = book_with_robin(50_000);
+            save(&dir, &book).unwrap();
+            let scratch = book_path(&dir, ME).with_extension("json.tmp");
+            std::fs::write(&scratch, b"{partial").unwrap();
+            let mut next = book.clone();
+            next.reserve("b", ROBIN, false, 1000, T);
+            assert!(save(&dir, &next).is_err());
+            assert_eq!(std::fs::read(&scratch).unwrap(), b"{partial");
+            assert_eq!(load(&dir, ME).unwrap(), book, "the committed book is unchanged");
+        }
+
+        #[test]
+        fn a_missing_book_after_one_was_saved_is_refused_not_reset() {
+            if elevated() { return; }
+            let dir = store("budget-w04");
+            save(&dir, &book_with_robin(50_000)).unwrap();
+            std::fs::remove_file(book_path(&dir, ME)).unwrap();
+            assert!(load(&dir, ME).is_err(), "the marker says a book existed");
+            let fresh = store("budget-w05");
+            assert_eq!(load(&fresh, ME).unwrap(), Book::new(ME), "a new store starts empty");
+        }
     }
 }
