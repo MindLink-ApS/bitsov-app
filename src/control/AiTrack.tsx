@@ -476,6 +476,10 @@ export function AiTrack(props: {
 
       <Show when={session.provider === 'local'}>
         <div class="ai-own-bar">
+          {/* Outside the section below: it stays closed while the server isn't running, which is when this matters. */}
+          <Show when={localError()}>
+            <div data-ai-own-error><SoftError message={localError()!} /></div>
+          </Show>
           <details class="ai-own-details" open={Boolean(localStatus()?.running)}>
             <summary class="ai-own-summary">
               <span class="ai-own-icon" aria-hidden="true">⚙</span>
@@ -540,7 +544,7 @@ export function AiTrack(props: {
                   </Show>
                 </div>
                 <div class="ai-own-models" role={(localStatus()?.models.length ?? 0) > 0 ? 'listbox' : 'group'} aria-label={tr('caLocalModels')} data-ai-own-models>
-                  <For each={localStatus()?.models ?? []}>
+                  <For each={localStatus()?.models ?? []} fallback={<p class="hint" data-ai-own-no-models>{tr('caLocalServerNoModels')}</p>}>
                     {(name) => (
                       <button
                         type="button"
@@ -556,9 +560,6 @@ export function AiTrack(props: {
                     )}
                   </For>
                 </div>
-              </Show>
-              <Show when={localError()}>
-                <div data-ai-own-error><SoftError message={localError()!} /></div>
               </Show>
             </div>
           </details>

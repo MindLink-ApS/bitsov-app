@@ -1,3 +1,6 @@
-import { beforeEach } from 'vitest';
+import { beforeEach, vi } from 'vitest';
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  vi.stubEnv('VITE_CALL_SEAL', '');
+});
