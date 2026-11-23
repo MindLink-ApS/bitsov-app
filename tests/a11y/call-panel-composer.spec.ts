@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
+import { PHONE_SHELL_PREVIEW } from './phoneShellPreview';
 
 // The call card and the message composer, in the real app with sample data. The card is held at
 // "Calling…" (below). The live card is that same card given what a live video call adds (the
@@ -167,7 +168,7 @@ test.describe('phone shell', () => {
         ` });
       });
       await page.setViewportSize({ width: 360, height: 740 });
-      await page.goto(`/docs/ui/u5-phone-shell/harness/preview.html?scene=spend-open&lang=${lang}`);
+      await page.goto(`${PHONE_SHELL_PREVIEW}?scene=spend-open&lang=${lang}`);
       await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
       await expect(page.locator(SEND)).toBeVisible();
       await ringFromHeader(page);
