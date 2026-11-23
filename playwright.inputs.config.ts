@@ -15,7 +15,7 @@ export default defineConfig({
     viewport: { width: 390, height: 844 },
     isMobile: true,
     hasTouch: true,
-    reducedMotion: 'reduce',
+    contextOptions: { reducedMotion: 'reduce' },
     baseURL: `http://localhost:${port}`,
   },
   webServer: {

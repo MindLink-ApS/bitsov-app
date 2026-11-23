@@ -4,6 +4,12 @@ name: Mac Package Intel
 # Keep this workflow manual-only; the existing ARM package schedule is separate.
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: 'full = bundled node; remote-only = signet remote test app, no node sidecar'
+        type: choice
+        options: [full, remote-only]
+        default: full
 
 permissions:
   contents: read
@@ -25,7 +31,7 @@ jobs:
       BITSOV_MAC_SIGNING_IDENTITY: '-'
       BITSOV_MAC_NOTARY_PROFILE: ''
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Require a native Intel host
         run: |
@@ -35,7 +41,7 @@ jobs:
       - name: GnuPG for the sidecar signature check
         run: command -v gpg || brew install gnupg
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -51,37 +57,80 @@ jobs:
           cache-all-crates: 'true'
           cache-workspace-crates: 'true'
 
+      # Pure checks; the enclave probe is replaced, no Keychain or enclave use.
+      - name: Secure storage bridge checks
+        run: bash scripts/test-mac-secure-storage.sh
+
       # The native host selects bitsov-darwin-x86_64 from the signed manifest.
       # Every sidecar is authenticated again before bundling.
       - name: Package and verify the native Intel app
-        run: bash scripts/package-mac.sh --arch x86_64 --dmg
+        env:
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          case "$PROFILE" in
+            full) bash scripts/package-mac.sh --arch x86_64 --dmg ;;
+            remote-only) bash scripts/package-mac.sh --arch x86_64 --dmg --remote-only ;;
+            *) echo "Unknown profile: $PROFILE" >&2; exit 2 ;;
+          esac
+
+      # An Intel Mac without a Secure Enclave refuses by design (exit 3).
+      - name: Real Keychain smoke from the signed bundle (headless)
+        env:
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          set -uo pipefail
+          bundle="$CARGO_TARGET_DIR/x86_64-apple-darwin/release/bundle/macos"
+          case "$PROFILE" in
+            full) app="$bundle/BitSov.app" ;;
+            remote-only) app="$bundle/BitSov Remote Test.app" ;;
+            *) echo "Unknown profile: $PROFILE" >&2; exit 2 ;;
+          esac
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          status=0
+          "$app/Contents/MacOS/$executable" --keychain-smoke-test || status=$?
+          case "$status" in
+            0) ;;
+            3) echo "::notice::identity storage refused: this Mac has no Secure Enclave" ;;
+            *) exit "$status" ;;
+          esac
 
       - name: Archive the verified app and record build inputs
         env:
           SOURCE_SHA: ${{ github.sha }}
+          PROFILE: ${{ inputs.profile }}
         run: |
           set -euo pipefail
           bundle="$CARGO_TARGET_DIR/x86_64-apple-darwin/release/bundle"
-          app="$bundle/macos/BitSov.app"
+          case "$PROFILE" in
+            full) app="$bundle/macos/BitSov.app" ;;
+            remote-only) app="$bundle/macos/BitSov Remote Test.app" ;;
+            *) echo "Unknown profile: $PROFILE" >&2; exit 2 ;;
+          esac
           test -s "$app/Contents/_CodeSignature/CodeResources"
           codesign --verify --deep --strict --verbose=2 "$app"
           mkdir -p "$RUNNER_TEMP/out"
-          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/out/BitSov-unsigned-macos-x86_64.app.zip"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/out/BitSov-unsigned-macos-x86_64-$PROFILE.app.zip"
           cp "$bundle"/dmg/*_x86_64.dmg "$RUNNER_TEMP/out/"
-          source scripts/fetch-node-sidecar.sh
           {
-            printf 'source_sha=%s\ntarget=x86_64-apple-darwin\nnode_release=%s\n' "$SOURCE_SHA" "$TAG"
-            printf 'node_asset=bitsov-darwin-x86_64\n'
-            shasum -a 256 src-tauri/bin/konsensus-x86_64-apple-darwin
+            printf 'source_sha=%s\ntarget=x86_64-apple-darwin\nprofile=%s\n' "$SOURCE_SHA" "$PROFILE"
+            if [ "$PROFILE" = full ]; then
+              source scripts/fetch-node-sidecar.sh
+              printf 'node_release=%s\nnode_asset=bitsov-darwin-x86_64\n' "$TAG"
+              shasum -a 256 src-tauri/bin/konsensus-x86_64-apple-darwin
+            else
+              test ! -e "$app/Contents/MacOS/konsensus"
+              printf 'node_sidecar=none\n'
+            fi
             rustc --version
             node --version
           } > "$RUNNER_TEMP/out/build-info.txt"
           cd "$RUNNER_TEMP/out"
           shasum -a 256 ./*.app.zip ./*.dmg build-info.txt > SHA256SUMS
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: bitsov-unsigned-macos-x86_64-${{ github.sha }}
+          name: bitsov-unsigned-macos-x86_64-${{ inputs.profile }}-${{ github.sha }}
           path: ${{ runner.temp }}/out/
           if-no-files-found: error
           retention-days: 7

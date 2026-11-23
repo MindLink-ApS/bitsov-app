@@ -1,3 +1,4 @@
+import { hostText } from '../control/hostCopy';
 import { t } from '../i18n';
 import { deviceWord } from '../platform';
 import { BoxIllustration } from './BoxIllustration';
@@ -88,7 +89,7 @@ export function RemoteOwnerCeremony(props: {
         case 'words_differ': pending = false; stopTimers(); clear(); setStep('words_differ'); break;
       }
     } catch (e) {
-      if (alive) { clearTimeout(poll); setError(String(e));
+      if (alive) { clearTimeout(poll); setError(hostText(String(e)));
         clear(); setStep('uncertain');
       }
     } finally { if (alive) setBusy(false); }

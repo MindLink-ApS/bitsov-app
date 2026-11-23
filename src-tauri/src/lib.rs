@@ -24,10 +24,16 @@ pub mod mcp;
 pub mod control;
 pub mod jarvis;
 pub mod at_rest;
+#[cfg(windows)]
+mod private_fs;
 #[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")), all(test, unix)))]
 mod apple_key_material;
 pub mod pairing;
 mod trust;
+#[cfg(all(test, unix))]
+mod store_matrix;
+#[cfg(all(test, unix))]
+mod store_fail_closed_tests;
 mod profile;
 mod network_policy;
 #[cfg(any(target_os = "ios", all(test, unix)))]
@@ -61,6 +67,10 @@ pub fn run() {
 
 /// Headless packaging check; call before initializing the application runtime.
 #[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
-pub fn mac_keychain_smoke_test() -> Result<&'static str, String> {
+pub use pairing::key::SmokeOutcome;
+
+/// A Mac without a Secure Enclave is a named refusal (exit 3), not a failure.
+#[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
+pub fn mac_keychain_smoke_test() -> Result<SmokeOutcome, String> {
     pairing::key::storage_smoke_test()
 }

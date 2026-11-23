@@ -26,12 +26,25 @@ pub trait Sealer: Send + Sync {
     fn allows_plaintext_fallback(&self) -> bool {
         false
     }
+
+    /// Whether the hardware key this sealer needs exists on this device.
+    /// Asked before any seal, open or file write; it never prompts.
+    fn hardware_available(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
 mod macos;
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
 pub use macos::install_macos;
+
+#[cfg(any(windows, test))]
+mod dpapi;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::install_windows;
 
 /// The client Ed25519 seed (`pairing::key`).
 pub const CLIENT_SEED_PURPOSE: &str = "client-ed25519-seed-v1";
@@ -81,6 +94,18 @@ pub(crate) mod test_sealer {
     }
 }
 
+#[cfg(all(test, target_os = "macos", not(feature = "mobile")))]
+mod tests {
+    use super::Sealer;
+
+    #[test]
+    fn mac_sealers_never_allow_plaintext_fallback() {
+        for enclave in [|| true, || false] {
+            assert!(!super::macos::MacSealer::with_probe(enclave).allows_plaintext_fallback());
+        }
+    }
+}
+
 #[cfg(target_os = "ios")]
 pub fn install_ios() -> Result<(), String> {
     struct IosSealer;
@@ -94,3 +119,6 @@ pub fn install_ios() -> Result<(), String> {
     }
     install(Arc::new(IosSealer))
 }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) mod linux;

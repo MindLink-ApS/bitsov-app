@@ -342,6 +342,9 @@ pub enum RemoteError {
     Expired(u64),
     /// This device has no passcode, so its protected identity cannot be stored or read.
     DeviceUnavailable,
+    /// This Mac has no Secure Enclave: secrets cannot be stored safely here.
+    /// `identity_kept`: an existing identity was left untouched.
+    SecureStorageUnavailable { identity_kept: bool },
 }
 
 fn elapsed_text(seconds: u64) -> String {
@@ -371,6 +374,11 @@ impl fmt::Display for RemoteError {
             Self::AndroidLocalNetwork => f.write_str("Local network access is unavailable. Allow Nearby devices for BitSov in Android Settings, then return to BitSov or tap Reconnect."),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
             Self::DeviceUnavailable => f.write_str(PASSCODE_REQUIRED),
+            Self::SecureStorageUnavailable { identity_kept } => {
+                f.write_str(NO_SECURE_ENCLAVE)?;
+                if *identity_kept { f.write_str(IDENTITY_KEPT)?; }
+                Ok(())
+            }
             Self::RateLimited(seconds) => write!(f, "Remote connection limited; waiting {seconds} s"),
             Self::Waiting(seconds) => write!(f, "Remote connection unavailable; waiting {seconds} s"),
         }
@@ -416,6 +424,8 @@ pub enum ConnectionErrorKind {
     ClaimMismatch,
     /// No device passcode (and so no Face ID / Touch ID): protected storage is off.
     DeviceUnavailable,
+    /// No Secure Enclave on this Mac. Permanent; never the passcode message.
+    SecureStorageUnavailable,
     Other,
 }
 
@@ -432,6 +442,14 @@ pub const PASSCODE_REQUIRED_CODE: &str = "device_passcode_required";
 /// link). Kept here so every target compiles the classification; a test binds
 /// the two copies wherever the bridge exists.
 pub const PASSCODE_REQUIRED: &str = "This device has no passcode, so Face ID and protected storage are off. Turn on a passcode in Settings, then try again.";
+/// A Mac without a Secure Enclave. The renderer shows its own copy for these.
+pub const SECURE_STORAGE_UNAVAILABLE_CODE: &str = "secure_storage_unavailable";
+/// The same, when an existing pairing was kept untouched for its original Mac.
+pub const SECURE_STORAGE_KEPT_CODE: &str = "secure_storage_unavailable_identity_kept";
+/// Mirrors `bitsov_ffi::keychain_status::NO_SECURE_ENCLAVE` (Android links no
+/// bridge); a test binds the two copies wherever the bridge exists.
+pub const NO_SECURE_ENCLAVE: &str = "This Mac has no Secure Enclave, so BitSov cannot store its pairing key safely. Nothing was saved.";
+pub const IDENTITY_KEPT: &str = " Your existing pairing is kept and works again on the Mac it was made on.";
 
 /// Classify the node's refusal of a pairing code by its reason, for every ticket
 /// kind (first pairing, owner, second device, legacy). Only a fixed local
@@ -497,6 +515,8 @@ impl From<&RemoteError> for ConnectionError {
             RemoteError::DeviceUnavailable => (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
             RemoteError::Local(message) if message == PASSCODE_REQUIRED =>
                 (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
+            RemoteError::SecureStorageUnavailable { identity_kept } => (SecureStorageUnavailable,
+                if *identity_kept { SECURE_STORAGE_KEPT_CODE } else { SECURE_STORAGE_UNAVAILABLE_CODE }.into()),
             _ => (Other, CONNECTION_FAILED_CODE.into()),
         };
         // Peer text may echo authentication codes. Only fixed local copy crosses.
@@ -550,7 +570,7 @@ pub fn node_id_fingerprint(node_id_hex: &str) -> String {
 
 pub fn new_local_auth_token() -> Result<String, RemoteError> {
     let mut token = [0u8; 32];
-    getrandom::getrandom(&mut token).map_err(|error| {
+    getrandom::fill(&mut token).map_err(|error| {
         RemoteError::Local(format!("cannot secure remote loopback proxy: {error}"))
     })?;
     Ok(hex::encode(token))
@@ -966,6 +986,9 @@ fn open_sealed_code(
             "protected storage is unavailable for this pairing link; try again on the original device".into(),
         ));
     };
+    if !sealer.hardware_available() {
+        return Err(RemoteError::SecureStorageUnavailable { identity_kept: true });
+    }
     if stored.code.is_some() {
         return Err(RemoteError::Local("the remote access descriptor is corrupt".into()));
     }
@@ -985,11 +1008,16 @@ fn open_sealed_code(
     Ok((stored, false))
 }
 
+#[cfg(not(windows))]
 fn persist_with(
     path: &Path,
     descriptor: &RemoteDescriptor,
     sealer: Option<&dyn Sealer>,
 ) -> Result<(), RemoteError> {
+    // A code that cannot be sealed is never written, not even to a tempfile.
+    if descriptor.code.is_some() && sealer.is_some_and(|sealer| !sealer.hardware_available()) {
+        return Err(RemoteError::SecureStorageUnavailable { identity_kept: false });
+    }
     let dir = path
         .parent()
         .ok_or_else(|| RemoteError::Local("remote config has no parent directory".into()))?;
@@ -1038,6 +1066,19 @@ fn persist_with(
     Ok(())
 }
 
+/// The descriptor file's bytes; unchanged path read outside Windows.
+#[cfg(not(windows))]
+fn read_descriptor_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+/// Windows: the descriptor on the private-file layer.
+#[cfg(windows)]
+#[path = "remote_access/windows_store.rs"]
+mod windows_store;
+#[cfg(windows)]
+use windows_store::{persist_with, read_descriptor_file};
+
 /// Validate with the same parser as import, without storage or network access.
 pub fn preview_pairing_link(link: &str) -> Result<RemotePreviewView, RemoteError> {
     let descriptor = parse_pairing_link(link)?;
@@ -1084,6 +1125,10 @@ pub fn forget_persisted(app_data_dir: &Path) -> Result<(), RemoteError> {
         let dir = app_data_dir.join(REMOTE_CONFIG_DIR);
         pairing::key::restrict_dir(&dir).map_err(|e| RemoteError::Local(e.to_string()))?;
         let reset = dir.join(LOCAL_PAIRING_RESET);
+        #[cfg(windows)]
+        crate::private_fs::ensure_marker(&reset)
+            .map_err(|e| RemoteError::Local(format!("cannot schedule local pairing reset: {e}")))?;
+        #[cfg(not(windows))]
         if reset.exists() {
             pairing::key::check_owner_only(&reset, "local pairing reset")
                 .map_err(|e| RemoteError::Local(e.to_string()))?;
@@ -1131,12 +1176,13 @@ fn load_with(
     path: &Path,
     sealer: Option<&dyn Sealer>,
 ) -> Result<Option<RemoteDescriptor>, RemoteError> {
-    if !path.exists() {
+    if pairing::key::nothing_at(path) {
         return Ok(None);
     }
+    #[cfg(not(windows))]
     pairing::key::check_owner_only(path, "remote access descriptor")
         .map_err(|e| RemoteError::Local(e.to_string()))?;
-    let bytes = std::fs::read(path)
+    let bytes = read_descriptor_file(path)
         .map_err(|e| RemoteError::Local(format!("cannot read remote descriptor: {e}")))?;
     if bytes.len() > MAX_LINK_BYTES {
         return Err(RemoteError::Local(
@@ -1150,6 +1196,14 @@ fn load_with(
     if migrate {
         // The atomic replacement unlinks the file that held the plaintext code.
         if let Err(error) = persist_with(path, &descriptor, sealer) {
+            // A missing Secure Enclave refuses before anything is written, so the
+            // existing pairing on disk is untouched: report it as kept.
+            let error = match error {
+                RemoteError::SecureStorageUnavailable { .. } => {
+                    RemoteError::SecureStorageUnavailable { identity_kept: true }
+                }
+                other => other,
+            };
             if !sealer.is_some_and(|sealer| sealer.allows_plaintext_fallback()) {
                 return Err(error);
             }
@@ -1370,7 +1424,7 @@ async fn pinned_handshake_bound<S: AsyncRead + AsyncWrite + Unpin>(
             .map_err(|_| RemoteError::Local("invalid built-in Noise protocol".into()))?;
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_initiator()
+            .and_then(|b| b.build_initiator())
             .map_err(|e| RemoteError::Local(format!("cannot initialize Noise: {e}")))?;
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let length = noise
@@ -1948,7 +2002,7 @@ fn finalize_authenticated_pairing(
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
         // Only update the descriptor this handshake started with. Import or
         // forget may have changed the next startup while the network awaited.
-        let stored = std::fs::read(config_path)
+        let stored = read_descriptor_file(config_path)
             .ok()
             .and_then(|bytes| saved_descriptor(&bytes));
         if !stored.is_some_and(|saved| saved.node_id == current.node_id
@@ -2089,7 +2143,7 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
 ) -> Result<RemoteDescriptor, RemoteError> {
     verify_transport_proof(node, live_key, live_signature)?;
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-    let stored = std::fs::read(config_path(app_dir)).ok().and_then(|bytes| saved_descriptor(&bytes));
+    let stored = read_descriptor_file(&config_path(app_dir)).ok().and_then(|bytes| saved_descriptor(&bytes));
     if !stored.is_some_and(|saved| saved.node_id == previous.node_id
         && saved.box_transport_pubkey == previous.box_transport_pubkey
         && saved.endpoint == previous.endpoint && saved.endpoints == previous.endpoints
@@ -2116,7 +2170,7 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
 pub fn clear_enrollment_commitment(app_dir: &Path, descriptor: &mut RemoteDescriptor) -> Result<(), RemoteError> {
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
     let path = config_path(app_dir);
-    let mut saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes))
+    let mut saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes))
         .ok_or_else(|| RemoteError::Local("pairing ticket was forgotten or replaced".into()))?;
     if saved.node_id != descriptor.node_id || saved.endpoint != descriptor.endpoint
         || saved.transport_pubkey != descriptor.transport_pubkey || saved.code.is_some()
@@ -2338,7 +2392,7 @@ pub async fn authenticate_pinned_transport_and_save_record(
     let one_use = |d: &RemoteDescriptor| d.code.as_deref().is_some_and(|c| c.starts_with("second_") || c.starts_with("owner_"));
     // A previous interrupted send may already have retired the ticket on disk.
     let descriptor = if one_use(&descriptor) {
-        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        let saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         match saved {
             Some(mut saved) if saved.code.is_none() && saved.node_id == descriptor.node_id
                 && saved.endpoint == descriptor.endpoint && saved.transport_pubkey == descriptor.transport_pubkey
@@ -2353,7 +2407,7 @@ pub async fn authenticate_pinned_transport_and_save_record(
         let mut current = current.lock().unwrap();
         if !one_use(&current) { return Ok(()); }
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        let saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         if !saved.is_some_and(|d| d.node_id == current.node_id && d.endpoint == current.endpoint
             && d.transport_pubkey == current.transport_pubkey && d.code == current.code) {
             return Err(RemoteError::Local("pairing ticket was forgotten or replaced".into()));
@@ -2386,7 +2440,7 @@ pub async fn authenticate_pinned_transport_and_save_record(
             return Err(RemoteError::Invalid("unexpected provisional pairing".into()));
         }
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        let saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         if !saved.is_some_and(|d| d.node_id == descriptor.node_id && d.endpoint == descriptor.endpoint
             && d.code.is_none() && d.enrollment_commitment == descriptor.enrollment_commitment) {
             return Err(RemoteError::Local("pairing ticket was forgotten or replaced".into()));
@@ -2584,6 +2638,7 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
         .redirect(reqwest::redirect::Policy::none())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_proxy(
     api_base: &str,
     app_data_dir: &Path,
@@ -2756,6 +2811,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use std::net::IpAddr;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -2949,7 +3005,7 @@ mod tests {
                 "box_transport_pubkey": box_key,
                 "box_transport_signature": box_signature,
                 "expires_at": NOW + 86_400,
-                "hosted_by": "Rasmus's Pi",
+                "hosted_by": "Alex's Pi",
             });
             for (key, value) in extra.as_object().unwrap() {
                 fields[key] = value.clone();
@@ -2958,7 +3014,7 @@ mod tests {
         };
 
         let descriptor = parse_pairing_link_at(&ticket(serde_json::json!({})), NOW).unwrap();
-        assert_eq!(descriptor.hosted_by(), Some("Rasmus's Pi"));
+        assert_eq!(descriptor.hosted_by(), Some("Alex's Pi"));
         assert!(descriptor.has_code());
         // The node writes `null` when `[node].hosted_by` is unset.
         let unlabeled = parse_pairing_link_at(&ticket(serde_json::json!({ "hosted_by": null })), NOW).unwrap();
@@ -2980,9 +3036,9 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let live = ticket(serde_json::json!({ "expires_at": unix_now() + 86_400 }));
         let view = import_pairing_link(data.path(), &live).unwrap();
-        assert_eq!(view.hosted_by.as_deref(), Some("Rasmus's Pi"));
+        assert_eq!(view.hosted_by.as_deref(), Some("Alex's Pi"));
         let reloaded = load_persisted(data.path()).unwrap().unwrap();
-        assert_eq!(reloaded.hosted_by(), Some("Rasmus's Pi"));
+        assert_eq!(reloaded.hosted_by(), Some("Alex's Pi"));
         assert!(reloaded.has_code());
     }
 
@@ -3081,7 +3137,7 @@ mod tests {
         assert_eq!(label("  My Pi  ").as_deref(), Some("My Pi"));
         // Markup stays literal; the renderer shows it as text.
         assert_eq!(label("<img src=x onerror=alert(1)>").as_deref(), Some("<img src=x onerror=alert(1)>"));
-        for odd in ["Pi\u{202E}kcab", "Rasmus\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
+        for odd in ["Pi\u{202E}kcab", "Alex\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
             assert_eq!(label(odd), None, "{odd:?}");
         }
 
@@ -3179,6 +3235,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn persistence_is_owner_only_and_code_is_stripped() {
         let dir = tempfile::tempdir().unwrap();
         let node = SigningKey::from_bytes(&[11u8; 32]);
@@ -3200,6 +3257,11 @@ mod tests {
         assert!(!text.contains("\"code\""));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mod linux_candidate_tests {
+        include!("remote_access/linux_candidate_tests.rs");
+    }
+
     fn sealed_fixture(seed: u8) -> (tempfile::TempDir, PathBuf, RemoteDescriptor, String) {
         let dir = tempfile::tempdir().unwrap();
         let node = SigningKey::from_bytes(&[seed; 32]);
@@ -3208,6 +3270,51 @@ mod tests {
         let link = signed_link("127.0.0.1:4242".into(), &node, transport, &code);
         let path = config_path(dir.path());
         (dir, path, parse_pairing_link(&link).unwrap(), code)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_descriptor_round_trips_and_tampering_is_refused() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        use crate::private_fs::fixtures::*;
+        if elevated() {
+            return;
+        }
+        let (dir, path, descriptor, code) = sealed_fixture(41);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        let loaded = load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
+        assert_eq!(loaded.code.as_deref(), Some(code.as_str()));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&code) && text.contains("sealed_code"), "{text}");
+        // The reset marker is a private object too.
+        forget_persisted(dir.path()).unwrap();
+        let reset = path.parent().unwrap().join(LOCAL_PAIRING_RESET);
+        crate::private_fs::verify_file(&reset).unwrap();
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        // Extra access entry: refused for reading and replacing, bytes kept.
+        let bytes = std::fs::read(&path).unwrap();
+        grant_everyone_read(&path);
+        assert!(load_with(&path, Some(&MemorySealer)).is_err());
+        assert!(persist_with(&path, &descriptor, Some(&MemorySealer)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // A leftover scratch file is refused, not reused or deleted.
+        let (_dir2, path2, descriptor2, _) = sealed_fixture(43);
+        persist_with(&path2, &descriptor2, Some(&MemorySealer)).unwrap();
+        let scratch = path2.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp"));
+        std::fs::write(&scratch, b"leftover").unwrap();
+        assert!(persist_with(&path2, &descriptor2, Some(&MemorySealer)).is_err());
+        assert_eq!(std::fs::read(&scratch).unwrap(), b"leftover");
+        // Reparse point at the descriptor folder.
+        let (dir3, path3, descriptor3, _) = sealed_fixture(45);
+        let target = dir3.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        junction(path3.parent().unwrap(), &target);
+        assert!(persist_with(&path3, &descriptor3, Some(&MemorySealer)).is_err());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        // Wrong owner.
+        let foreign = foreign_owned_dir().join(REMOTE_CONFIG_FILE);
+        assert!(persist_with(&foreign, &descriptor3, Some(&MemorySealer)).is_err());
     }
 
     #[test]
@@ -3263,6 +3370,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_plaintext_pending_code_is_sealed_once_on_load() {
         use crate::at_rest::test_sealer::MemorySealer;
         let (_dir, path, descriptor, code) = sealed_fixture(41);
@@ -3321,6 +3429,58 @@ mod tests {
         }
     }
 
+    /// A Mac without an enclave: a native call here would be a bug.
+    struct NoEnclaveSealer;
+    impl Sealer for NoEnclaveSealer {
+        fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> { panic!("seal called without an enclave") }
+        fn open(&self, _: &str, _: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> { panic!("open called without an enclave") }
+        fn hardware_available(&self) -> bool { false }
+    }
+    /// The same Mac, as the native bridge answers if it is asked anyway.
+    struct NoEnclaveBridge;
+    impl Sealer for NoEnclaveBridge {
+        fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> { Err("no Secure Enclave".into()) }
+        fn open(&self, _: &str, _: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> { Err("no Secure Enclave".into()) }
+        fn hardware_available(&self) -> bool { false }
+    }
+
+    #[test]
+    fn persisting_a_pairing_code_without_enclave_refuses_and_writes_nothing() {
+        let (dir, path, descriptor, code) = sealed_fixture(61);
+        assert!(descriptor.code.is_some());
+        let error = persist_with(&path, &descriptor, Some(&NoEnclaveSealer)).unwrap_err();
+        assert!(matches!(error, RemoteError::SecureStorageUnavailable { identity_kept: false }), "{error}");
+        assert!(!error.to_string().contains("try again"), "{error}");
+        assert!(!error.to_string().contains(&code));
+        assert!(!path.exists());
+        assert!(!path.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp")).exists());
+        assert!(!dir.path().join(REMOTE_CONFIG_DIR).exists(), "no directory or file was created");
+    }
+
+    #[test]
+    fn plaintext_code_migration_without_enclave_keeps_file_and_refuses() {
+        let (_dir, path, descriptor, _) = sealed_fixture(63);
+        persist_with(&path, &descriptor, None).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        // The saved pairing is untouched, so the refusal says it was kept, never "nothing was saved".
+        let error = load_with(&path, Some(&NoEnclaveBridge)).unwrap_err();
+        assert!(matches!(error, RemoteError::SecureStorageUnavailable { identity_kept: true }), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!path.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp")).exists());
+    }
+
+    #[test]
+    fn sealed_code_without_enclave_is_refused_not_rewritten() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        let (_dir, path, descriptor, _) = sealed_fixture(65);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        let sealed = std::fs::read(&path).unwrap();
+        assert!(load_with(&path, Some(&NoEnclaveBridge)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), sealed);
+        assert!(load_with(&path, None).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), sealed);
+    }
+
     #[test]
     fn import_view_exposes_only_a_short_node_id_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
@@ -3371,6 +3531,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn returning_auth_validates_existing_record_without_rewriting_it() {
         let app_dir = tempfile::tempdir().unwrap();
         let pairing_store = tempfile::tempdir().unwrap();
@@ -3409,6 +3570,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn derived_key_is_stable_and_not_the_ed25519_seed() {
         let a_dir = tempfile::tempdir().unwrap();
         let b_dir = tempfile::tempdir().unwrap();
@@ -3569,17 +3731,34 @@ mod tests {
         assert_eq!(ConnectionError::from(&RemoteError::Local("other".into())).kind, ConnectionErrorKind::Other);
     }
 
+    #[test]
+    fn secure_storage_unavailable_maps_to_its_own_connection_kind() {
+        for (identity_kept, code) in [(false, SECURE_STORAGE_UNAVAILABLE_CODE), (true, SECURE_STORAGE_KEPT_CODE)] {
+            let mapped = ConnectionError::from(&RemoteError::SecureStorageUnavailable { identity_kept });
+            assert_eq!((mapped.kind, mapped.detail.as_str()), (ConnectionErrorKind::SecureStorageUnavailable, code));
+            assert_ne!(mapped.kind, ConnectionErrorKind::DeviceUnavailable);
+            assert_ne!(mapped.detail, PASSCODE_REQUIRED_CODE);
+        }
+        assert_eq!(SECURE_STORAGE_UNAVAILABLE_CODE, "secure_storage_unavailable");
+        assert_eq!(serde_json::to_value(ConnectionErrorKind::SecureStorageUnavailable).unwrap(), "secure_storage_unavailable");
+        let text = RemoteError::SecureStorageUnavailable { identity_kept: true }.to_string();
+        assert!(text.contains("Secure Enclave") && text.contains("kept"), "{text}");
+        assert!(!text.contains("try again") && !text.to_lowercase().contains("clear"), "{text}");
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(bitsov_ffi::keychain_status::NO_SECURE_ENCLAVE, NO_SECURE_ENCLAVE);
+    }
+
     fn transport_pair() -> (TransportState, TransportState) {
         let params: snow::params::NoiseParams = NOISE_PROTOCOL.parse().unwrap();
         let initiator_secret = [41u8; 32];
         let responder_secret = [42u8; 32];
         let mut initiator = Builder::new(params.clone())
             .local_private_key(&initiator_secret)
-            .build_initiator()
+            .and_then(|b| b.build_initiator())
             .unwrap();
         let mut responder = Builder::new(params)
             .local_private_key(&responder_secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut message = vec![0u8; MAX_HANDSHAKE_FRAME];
         let mut plaintext = vec![0u8; MAX_HANDSHAKE_FRAME];
@@ -3953,7 +4132,7 @@ mod tests {
         let params = NOISE_PROTOCOL.parse().unwrap();
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
@@ -3973,7 +4152,7 @@ mod tests {
         let params = NOISE_PROTOCOL.parse().unwrap();
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
@@ -4004,7 +4183,7 @@ mod tests {
     // Count socket handshakes, not requests, so losing pooling fails this test.
     async fn polling_responder(mut stream: TcpStream, secret: [u8; 32]) -> Result<(), RemoteError> {
         let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
-            .local_private_key(&secret).build_responder().unwrap();
+            .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
@@ -4228,7 +4407,7 @@ mod tests {
     // Complete the handshake and read the app's authentication request.
     async fn read_auth_request(stream: &mut TcpStream, secret: [u8; 32]) -> Result<TransportState, RemoteError> {
         let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
-            .local_private_key(&secret).build_responder().unwrap();
+            .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
@@ -4873,7 +5052,7 @@ mod tests {
             let key = ClientKey::load_or_create(store.path()).unwrap();
             remember_endpoint(&descriptor, &answering_endpoint);
 
-            let error = connect_authenticated(&descriptor, &key, "test phone").await.err().expect("the box refused");
+            let error = connect_authenticated(&descriptor, &key, "test phone").await.expect_err("the box refused");
             assert!(expected(&error), "{error}");
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(requests.load(Ordering::SeqCst), 1);
@@ -5286,3 +5465,24 @@ mod onboarding_error_tests {
 #[cfg(test)]
 #[path = "remote_access/second_tests.rs"]
 pub(crate) mod second_tests;
+
+/// Preparation entry point; production persistence is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn persist_linux_candidate(path: &Path, descriptor: &RemoteDescriptor, sealer: Option<&dyn Sealer>) -> Result<(), RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => { load_with(path, Some(&sealer))?; }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RemoteError::Local(format!("cannot inspect remote descriptor: {error}"))),
+    }
+    persist_with(path, descriptor, Some(&sealer))
+}
+
+/// Preparation entry point; production loading is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn load_linux_candidate(path: &Path, sealer: Option<&dyn Sealer>) -> Result<Option<RemoteDescriptor>, RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    load_with(path, Some(&sealer))
+}

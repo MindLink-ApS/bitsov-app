@@ -43,7 +43,7 @@ function note(g: NodeGrantSummary | null, limit: number | null = LIMIT, quote: C
   mount?.remove();
   mount = document.createElement('div');
   document.body.appendChild(mount);
-  dispose = render(() => <RingBudgetNote grant={g} peer={peer} name="Maya" quote={quote} callLimitMinutes={limit} now={NOW} />, mount);
+  dispose = render(() => <RingBudgetNote grant={g} peer={peer} name="Robin" quote={quote} callLimitMinutes={limit} now={NOW} />, mount);
   return mount.querySelector('[data-call-contact-budget-short]');
 }
 
@@ -79,7 +79,7 @@ describe('the contact-budget line before Ring', () => {
     const left = 50_000;
     const el = note(grant({ [A]: left }));
     expect(el?.textContent).toBe(
-      `Your box has only ${amount(left)} left for Maya right now. A call holds up to ${amount(HOLD)}, so your box will likely turn it down. A bigger budget for this contact usually has to be approved on the box’s own computer.`);
+      `Your box has only ${amount(left, 'up')} left for Robin right now. A call holds up to ${amount(HOLD, 'up')}, so your box will likely turn it down. A bigger budget for this contact usually has to be approved on the box’s own computer.`);
     expect(el?.getAttribute('role')).toBe('note');
   });
 
@@ -87,7 +87,7 @@ describe('the contact-budget line before Ring', () => {
     setLanguagePref('da');
     const left = 50_000;
     expect(note(grant({ [A]: left }))?.textContent).toBe(
-      `Din boks har kun ${amount(left)} tilbage til Maya lige nu. Et opkald holder op til ${amount(HOLD)}, så boksen vil sandsynligvis afvise det. Et større budget til kontakten skal som regel godkendes på boksens egen computer.`);
+      `Din boks har kun ${amount(left, 'up')} tilbage til Robin lige nu. Et opkald holder op til ${amount(HOLD, 'up')}, så boksen vil sandsynligvis afvise det. Et større budget til kontakten skal som regel godkendes på boksens egen computer.`);
   });
 
   it('shows nothing while the call limit is unknown, however little is left', () => {

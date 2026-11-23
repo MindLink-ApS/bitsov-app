@@ -10,19 +10,19 @@ describe('denomination formatting', () => {
 
   it('formats sats by default', () => {
     setDenom('sats');
-    expect(sats(1000)).toBe('1');
-    expect(satUnit(1000)).toBe('sat');
-    expect(satUnit(2000)).toBe('sats');
-    expect(amount(2000)).toBe('2 sats');
+    expect(sats(1000, 'up')).toBe('1');
+    expect(satUnit(1000, 'up')).toBe('sat');
+    expect(satUnit(2000, 'up')).toBe('sats');
+    expect(amount(2000, 'up')).toBe('2 sats');
   });
 
   it('formats BTC when toggled', () => {
     setDenom('btc');
     expect(btc(100_000_000_000)).toBe('1'); // 1 BTC in msat
-    expect(sats(100_000_000_000)).toBe('1');
-    expect(satUnit(1000)).toBe('BTC');
-    expect(sats(50_000_000)).toBe('0.0005'); // 50_000 sats
-    expect(amount(50_000_000)).toBe('0.0005 BTC');
+    expect(sats(100_000_000_000, 'up')).toBe('1');
+    expect(satUnit(1000, 'up')).toBe('BTC');
+    expect(sats(50_000_000, 'up')).toBe('0.0005'); // 50_000 sats
+    expect(amount(50_000_000, 'up')).toBe('0.0005 BTC');
   });
 
   it('keeps sub-sat msat exact in BTC mode and carries correctly at 1 BTC', () => {
@@ -35,11 +35,12 @@ describe('denomination formatting', () => {
     expect(btc(100_000_000_000)).toBe('1');
     expect(btc(100_000_000_001)).toBe('1.00000000001');
     setDenom('sats');
-    expect(sats(500)).toBe('0.5');
-    expect(sats(1500)).toBe('1.5');
-    expect(sats(999)).toBe('0.999');
-    expect(sats(12_345)).toBe('12.345');
-    expect(sats(99_999_999_500)).toBe('99\u202f999\u202f999.5');
+    // Sats mode shows whole sats, rounded up and marked; never a sub-sat decimal.
+    expect(sats(500, 'up')).toBe('about 1');
+    expect(sats(1500, 'up')).toBe('about 2');
+    expect(sats(999, 'up')).toBe('about 1');
+    expect(sats(12_345, 'up')).toBe('about 13');
+    expect(sats(99_999_999_500, 'up')).toBe('about 100\u202f000\u202f000');
   });
 });
 
@@ -198,10 +199,10 @@ describe('BTC mode never appends sats to a BTC figure', () => {
     expect(mount.textContent).not.toMatch(btcThenSats);
 
     // Quoted re-admission / first-contact card when present in sample spend path:
-    // open first-contact door by selecting Maya (sample peer) if a door quote is shown.
-    const maya = SAMPLE_PEERS[0]?.node_id;
-    if (maya) {
-      const link = mount.querySelector(`[data-track="peer:${maya.toLowerCase()}"]`) as HTMLButtonElement | null;
+    // open first-contact door by selecting Robin (sample peer) if a door quote is shown.
+    const robin = SAMPLE_PEERS[0]?.node_id;
+    if (robin) {
+      const link = mount.querySelector(`[data-track="peer:${robin.toLowerCase()}"]`) as HTMLButtonElement | null;
       link?.click();
     }
     await vi.waitFor(() => expect(mount.querySelector('[data-composer]')).not.toBeNull());
@@ -209,8 +210,8 @@ describe('BTC mode never appends sats to a BTC figure', () => {
     const quote = mount.querySelector('[data-door-quote], [data-readmission-quote], [data-first-contact]');
     if (quote) expect(quote.textContent).not.toMatch(btcThenSats);
 
-    expect(amount(2_000)).toBe('0.00000002 BTC');
-    expect(amount(2_000)).not.toMatch(/\bsats\b/);
+    expect(amount(2_000, 'up')).toBe('0.00000002 BTC');
+    expect(amount(2_000, 'up')).not.toMatch(/\bsats\b/);
     expect(mount.textContent).not.toMatch(btcThenSats);
   });
 });

@@ -291,8 +291,8 @@ const ico = {
 
 // ---------- shared content (honest sample copy) ----------
 const peers = [
-  { n: 'Maya', i: 'M', p: '2 sats', on: true },
-  { n: 'Josh', i: 'J', p: '1 sat', badge: 1 },
+  { n: 'Robin', i: 'M', p: '2 sats', on: true },
+  { n: 'Kim', i: 'J', p: '1 sat', badge: 1 },
   { n: 'Gamma VM', i: 'G', p: '1 sat' },
   { n: 'New contact', i: '?', p: 'price unknown' },
 ];
@@ -328,7 +328,7 @@ function msgHTML(m, i) {
   if (m.day) return `<div class="day">${m.day}</div>`;
   const cls = `msg ${m.dir} ${m.sending ? 'sending' : ''}`;
   if (id === 'E') {
-    return `<div class="${cls}"><span class="t">${m.t}</span><span class="who">${m.dir === 'in' ? 'maya' : 'you'}</span><div class="bubble">${m.text}</div><div class="meta"><span class="amt">${m.sending ? '⟳ ≤7 sat' : m.amt.replace('sats', 'sat')}</span>${m.detail ? `<span>${m.detail.replace(' routing', 'r')}</span>` : ''}</div></div>`;
+    return `<div class="${cls}"><span class="t">${m.t}</span><span class="who">${m.dir === 'in' ? 'robin' : 'you'}</span><div class="bubble">${m.text}</div><div class="meta"><span class="amt">${m.sending ? '⟳ ≤7 sat' : m.amt.replace('sats', 'sat')}</span>${m.detail ? `<span>${m.detail.replace(' routing', 'r')}</span>` : ''}</div></div>`;
   }
   let meta;
   if (id === 'B') meta = `<div class="receipt">${m.t} · ${m.receipt}</div>`;
@@ -340,29 +340,29 @@ function msgHTML(m, i) {
 function priceBlock() {
   const v = D.variants.price;
   const breakdown = `<div class="breakdown">
-      <span>Maya’s price</span><span class="num">2 sats</span>
+      <span>Robin’s price</span><span class="num">2 sats</span>
       <span>Routing fee, at most</span><span class="num">5 sats</span>
       <span class="total">You pay at most</span><span class="num total">7 sats</span>
       <span class="hint">A ceiling, not a charge. You pay what the route actually costs. On this path routing can cost more than the message itself.</span>
     </div>`;
   const approve = `<div class="approve"><span>Messages ask before paying until you set a daily limit.</span><button class="link">Allow up to 2,000 sats a day</button></div>`;
   if (v === 'chip') return { inField: `<button class="pricechip" aria-expanded="true">up to 7 sats</button>`, below: breakdown + approve, send: 'Send' };
-  if (v === 'note') return { inField: '', below: `<div class="pricenote">This message costs up to <span class="num">7 sats</span>: Maya’s 2 sats plus at most 5 for routing. You pay what the route actually costs.</div>` + approve, send: 'Send' };
+  if (v === 'note') return { inField: '', below: `<div class="pricenote">This message costs up to <span class="num">7 sats</span>: Robin’s 2 sats plus at most 5 for routing. You pay what the route actually costs.</div>` + approve, send: 'Send' };
   if (v === 'review') return { inField: '', below: `<div class="review"><div>Message<span class="num">2 sats</span></div><div>Routing fee<span class="num">≤ 5 sats</span></div><div class="max">Most you pay<span class="num">7 sats</span></div></div><div class="approve"><span>Routing may cost more than the message on this path. You pay the actual route cost.</span></div>` + approve, send: 'Send' };
-  if (v === 'button') return { inField: '', below: `<div class="approve"><span>Up to 7 sats: Maya’s 2-sat price plus at most 5 in routing.</span><button class="link">Allow 2,000 sats a day</button></div>`, send: 'Send <small>up to 7 sats</small>' };
-  if (v === 'statusbar') return { inField: `<span class="kbd">↵</span>`, below: '', send: 'send', status: `<div class="statusbar"><span>maya</span><span>price 2 sat</span><span>routing ≤5 sat</span><span class="m">ceiling 7 sat</span><span>daily limit not set · <u>⌘B</u></span><span class="right">node this-mac · block 860,124</span></div>` };
+  if (v === 'button') return { inField: '', below: `<div class="approve"><span>Up to 7 sats: Robin’s 2-sat price plus at most 5 in routing.</span><button class="link">Allow 2,000 sats a day</button></div>`, send: 'Send <small>up to 7 sats</small>' };
+  if (v === 'statusbar') return { inField: `<span class="kbd">↵</span>`, below: '', send: 'send', status: `<div class="statusbar"><span>robin</span><span>price 2 sat</span><span>routing ≤5 sat</span><span class="m">ceiling 7 sat</span><span>daily limit not set · <u>⌘B</u></span><span class="right">node this-mac · block 860,124</span></div>` };
 }
 
 function chat() {
   const p = priceBlock();
   const head = id === 'D'
-    ? `<div class="head"><span class="av">M</span><div><h2>Maya</h2><div class="sub">2 sats a message · last paid message 10:21</div></div><div class="tools"><button class="icon" title="Call, up to 21 sats">${ico.call}</button><button class="icon" title="Video call">${ico.video}</button><button class="icon">${ico.more}</button></div></div>`
-    : `<div class="head"><div><h2>Maya</h2><div class="sub">${id === 'E' ? '<span class="num">02a1c4…9f3e</span> · price 2 sat/msg · last settled 10:21' : 'Reaching Maya costs 2 sats a message'}</div></div><div class="tools"><button class="icon" title="Call">${ico.call}</button><button class="icon" title="Video">${ico.video}</button><button class="icon" title="Meeting">${ico.people}</button></div></div>`;
+    ? `<div class="head"><span class="av">M</span><div><h2>Robin</h2><div class="sub">2 sats a message · last paid message 10:21</div></div><div class="tools"><button class="icon" title="Call, up to 21 sats">${ico.call}</button><button class="icon" title="Video call">${ico.video}</button><button class="icon">${ico.more}</button></div></div>`
+    : `<div class="head"><div><h2>Robin</h2><div class="sub">${id === 'E' ? '<span class="num">02a1c4…9f3e</span> · price 2 sat/msg · last settled 10:21' : 'Reaching Robin costs 2 sats a message'}</div></div><div class="tools"><button class="icon" title="Call">${ico.call}</button><button class="icon" title="Video">${ico.video}</button><button class="icon" title="Meeting">${ico.people}</button></div></div>`;
   return `<div class="frame">${rail('chat')}<main class="main">${head}
     <div class="log"><div class="col">${messages.map(msgHTML).join('')}</div></div>
     <div class="dock"><form class="composer" onsubmit="return send(event)">
       <div class="field">${id === 'E' ? '<span class="kbd">›</span>' : `<button type="button" class="icon" title="Attach, pay, request">${ico.plus}</button>`}
-        <input id="draft" value="Want to go over it before the call?" placeholder="Message Maya" />${p.inField}<button class="send">${p.send}</button></div>
+        <input id="draft" value="Want to go over it before the call?" placeholder="Message Robin" />${p.inField}<button class="send">${p.send}</button></div>
       ${p.below}
     </form></div>${p.status || ''}
   </main></div>`;
@@ -436,8 +436,8 @@ function wallet() {
   const custody = `<span class="chip custody">Self-custody, keys on this Mac</span>`;
   const split = `<div class="split"><div>Spendable<span class="v unknown">Not reported</span></div><div>Reserved for channel fees<span class="v unknown">Not reported</span></div><div>Closing<span class="v unknown">Not reported</span></div></div>`;
   const rows = [
-    ['Today', [['Message to Maya', '2 sats + 1 routing', '−3', 'minus'], ['Message from Josh', 'their price paid to you', '+1', 'plus'], ['On-chain deposit', 'waiting for confirmations', '+100,000', 'pending']]],
-    ['Sunday 27 September', [['Message to Maya', '2 sats + 0 routing', '−2', 'minus'], ['Message from Maya', 'their price paid to you', '+1', 'plus'], ['Invoice paid: coffee', 'Lightning payment', '−4,200', 'minus']]],
+    ['Today', [['Message to Robin', '2 sats + 1 routing', '−3', 'minus'], ['Message from Kim', 'their price paid to you', '+1', 'plus'], ['On-chain deposit', 'waiting for confirmations', '+100,000', 'pending']]],
+    ['Sunday 27 September', [['Message to Robin', '2 sats + 0 routing', '−2', 'minus'], ['Message from Robin', 'their price paid to you', '+1', 'plus'], ['Invoice paid: coffee', 'Lightning payment', '−4,200', 'minus']]],
   ];
   const txHTML = rows.map(([d, rs]) => `<div class="tx"><h4>${d}</h4>${rs.map(([w, y, n, c]) => `<div class="r"><span class="what">${w}</span><span class="num ${c}">${n}</span><span class="why">${y}</span></div>`).join('')}</div>`).join('');
   const head = `<div class="head"><h2>Wallet</h2><div class="tools"><button class="icon" title="Refresh">${ico.more}</button></div></div>`;
@@ -461,10 +461,10 @@ function wallet() {
   if (v === 'table') body = `<div class="wcol" style="width:100%;max-width:980px">
       <div class="kv"><div>total (node-reported)<b>482,500</b></div><div>spendable<b style="color:var(--faint)">—</b></div><div>can send / receive<b>400k / 450k</b></div><div>custody<b style="font-size:13px">self · this-mac</b></div></div>
       <table class="tbl"><thead><tr><th>time</th><th>kind</th><th>peer</th><th class="num">amount</th><th class="num">routing</th><th>state</th></tr></thead><tbody>
-        <tr><td class="num">09:02</td><td>msg out</td><td>maya</td><td class="num">−2</td><td class="num">≤5</td><td style="color:var(--money)">routing</td></tr>
-        <tr><td class="num">08:40</td><td>msg in</td><td>josh</td><td class="num">+1</td><td class="num">—</td><td>settled</td></tr>
+        <tr><td class="num">09:02</td><td>msg out</td><td>robin</td><td class="num">−2</td><td class="num">≤5</td><td style="color:var(--money)">routing</td></tr>
+        <tr><td class="num">08:40</td><td>msg in</td><td>kim</td><td class="num">+1</td><td class="num">—</td><td>settled</td></tr>
         <tr><td class="num">08:12</td><td>deposit</td><td>on-chain</td><td class="num">+100,000</td><td class="num">—</td><td>0/3 conf</td></tr>
-        <tr><td class="num">Sep 27</td><td>msg out</td><td>maya</td><td class="num">−2</td><td class="num">0</td><td>settled</td></tr>
+        <tr><td class="num">Sep 27</td><td>msg out</td><td>robin</td><td class="num">−2</td><td class="num">0</td><td>settled</td></tr>
         <tr><td class="num">Sep 27</td><td>invoice</td><td>coffee</td><td class="num">−4,200</td><td class="num">3</td><td>settled</td></tr>
       </tbody></table>
       <div class="note-quiet">— = not reported by your node. <span class="kbd">R</span> receive <span class="kbd">S</span> send <span class="kbd">⌘E</span> export</div></div>`;

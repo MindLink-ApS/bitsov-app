@@ -39,9 +39,9 @@ it('overrides and resumes the system language, including languagechange', () => 
 
 it('inserts money and recipient text verbatim in both languages', () => {
   setLanguagePref('en');
-  expect(t('uiSentTo', '1 250 sats', 'Maya {0} $&')).toBe('Sent 1 250 sats to Maya {0} $&.');
+  expect(t('uiSentTo', '1 250 sats', 'Robin {0} $&')).toBe('Sent 1 250 sats to Robin {0} $&.');
   setLanguagePref('da');
-  expect(t('uiSentTo', '1 250 sats', 'Maya {0} $&')).toBe('Sendt 1 250 sats til Maya {0} $&.');
+  expect(t('uiSentTo', '1 250 sats', 'Robin {0} $&')).toBe('Sendt 1 250 sats til Robin {0} $&.');
 });
 
 it('translates persisted activity labels without touching invoice notes', async () => {
@@ -52,4 +52,16 @@ it('translates persisted activity labels without touching invoice notes', async 
   expect(activityLabel({ ...base, kind: 'payment', label: 'Paid an invoice' })).toBe('Betalte en faktura');
   setLanguagePref('en');
   expect(activityLabel({ ...base, kind: 'payment', label: 'Paid an invoice' })).toBe('Paid an invoice');
+});
+
+it('names a missing Secure Enclave in both languages without placeholders', () => {
+  for (const locale of ['en', 'da'] as const) {
+    const text = (copy[locale] as Record<string, string>)['pairing.secureStorageUnavailable'];
+    expect(text, locale).toBeTypeOf('string');
+    expect(text.trim(), locale).not.toBe('');
+    expect(text, locale).not.toMatch(/\{\d+\}/);
+    expect(text, locale).toContain('Secure Enclave');
+  }
+  expect((copy.en as Record<string, string>)['pairing.secureStorageUnavailable']).not.toMatch(/try again/i);
+  expect((copy.da as Record<string, string>)['pairing.secureStorageUnavailable']).not.toMatch(/prøv igen/i);
 });

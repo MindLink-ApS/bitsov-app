@@ -3,6 +3,14 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod device_key;
+/// Owner-only storage rules shared by the Windows private-file layer.
+pub mod private_policy;
+/// Verified-handle private files on Windows (protected descriptors, no inheritance).
+#[cfg(windows)]
+pub mod win_private;
+/// Current-user DPAPI for the Windows at-rest sealer.
+#[cfg(windows)]
+pub mod dpapi;
 
 /// Platform-neutral so every target can classify the Apple bridge's result.
 pub mod keychain_status {
@@ -11,6 +19,9 @@ pub mod keychain_status {
     pub const PASSCODE_NOT_SET: i32 = -77_001;
     /// Fixed host text for that state; the app maps it to its own error kind.
     pub const PASSCODE_REQUIRED: &str = "This device has no passcode, so Face ID and protected storage are off. Turn on a passcode in Settings, then try again.";
+    /// Fixed host text for a Mac without a Secure Enclave. Permanent: the
+    /// app maps it to its own error kind and never suggests a retry.
+    pub const NO_SECURE_ENCLAVE: &str = "This Mac has no Secure Enclave, so BitSov cannot store its pairing key safely. Nothing was saved.";
 }
 #[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))]
 pub mod client_keychain;
@@ -36,3 +47,8 @@ pub mod phone_recovery;
 
 #[cfg(target_os = "ios")]
 pub mod call_audio;
+
+/// Latency-critical activity while a call is live. The Swift bridge is built
+/// only on a macOS desktop build.
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+pub mod call_activity;

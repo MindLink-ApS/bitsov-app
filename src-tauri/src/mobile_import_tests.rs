@@ -38,7 +38,7 @@ async fn noise_auth_reply_with(listener: &tokio::net::TcpListener, accept: bool)
     let (mut stream, _) = listener.accept().await.unwrap();
     let secret = [43; 32];
     let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
-        .local_private_key(&secret).build_responder().unwrap();
+        .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
     let mut output = [0; 1024];
     for step in 0..2 {
         let length = stream.read_u32().await.unwrap();
@@ -372,7 +372,7 @@ async fn rejected_import_does_not_cancel_an_established_proxy_recovery() {
         result = remote_access_import_at(app.handle(), &state, dir.path(), &replacement) => result,
         _ = &mut recovery => panic!("a rejected import must not cancel recovery"),
     };
-    assert!(result.unwrap_err().contains("already active"));
+    assert!(result.unwrap_err().to_string().contains("already active"));
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut recovery).await.is_err());
     let (old, forgotten) = tokio::join!(&mut recovery, remote_access_forget_at(&state, dir.path()));
     old.unwrap();
@@ -428,7 +428,7 @@ async fn proxy_published_during_import_cancellation_keeps_recovering() {
     }).await.expect("import must cancel the old generation before waiting for recovery");
     *state.remote_proxy.lock().unwrap() = Some(proxy);
     drop(guard);
-    assert!(import.await.unwrap_err().contains("already active"));
+    assert!(import.await.unwrap_err().to_string().contains("already active"));
     // Observe the recovered dial. Polling try_lock can itself take the lock
     // while the recovery task calls try_lock, making that task skip its work.
     let (_retried, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())

@@ -19,9 +19,9 @@ function show(jsx: () => any) { mount = document.createElement('div'); document.
 
 describe('owner side: approvals waiting for this device', () => {
   it('shows the node’s terms, the requesting app’s fingerprint, the time left and the exact message', () => {
-    show(() => <OwnerApprovals approvals={[view()]} now={NOW} nameOf={() => 'Maya'} approve={vi.fn()} />);
+    show(() => <OwnerApprovals approvals={[view()]} now={NOW} nameOf={() => 'Robin'} approve={vi.fn()} />);
     expect([...mount.querySelectorAll('[data-approval-terms] li')].map((l) => l.textContent)).toEqual([
-      'Let this app message someone new', 'To: Maya (aaaaaa…aaaaaa)', 'First message: up to 14 sats', 'Contact budget: up to 50 sats',
+      'Let this app message someone new', 'To: Robin (aaaaaa…aaaaaa)', 'First message: up to 14 sats', 'Contact budget: up to 50 sats',
     ]);
     expect($('[data-approval-client]')!.textContent).toContain('cdcdcd…cdcdcd');
     expect($('[data-approval-client]')!.textContent).toContain('does not name the app');

@@ -88,7 +88,7 @@ describe('frontDoorMedia prep', () => {
       mime: REENCODED_IMAGE_MIME,
     };
     const parts = {
-      display_name: 'Rasmus',
+      display_name: 'Alex',
       tagline: 'hi',
       about: 'about',
       avatar,
@@ -102,7 +102,7 @@ describe('frontDoorMedia prep', () => {
     const bare = JSON.parse(
       JSON.stringify({
         v: 1,
-        profile: { display_name: 'Rasmus', tagline: 'hi', about: 'about', avatar },
+        profile: { display_name: 'Alex', tagline: 'hi', about: 'about', avatar },
         media,
         links: parts.links,
       }),
@@ -130,7 +130,7 @@ describe('frontDoorMedia prep', () => {
     // estimate (sig + site + endpoint + overhead) must still block Publish.
     const about = 'x'.repeat(14_800);
     const parts = {
-      display_name: 'Rasmus',
+      display_name: 'Alex',
       tagline: 'hi',
       about,
       avatar: null,
@@ -139,7 +139,7 @@ describe('frontDoorMedia prep', () => {
       cv: null,
     };
     const bareLen = new TextEncoder().encode(
-      JSON.stringify({ profile: { display_name: 'Rasmus', tagline: 'hi', about } }),
+      JSON.stringify({ profile: { display_name: 'Alex', tagline: 'hi', about } }),
     ).length;
     expect(bareLen).toBeLessThan(MAX_CARD_BYTES);
     const estimated = estimateCardBytes(parts);

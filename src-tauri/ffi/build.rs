@@ -29,6 +29,7 @@ fn build_device_key_swift() {
     println!("cargo:rerun-if-changed=../native/pairing_link.swift");
     println!("cargo:rerun-if-changed=../native/phone_recovery.swift");
     println!("cargo:rerun-if-changed=../native/call_audio.swift");
+    println!("cargo:rerun-if-changed=../native/call_activity.swift");
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") => "arm64",
         Ok("x86_64") => "x86_64",
@@ -72,6 +73,7 @@ fn build_device_key_swift() {
         compiler.args(["-D", "BITSOV_TEST_DEVICE_KEYS"]);
     }
     compiler.arg("../native/client_keychain.swift");
+    if !ios { compiler.arg("../native/call_activity.swift"); }
     if ios { compiler.args([ "../native/pairing_link.swift", "../native/home_metadata.swift", "../native/phone_recovery.swift", "../native/call_audio.swift"]); }
     let status = compiler
         .args([
