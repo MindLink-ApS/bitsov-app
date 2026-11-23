@@ -205,10 +205,12 @@ def check_inputs(root):
 
 
 def check_source(root, expected=None, *, env):
-    # User and system Git settings (such as status.showUntrackedFiles=no or a
-    # global excludes file) must not hide files the build would compile.
+    # User and system Git settings (such as status.showUntrackedFiles=no, a
+    # global excludes file, or the default user excludes file under
+    # ~/.config/git/ignore) must not hide files the build would compile.
     env = {**(os.environ if env is None else env), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-    if probe(["git", "status", "--porcelain", "--untracked-files=all"], root, env):
+    if probe(["git", "-c", f"core.excludesFile={os.devnull}", "status", "--porcelain",
+              "--untracked-files=all"], root, env):
         raise RuntimeError("Commit source changes before packaging.")
     commit = probe(["git", "rev-parse", "HEAD"], root, env)
     if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
