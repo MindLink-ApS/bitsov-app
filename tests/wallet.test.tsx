@@ -549,6 +549,79 @@ describe('the Wallet page', () => {
     expect(moneyCalls(host)).toHaveLength(0);
   });
 
+  it('Receive: an invoice that could not be read says so on that invoice only, not on another that was read', async () => {
+    let n = 0;
+    const host = stubHost({
+      invoice_create: (args) => ({ bolt11: `lntb25u1walletreceive${++n}`, amount_msat: args!.amount_msat, note: null, expires_at_ms: Date.now() + 3_600_000 }),
+      invoice_status: (args) => {
+        if (args!.bolt11 === 'lntb25u1walletreceive1') throw { code: 'node', message: 'Your node did not answer.' };
+        return nodePayment('Pending', 2_500_000);
+      },
+    });
+    await openWallet('receive');
+    await vi.waitFor(() => expect($('[data-receive-create]')).not.toBeNull());
+    type('[data-receive-amount]', '2500');
+    click('[data-receive-create]');
+    await vi.waitFor(() => expect(text('[data-bolt11]')).toBe('lntb25u1walletreceive1'));
+    await vi.waitFor(() => expect($('[data-receive-unread]')).not.toBeNull(), { timeout: 6000 });
+    expect(text('[data-receive-unread]')).toMatch(/could not be checked/);
+    expect(text('[data-receive-state]')).toBe('Waiting to be paid');
+    click('[data-receive-new]');
+    type('[data-receive-amount]', '2500');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-receive-create]')?.disabled).toBe(false));
+    click('[data-receive-create]');
+    await vi.waitFor(() => expect(text('[data-bolt11]')).toBe('lntb25u1walletreceive2'));
+    // A sweep reads both, the first (failing) before the second: wait until the second was read.
+    const reads = (bolt11: string) => host.used('invoice_status').filter((c) => c.args!.bolt11 === bolt11).length;
+    await vi.waitFor(() => expect(reads('lntb25u1walletreceive2')).toBeGreaterThan(0), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(reads('lntb25u1walletreceive1')).toBeGreaterThanOrEqual(reads('lntb25u1walletreceive2'));
+    expect($('[data-receive-unread]')).toBeNull();
+    expect(text('[data-receive-state]')).toBe('Waiting to be paid');
+    expect(moneyCalls(host)).toHaveLength(0);
+  }, 20_000);
+
+  it('Receive: an invoice the node cannot place reads as unknown, never as paid or as waiting to be paid', async () => {
+    const host = stubHost({ invoice_status: () => invoiceFromNode(200, { payment_hash: '00'.repeat(32), status: 'Mystery', amount_msat: 2_500_000, direction: 'Incoming' }) });
+    await openWallet('receive');
+    await vi.waitFor(() => expect($('[data-receive-create]')).not.toBeNull());
+    type('[data-receive-amount]', '2500');
+    click('[data-receive-create]');
+    await vi.waitFor(() => expect(text('[data-receive-state]')).toBe('Unknown'), { timeout: 6000 });
+    expect(text('[data-receive-unknown]')).toMatch(/could not say whether this was paid/);
+    expect($('[data-receive-unread]')).toBeNull();
+    expect(text('[data-receive-invoice]')).not.toMatch(/Waiting to be paid|Received|Not paid/);
+    // It stays open: the log is not changed, so a later read can still settle it.
+    expect(loggedActivity().find((a) => a.bolt11 === 'lntb25u1walletreceive')?.status).toBe('waiting');
+    // The activity row says the same.
+    click('[data-wallet-tab="activity"]');
+    await vi.waitFor(() => expect($('[data-activity="invoice"]')).not.toBeNull());
+    expect(text('[data-activity="invoice"]')).toMatch(/Unknown/);
+    expect(text('[data-activity="invoice"]')).not.toMatch(/Waiting to be paid|Received|Not paid/);
+    expect(moneyCalls(host)).toHaveLength(0);
+  }, 20_000);
+
+  it('Receive on-chain: a failed address read offers a retry that reads it again', async () => {
+    let n = 0;
+    const host = stubHost({
+      funding_address: () => {
+        n += 1;
+        if (n === 1) throw { code: 'node', message: 'Your node did not answer.' };
+        return { address: 'tb1qwalletaddress0000000000000000000000', network: 'signet', note: null };
+      },
+    });
+    await openWallet('receive');
+    click('[data-receive-how="onchain"]');
+    await vi.waitFor(() => expect($('[data-receive-error] [data-soft-reconnect]')).not.toBeNull());
+    expect($('[data-receive-address]')).toBeNull();
+    expect(host.used('funding_address')).toHaveLength(1);
+    click('[data-receive-error] [data-soft-reconnect]');
+    await vi.waitFor(() => expect(text('[data-receive-address] .address')).toBe('tb1qwalletaddress0000000000000000000000'));
+    expect(host.used('funding_address')).toHaveLength(2);
+    expect($('[data-receive-error]')).toBeNull();
+    expect(moneyCalls(host)).toHaveLength(0);
+  });
+
   it('Receive on-chain: the node’s address with a QR; the amount is optional and whole sats', async () => {
     const host = stubHost();
     await openWallet('receive');

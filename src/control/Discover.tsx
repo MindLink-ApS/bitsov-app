@@ -1,7 +1,7 @@
 import { t as tr } from '../i18n';
 import { OperatorDetails } from './OperatorDetails';
 import { usePairingActivity } from '../pairingActivity';
-import { For, Show, createMemo, createSignal } from 'solid-js';
+import { For, Show, createMemo, createSignal, onCleanup } from 'solid-js';
 import { copyPlainText } from '../assistant/copy';
 import { qrSvg } from '../qr';
 import type { FrontDoor, FrontDoorPublish } from './types';
@@ -93,6 +93,7 @@ export function DiscoverPanel(props: Props) {
   const [card, setCard] = createSignal<FrontDoor | null>(null);
   const [err, setErr] = createSignal<string | null>(null);
   const [opening, setOpening] = createSignal(false);
+  const [reading, setReading] = createSignal(false);
   const [localConsent, setLocalConsent] = createSignal(false);
   let readRevision = 0;
 
@@ -107,7 +108,9 @@ export function DiscoverPanel(props: Props) {
     setCard(null);
     setErr(null);
     setLocalConsent(false);
-    props.source.frontDoorRead(pasted()).then(
+    setReading(true);
+    const done = () => { if (revision === readRevision) setReading(false); };
+    props.source.frontDoorRead(pasted()).finally(done).then(
       (c) => {
         if (revision === readRevision) setCard(c);
       },
@@ -160,6 +163,8 @@ export function DiscoverPanel(props: Props) {
         <button type="button" data-discover-read onClick={read} disabled={!pasted().trim()}>
           {tr('caReadCard')}</button>
       </div>
+      <Show when={reading()}><p class="hint" role="status" data-discover-reading>{tr('caCardReading')}</p></Show>
+      <Show when={opening()}><p class="hint" role="status" data-discover-knocking>{tr('caKnocking')}</p></Show>
       <Show when={err()}>
         {(e) => <SoftError message={e()} data="discover-error" />}
       </Show>
@@ -211,9 +216,6 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
   const daysAgo = () => {
     const secs = Math.max(0, Math.floor(props.now / 1000) - c().issued_at);
     return Math.max(0, Math.floor(secs / 86400));
-  };
-  const copyUrl = (url: string) => {
-    void copyPlainText(url).catch(() => {});
   };
   return (
     <article class="front-door-card" data-front-door-card>
@@ -285,13 +287,7 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
                 <code class="mono" data-fd-link-url>
                   {l.url}
                 </code>
-                <button
-                  type="button"
-                  class="link"
-                  data-fd-link-copy
-                  onClick={() => copyUrl(l.url)}
-                >
-                  {tr('caCopy')}</button>
+                <CopyLink url={l.url} />
               </li>
             )}
           </For>
@@ -311,6 +307,18 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
   );
 }
 
+/** Says whether the copy worked. */
+function CopyLink(props: { url: string }) {
+  const [done, setDone] = createSignal<'copied' | 'failed' | null>(null);
+  let timer: number | undefined;
+  onCleanup(() => window.clearTimeout(timer));
+  return <button type="button" class="link" data-fd-link-copy onClick={() => void copyPlainText(props.url).then(() => 'copied' as const, () => 'failed' as const).then((r) => {
+    setDone(r);
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => setDone(null), 2000);
+  })}>{done() === 'copied' ? tr('caLinkCopied') : done() === 'failed' ? tr('caLinkCopyFailed') : tr('caCopy')}</button>;
+}
+
 /** My front door editor for the profile/settings modal. */
 export function FrontDoorEditor(props: { source: Source; now: number }) {
   const [mine, setMine] = createSignal<FrontDoor | null>(null);
@@ -326,10 +334,20 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
   usePairingActivity(saving);
   const [sizeNote, setSizeNote] = createSignal<string | null>(null);
 
+  const [loading, setLoading] = createSignal(true);
+  // Only the latest read may fill the editor or end its wait.
+  let loadRevision = 0;
+  // The error the last read left. Only that one offers Reconnect: a publish, size, media or copy
+  // error must never re-read the card, which would drop unsaved edits.
+  const [loadErr, setLoadErr] = createSignal<string | null>(null);
   const load = () => {
+    const revision = ++loadRevision;
     setErr(null);
-    props.source.frontDoorMine().then(
+    setLoadErr(null);
+    setLoading(true);
+    props.source.frontDoorMine().finally(() => { if (revision === loadRevision) setLoading(false); }).then(
       (c) => {
+        if (revision !== loadRevision) return;
         setMine(c);
         setName(c.profile.display_name);
         setTagline(c.profile.tagline);
@@ -346,9 +364,10 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         setMedia(c.media.map((m) => ({ ...m })));
       },
       (e) => {
+        if (revision !== loadRevision) return;
         setMine(null);
         const m = asActionError(e).message;
-        if (!m.includes('front_door_missing')) setErr(m);
+        if (!m.includes('front_door_missing')) { setErr(m); setLoadErr(m); }
       },
     );
   };
@@ -528,8 +547,9 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
   };
 
   return (
-    <div class="panel" data-panel="front-door">
+    <div class="panel" data-panel="front-door" inert={loading()} aria-busy={loading()}>
       <h2>{tr('caMyProfile')}</h2>
+      <Show when={loading()}><p class="hint" role="status" data-fd-loading>{tr('chatLoading')}</p></Show>
       <p class="hint">
         {tr('caASignedCardAnyoneMayCarryReadingItCosts')}</p>
       <label class="field">
@@ -642,7 +662,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         </Show>
       </div>
       <Show when={!ownerAsk() ? err() : null}>
-        {(e) => <SoftError message={e()} data="fd-edit-error" class="hint" />}
+        {(e) => <SoftError message={e()} data="fd-edit-error" class="hint" onReconnect={e() === loadErr() ? load : undefined} />}
       </Show>
       <Show when={ownerAsk()}>
         {(ask) => (
