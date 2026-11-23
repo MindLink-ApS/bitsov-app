@@ -644,7 +644,9 @@ pub(crate) use windows_store::{restrict_dir, NO_PROTECTED_STORAGE};
 mod keychain;
 
 #[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
-pub(crate) fn storage_smoke_test() -> Result<&'static str, String> { keychain::smoke_test() }
+pub use keychain::SmokeOutcome;
+#[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
+pub(crate) fn storage_smoke_test() -> Result<SmokeOutcome, String> { keychain::smoke_test() }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod linux;

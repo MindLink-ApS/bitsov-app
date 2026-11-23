@@ -737,7 +737,7 @@ async fn a_home_node_link_is_refused_while_this_macs_node_is_being_set_up() {
     state.local_setup_running.store(true, Ordering::SeqCst);
     let link = super::remote_connect_tests::ticket("127.0.0.1:5678".into(), false);
     let refused = remote_access_import_at(app.handle(), &state, &app_data, &link).await;
-    assert!(refused.unwrap_err().contains("setting up a node on this Mac"));
+    assert!(refused.unwrap_err().to_string().contains("setting up a node on this Mac"));
     assert!(remote_access::load_persisted(&app_data).unwrap().is_none(), "no home-node link was saved");
 }
 
@@ -814,7 +814,7 @@ exit 1
     let saved = remote_access::load_persisted(&app_data).unwrap().is_some();
     state.stop_for_restart(Duration::from_secs(2));
     assert_eq!(saved, imported.is_ok(), "import result must match persistence");
-    imported
+    imported.map_err(|error| error.to_string())
 }
 
 #[cfg(unix)]
