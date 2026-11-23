@@ -14,19 +14,22 @@ node's owner.
 |---|---|
 | Install, start, window, settings screens | Expected to work. Not yet tested on a Windows machine. |
 | Paste a pairing link and see who hosts the node | Works: the link is checked and shown before anything is saved. |
-| Save the pairing and connect to the node | **Does not work yet.** Windows has no protected storage for the app's pairing key and records yet. The app refuses with "private pairing storage is not supported on this platform" and saves nothing. |
-| Messages | **Not yet.** Needs a saved pairing. |
-| Payments (with approval on the node) | **Not yet.** Needs a saved pairing, and the spend journal, budget and approval records also need protected storage on Windows. |
-| Calls | **Not yet.** Needs a saved pairing. Microphone use on Windows is untested. |
+| Save the pairing and connect to the node | Implemented: the pairing key is sealed with Windows data protection for the current user, and pairing records go through an owner-only file layer. An elevated (administrator) process is refused. Not yet tried end to end on a tester's Windows machine. |
+| Messages | Expected to work once paired. Not yet tried on a Windows machine. |
+| Payments (with approval on the node) | The spend journal and the budget book are stored on the owner-only file layer. Not yet tried on a Windows machine. In-app device approval and owner-approval receipts are still refused on Windows. |
+| Calls | Expected to work once paired. Microphone use on Windows is untested. |
 | A node on this computer | **No.** The Windows app refuses to create or start a local node. |
 | Mainnet | **No.** This app accepts signet nodes only. |
 | QR scan with the camera | Untested. Paste the link instead. |
 
 The refusals are deliberate. The app stops with a clear message instead of
 writing keys or payment records into files that other Windows users could read.
-Protected storage for Windows (an owner-only file layer plus encryption with the
-Windows user account) is the next step; until it lands, this preview shows the app
-but cannot pair.
+Stored objects must be owned by the current user with a private access list and
+no links; anything else is refused and left unchanged. If an interrupted save
+leaves a scratch file behind, later saves of that record are refused until it is
+removed, so nothing is written over it. These checks have Windows tests; they
+compile on Windows, and a native run as a normal (not administrator) user is
+still being set up.
 
 ## Install (unsigned installer)
 
