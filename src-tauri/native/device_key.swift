@@ -352,12 +352,22 @@ private let pairingPurpose = Data("bitsov.pairing.at-rest.wrap.v1".utf8)
 public func bitsov_pairing_crypt(_ sealing: Int32, _ purpose: UnsafePointer<CChar>?,
     _ input: UnsafePointer<UInt8>?, _ count: Int, _ output: UnsafeMutablePointer<UInt8>?,
     _ capacity: Int, _ length: UnsafeMutablePointer<Int>?) -> Int32 {
+    pairingCrypt(sealing, purpose, input, count, output, capacity, length)
+}
+
+// The enclave probe is a parameter only so pure tests can stand in for a Mac
+// without one. A missing enclave is reported before any key is touched and
+// nothing is written to `output`: there is no fallback of any kind.
+func pairingCrypt(_ sealing: Int32, _ purpose: UnsafePointer<CChar>?,
+    _ input: UnsafePointer<UInt8>?, _ count: Int, _ output: UnsafeMutablePointer<UInt8>?,
+    _ capacity: Int, _ length: UnsafeMutablePointer<Int>?,
+    enclaveAvailable: () -> Bool = { SecureEnclave.isAvailable }) -> Int32 {
     guard sealing == 0 || sealing == 1, let purpose = purpose, let input = input,
           let output = output, let length = length, capacity >= 0,
           count > 0, count <= (sealing == 1 ? 4096 : 16384) else { return errBadArgument }
     length.pointee = 0
     return autoreleasepool {
-        guard SecureEnclave.isAvailable else { return errUnavailable }
+        guard enclaveAvailable() else { return errUnavailable }
         let name = String(cString: purpose)
         guard !name.isEmpty, name.utf8.count <= 256 else { return errBadArgument }
         let aad = Data(name.utf8)

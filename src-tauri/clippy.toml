@@ -1,0 +1,6 @@
+# `act::ActionError` is the single error the renderer receives for an owner
+# action: a flat, serialised envelope (216 bytes) carrying the refusal code,
+# message and the optional payment, admission and operation fields the UI
+# shows. It is returned on network-bound paths, so its size costs nothing
+# measurable. The limit sits just above it, so any growth is still reported.
+large-error-threshold = 224

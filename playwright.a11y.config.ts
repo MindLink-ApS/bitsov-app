@@ -42,7 +42,7 @@ export default defineConfig({
   use: {
     channel: 'chrome',
     // Settled colours. A mid-transition opacity makes axe report blended greys.
-    reducedMotion: 'reduce',
+    contextOptions: { reducedMotion: 'reduce' },
   },
   projects: [
     {

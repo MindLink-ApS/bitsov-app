@@ -8,7 +8,7 @@ import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { softenError } from '../control/userFacing';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
-import { normalizePairingLink, onboardingDiagnostic, pairingProblem, withoutErrorPrefix, type PairingProblem, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
+import { normalizePairingLink, onboardingDiagnostic, pairingProblem, withoutErrorPrefix, type PairingProblem, onboardingSteps, scopeList, SECURE_STORAGE_KEPT, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
@@ -506,6 +506,17 @@ export function Onboarding(props: {
                 <p class="hint">{t('obLocalSecurityLimit')}</p>
               </div>
             </details>
+          </div>
+        </Match>
+
+        {/* No Secure Enclave on this Mac: permanent, so there is no Try again. */}
+        <Match when={props.pairing().state !== 'paired' && props.status().connection_error?.kind === 'secure_storage_unavailable'}>
+          <div class="panel pairing error" data-pairing="secure-storage-unavailable">
+            <h2>{t('obPairingFailedTitle')}</h2>
+            <p class="err-note" role="alert">{t('pairing.secureStorageUnavailable')}</p>
+            <Show when={props.status().connection_error?.detail === SECURE_STORAGE_KEPT}>
+              <p class="hint">{t('pairing.secureStorageKept')}</p>
+            </Show>
           </div>
         </Match>
 

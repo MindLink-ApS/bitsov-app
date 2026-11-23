@@ -1,0 +1,53 @@
+name: Windows Package Remote
+
+# Unsigned signet beta installer for Windows, remote node only (#501's
+# scripts/build-windows-remote.sh, native runner). Manual-only, artifact only:
+# no release, no signing, no secrets. The Windows app cannot save a pairing yet
+# (no protected storage on Windows), so this installer is install/UI only.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-package-remote:
+    name: Windows remote-only installer (unsigned NSIS)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install frontend dependencies
+        run: npm ci --no-audit --no-fund
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri
+          shared-key: tauri-windows-remote
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+      # The script validates the signet-only, no-node overlay, refuses a bundled
+      # node binary, and writes a verified SHA256SUMS next to the installer.
+      - name: Build and verify the remote-only installer
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: >-
+          bash scripts/build-windows-remote.sh --runner native --allow-downloads
+          --source-sha "$SOURCE_SHA" --out "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bitsov-unsigned-windows-x64-remote-only-${{ github.sha }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          retention-days: 7

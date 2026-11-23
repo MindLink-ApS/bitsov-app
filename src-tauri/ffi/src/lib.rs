@@ -19,6 +19,9 @@ pub mod keychain_status {
     pub const PASSCODE_NOT_SET: i32 = -77_001;
     /// Fixed host text for that state; the app maps it to its own error kind.
     pub const PASSCODE_REQUIRED: &str = "This device has no passcode, so Face ID and protected storage are off. Turn on a passcode in Settings, then try again.";
+    /// Fixed host text for a Mac without a Secure Enclave. Permanent: the
+    /// app maps it to its own error kind and never suggests a retry.
+    pub const NO_SECURE_ENCLAVE: &str = "This Mac has no Secure Enclave, so BitSov cannot store its pairing key safely. Nothing was saved.";
 }
 #[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))]
 pub mod client_keychain;

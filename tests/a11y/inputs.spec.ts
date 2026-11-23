@@ -30,7 +30,7 @@ for (const theme of ['light', 'dark'] as const) {
     await checkInputs(page, info, 'amount', '.amount-input');
     await page.locator('[data-composer-close]').click();
 
-    await page.getByRole('button', { name: 'Contact Maya', exact: true }).click();
+    await page.getByRole('button', { name: 'Contact Robin', exact: true }).click();
     await checkInputs(page, info, 'contact', '[data-contact-petname]');
     await page.locator('[data-contact-close]').click();
 

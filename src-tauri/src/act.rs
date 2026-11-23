@@ -38,6 +38,8 @@ pub const KIND_FILE_REF: u16 = 200;
 pub const KIND_CALL_OFFER: u16 = 400;
 /// The callee's answer: one paid signal.
 pub const KIND_CALL_ANSWER: u16 = 401;
+/// A transport candidate, or the callee's request that the caller reconnect.
+pub const KIND_CALL_ICE: u16 = 402;
 pub const KIND_CALL_HANGUP: u16 = 403;
 /// M6 (genome kind 404 `CALL_BLOCK`): one paid 60-second interval of a
 /// node-routed call, priced by the callee and drawn from the call's
@@ -1993,7 +1995,7 @@ mod tests {
     }
 
     fn peer(id: &str, connected: bool) -> control::Peer {
-        control::Peer { ln_pubkey: None, node_id: id.into(), addr: None, label: None, connected, fingerprint: None, capabilities: None, meetings: false, rooms: false, session: false, porch: false }
+        control::Peer { ln_pubkey: None, node_id: id.into(), addr: None, label: None, connected, fingerprint: None, capabilities: None, meetings: false, rooms: false, session: false, porch: false, free_replies: false }
     }
 
     #[test]
