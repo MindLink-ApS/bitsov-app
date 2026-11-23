@@ -34,6 +34,7 @@ export function PorchPanel(props: Props) {
   const readable = () => props.peers.filter((p) => p.porch === true);
   const offers = (peer: string) => props.nodeReads && readable().some((p) => p.node_id.toLowerCase() === peer.toLowerCase());
   const [quotes, setQuotes] = createSignal<Record<string, PaymentQuote>>({});
+  const [unquoted, setUnquoted] = createSignal<Record<string, boolean>>({});
   const [held, setHeld] = createSignal<PorchCard[]>([]);
   const [review, setReview] = createSignal<Review | null>(null);
   const [shown, setShown] = createSignal<Shown | null>(null);
@@ -59,7 +60,7 @@ export function PorchPanel(props: Props) {
           if (quotes()[quoteKey(id, PORCH_CARD_PATH)]) continue;
           props.source.porchQuote(id, PORCH_CARD_PATH).then(
             (q) => setQuotes((all) => ({ ...all, [quoteKey(id, PORCH_CARD_PATH)]: q })),
-            () => {},
+            () => setUnquoted((all) => ({ ...all, [quoteKey(id, PORCH_CARD_PATH)]: true })),
           );
         }
       },
@@ -73,7 +74,9 @@ export function PorchPanel(props: Props) {
 
   const cost = (peer: string, path = PORCH_CARD_PATH) => {
     const q = quotes()[quoteKey(peer, path)];
-    return q ? fmtAmount(q.principal_msat, 'up') : '…';
+    if (q) return fmtAmount(q.principal_msat, 'up');
+    // A card's price is read up front; a page's only when it is tapped, so it has no figure to wait for yet.
+    return path !== PORCH_CARD_PATH || unquoted()[quoteKey(peer, path)] ? tr('uiUnknown') : '…';
   };
   const heldFor = (peer: string) => held().find((c) => c.node_id.toLowerCase() === peer.toLowerCase()) ?? null;
 

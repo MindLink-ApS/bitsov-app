@@ -12,6 +12,7 @@
 #   --sidecar  the fetched, signature-verified node; default
 #              src-tauri/bin/konsensus-<triple>
 #   --dist     the frontend dist the release build embedded; default dist
+#   --remote-only  require the remote test identity and absence of any node
 # Exit 0 and "MAC BUNDLE CHECK: PASS", or exit 1 and "MAC BUNDLE CHECK: FAIL".
 # Missing or invalid --arch is an argument error (exit 2).
 # The check functions below are invoked indirectly, through chk.
@@ -27,6 +28,7 @@ ARCH=""
 APP_EXPLICIT=0
 DIST="dist"
 MIN_MACOS="11.0"
+REMOTE_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --arch)
@@ -38,6 +40,7 @@ while [ $# -gt 0 ]; do
     --app) APP="$2"; APP_EXPLICIT=1; shift 2 ;;
     --sidecar) SIDECAR="$2"; shift 2 ;;
     --dist) DIST="$2"; shift 2 ;;
+    --remote-only) REMOTE_ONLY=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -101,6 +104,18 @@ native_executable() {
 }
 no_sb_files() { [ -d "$APP" ] && [ -z "$(find "$APP" -name '*.sb' -print)" ]; }
 no_loose_page() { [ -d "$APP" ] && [ -z "$(find "$APP" -name 'assistant.html' -print)" ]; }
+remote_profile_ok() {
+  python3 - "$PLIST" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], "rb") as stream:
+    data = plistlib.load(stream)
+sys.exit(0 if data.get("CFBundleIdentifier") == "tech.mindlink.bitsov.remotetest"
+         and data.get("CFBundleName") == "BitSov Remote Test" else 1)
+PY
+}
+no_bundled_node() {
+  [ -d "$APP" ] && [ -z "$(find "$APP" \( -name konsensus -o -name 'konsensus-*' \) -print)" ]
+}
 dist_has_index() { [ -s "$DIST/index.html" ]; }
 dist_has_no_assistant() {
   [ -d "$DIST" ] && [ -z "$(find "$DIST" \( -name 'assistant.html' -o -name 'assistant-*' \) -print)" ]
@@ -120,10 +135,17 @@ binary_clean() {
 
 echo "== mac bundle: $APP (node $TAG) =="
 chk "app executable is executable" test -f "$MACOS/bitsov-app" -a -x "$MACOS/bitsov-app"
-chk "bundled sidecar is executable" test -f "$MACOS/konsensus" -a -x "$MACOS/konsensus"
+if [ "$REMOTE_ONLY" = 1 ]; then
+  chk "remote-only bundle identity" remote_profile_ok
+  chk "no bundled node in remote-only app" no_bundled_node
+else
+  chk "bundled sidecar is executable" test -f "$MACOS/konsensus" -a -x "$MACOS/konsensus"
+fi
 chk "app executable is native $ARCH" native_executable "$MACOS/bitsov-app"
-chk "bundled sidecar is native $ARCH" native_executable "$MACOS/konsensus"
-chk "bundled sidecar matches the verified sidecar ($SIDECAR)" sidecar_matches
+if [ "$REMOTE_ONLY" = 0 ]; then
+  chk "bundled sidecar is native $ARCH" native_executable "$MACOS/konsensus"
+  chk "bundled sidecar matches the verified sidecar ($SIDECAR)" sidecar_matches
+fi
 chk "icon.icns is present" test -s "$APP/Contents/Resources/icon.icns"
 chk "Info.plist is well-formed" plist_lint
 chk "LSMinimumSystemVersion is $MIN_MACOS" plist_min_ok

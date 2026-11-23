@@ -30,6 +30,12 @@ const plainErrors = () => ['src-tauri/src/app.rs', 'src-tauri/src/remote_owner.r
   return [...source.matchAll(/"([A-Z][^"\n]{14,}[.!?])"/g)]
     .map((m) => m[1].replace(/\{[a-z_:?]*\}/g, '{}'));
 });
+/** In the other host files: sentences returned directly by `Err`, `map_err` or `ok_or`. */
+const directErrors = () => rust('src-tauri/src').flatMap((f) => {
+  const source = readFileSync(f, 'utf8').split('#[cfg(test)]')[0];
+  return [...source.matchAll(/(?:Err\(\s*(?:format!\(\s*)?|map_err\(\|[a-z_]+\|\s*(?:format!\(\s*)?|\.ok_or(?:_else\(\|\|)?\(?\s*(?:format!\(\s*)?)"([A-Z][^"]{14,})"/g)]
+    .map((m) => m[1].replace(/\\\s*\n\s*/g, '').replace(/\{[A-Za-z_]*\}/g, '{}'));
+});
 // Not read as they stand: the renderer words these itself (`asActionError`), or they aren't refusals a person sees.
 const NOT_SENTENCES = /^(Hanging up this call|Money is not ready|This permission covers|Send a message first|No pending spend)|konsensus /;
 
@@ -43,9 +49,9 @@ describe('host refusals in Danish', () => {
       && !/^(Hanging up this call|Money is not ready|This permission covers)/.test(m));
     expect(missing).toEqual([]);
   });
-  it('has Danish for the sentences in the host\'s setup and repair errors', () => {
+  it('has Danish for every sentence in the host\'s plain-text errors', () => {
     const known = new Set(HOST_COPY_DA.map(([en]) => en));
-    expect([...new Set(plainErrors())].filter((m) => !known.has(m) && !NOT_SENTENCES.test(m))).toEqual([]);
+    expect([...new Set([...plainErrors(), ...directErrors()])].filter((m) => !known.has(m) && !NOT_SENTENCES.test(m))).toEqual([]);
   });
   it('keeps every value, and says nothing happened wherever the host does', () => {
     for (const [en, da] of HOST_COPY_DA) {
