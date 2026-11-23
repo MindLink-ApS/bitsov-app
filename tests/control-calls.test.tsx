@@ -3464,7 +3464,7 @@ describe('calls in the shell', () => {
   ] as const)('with free replies on both nodes, Decline posts the free declined hangup: zero cap, no grant, no spend request (%s)', async (lang, note, ended) => {
     const host = stubHost({
       messages_list: () => [], call_quote: () => QUOTE, node_overview: FREE_NODE,
-      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, free_replies: true }],
+      peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, free_replies: true }],
       call_free_reply: freeReceipt,
     });
     await openShell();
@@ -3489,7 +3489,7 @@ describe('calls in the shell', () => {
     const host = stubHost({
       messages_list: () => [], call_quote: () => QUOTE,
       ...(own ? { node_overview: FREE_NODE } : {}),
-      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: theirs !== 'offline', fingerprint: null, free_replies: theirs !== false }],
+      peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: theirs !== 'offline', fingerprint: null, free_replies: theirs !== false }],
       call_free_reply: freeReceipt,
     });
     await openShell();
