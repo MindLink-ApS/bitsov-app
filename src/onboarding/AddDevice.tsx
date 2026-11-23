@@ -1,3 +1,4 @@
+import { hostText } from '../control/hostCopy';
 import { t } from '../i18n';
 import { isMobilePlatform } from '../platform';
 import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
@@ -21,7 +22,7 @@ function errorText(error: unknown): string {
   // Older hosts can still return CLI recovery instructions. Keep those out of
   // the device setup UI as well as the normal entry and ticket states.
   if (/\bkonsensus\s/i.test(message)) return t('obDeviceSetupHelp');
-  return message || t('obNodeUnreachable');
+  return message ? hostText(message) : t('obNodeUnreachable');
 }
 
 /**

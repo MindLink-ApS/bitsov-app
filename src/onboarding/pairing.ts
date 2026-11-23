@@ -1,3 +1,4 @@
+import { hostText } from '../control/hostCopy';
 import { t } from '../i18n';
 
 /** Same guidance, naming the device in the reader's hand. The phone sentence is the host status string. */
@@ -140,7 +141,7 @@ export const scopeList = (scopes: string[]) => scopes.join(' + ');
 
 /** Older hosts can include terminal instructions, even in diagnostic details. */
 export function onboardingDiagnostic(message: string, help: string): string {
-  return /\bkonsensus\s/i.test(message) ? help : message;
+  return /\bkonsensus\s/i.test(message) ? help : hostText(message);
 }
 
 /** Host detail when an existing pairing was left untouched for its original Mac. */
