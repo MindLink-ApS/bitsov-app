@@ -3815,6 +3815,37 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     Ok(RemoteImportView { restart_required: false, ..result })
 }
 
+/// An import failure as the renderer receives it. A missing Secure Enclave is
+/// permanent and keeps its typed refusal (`kind` + fixed `detail`) so the form
+/// shows the named copy without a retry; every other failure stays its message.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum ImportError {
+    Refusal(remote_access::ConnectionError),
+    Message(String),
+}
+
+impl From<String> for ImportError {
+    fn from(message: String) -> Self { Self::Message(message) }
+}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refusal(refusal) => f.write_str(&refusal.detail),
+            Self::Message(message) => f.write_str(message),
+        }
+    }
+}
+
+fn import_failure(error: remote_access::RemoteError) -> ImportError {
+    match error {
+        remote_access::RemoteError::SecureStorageUnavailable { .. } =>
+            ImportError::Refusal(remote_access::ConnectionError::from(&error)),
+        error => ImportError::Message(error.to_string()),
+    }
+}
+
 /// Validate and persist a confirmed ticket. Phones attach immediately; desktop
 /// bootstrap selects the saved remote node on the next app start.
 #[tauri::command(rename_all = "snake_case")]
@@ -3823,7 +3854,7 @@ async fn remote_access_import(
     app: AppHandle<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     link: String,
-) -> Result<RemoteImportView, String> {
+) -> Result<RemoteImportView, ImportError> {
     reject_sealed_window(&window)?;
     drop(window);
     let app_data_dir = app.path().app_data_dir()
@@ -3836,9 +3867,9 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     state: &NodeState,
     app_data_dir: &Path,
     link: &str,
-) -> Result<RemoteImportView, String> {
+) -> Result<RemoteImportView, ImportError> {
     // Validate before cancelling: a malformed ticket must not interrupt recovery.
-    remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())?;
+    remote_access::preview_pairing_link(link.trim()).map_err(import_failure)?;
     #[cfg(any(mobile, feature = "mobile"))]
     let _change = state.remote_change.lock().await;
     // Serialized with `node_setup_local`: while this Mac's first node is being
@@ -3847,11 +3878,11 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     let _change = state.remote_change.lock().await;
     #[cfg(all(desktop, not(feature = "mobile")))]
     if state.local_setup_running.load(Ordering::SeqCst) {
-        return Err("BitSov is setting up a node on this Mac. Wait until it is ready before linking a node at home.".into());
+        return Err("BitSov is setting up a node on this Mac. Wait until it is ready before linking a node at home.".to_string().into());
     }
     // Reject a live trust-boundary switch without cancelling its recovery.
     if state.remote_proxy.lock().unwrap().is_some() {
-        return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
+        return Err("remote access is already active; quit BitSov before replacing its pairing link".to_string().into());
     }
     #[cfg(any(mobile, feature = "mobile"))]
     state.remote_connect_generation.send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -3862,7 +3893,7 @@ async fn remote_access_import_at<R: tauri::Runtime>(
         // cancellation. Keep that trust boundary and resume the auth we stopped.
         #[cfg(any(mobile, feature = "mobile"))]
         spawn_remote_connect(_app, app_data_dir, false);
-        return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
+        return Err("remote access is already active; quit BitSov before replacing its pairing link".to_string().into());
     }
     let result = match remote_access::import_pairing_link(app_data_dir, link.trim()) {
         Ok(result) => result,
@@ -3871,7 +3902,7 @@ async fn remote_access_import_at<R: tauri::Runtime>(
             // connection. Cancellation must not leave its recovery stopped.
             #[cfg(any(mobile, feature = "mobile"))]
             spawn_remote_connect(_app, app_data_dir, true);
-            return Err(error.to_string());
+            return Err(import_failure(error));
         }
     };
     #[cfg(any(mobile, feature = "mobile"))]
@@ -28760,6 +28791,21 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         assert!(!node.state.budget_after_pairing.load(Ordering::SeqCst));
         // Nothing opens in the app by itself.
         assert_ne!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Open);
+    }
+
+    /// An import refused for a missing Secure Enclave reaches the renderer as the typed
+    /// refusal (`kind` + fixed `detail`), so it gets the named copy and no retry.
+    #[test]
+    fn an_import_refused_for_secure_storage_keeps_its_kind() {
+        use bitsov_app::remote_access::{RemoteError, SECURE_STORAGE_KEPT_CODE, SECURE_STORAGE_UNAVAILABLE_CODE};
+        for (identity_kept, detail) in [(false, SECURE_STORAGE_UNAVAILABLE_CODE), (true, SECURE_STORAGE_KEPT_CODE)] {
+            let value = serde_json::to_value(import_failure(RemoteError::SecureStorageUnavailable { identity_kept })).unwrap();
+            assert_eq!(value, serde_json::json!({"kind": "secure_storage_unavailable", "detail": detail}));
+        }
+        // Every other import failure keeps its plain message.
+        let value = serde_json::to_value(import_failure(RemoteError::Local("the remote access descriptor is corrupt".into()))).unwrap();
+        assert_eq!(value, serde_json::json!("the remote access descriptor is corrupt"));
+        assert_eq!(serde_json::to_value(ImportError::from("busy".to_string())).unwrap(), serde_json::json!("busy"));
     }
 
     /// Desktop Import saves the link for the next start: the ask goes with it
