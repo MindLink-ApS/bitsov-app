@@ -105,6 +105,10 @@ jobs:
           bash scripts/fetch-node-sidecar.sh
           bash scripts/fetch-node-sidecar.sh --verify-only
 
+      # Pure checks; the enclave probe is replaced, no Keychain or enclave use.
+      - name: Secure storage bridge checks
+        run: bash scripts/test-mac-secure-storage.sh
+
       # Existing files are re-verified by both the package script and Tauri's
       # beforeBundleCommand; this flag skips only the binary download.
       # The offline bundle-checker unit tests run on Linux in Authority Check.

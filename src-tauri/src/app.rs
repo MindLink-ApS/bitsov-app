@@ -1976,6 +1976,50 @@ fn client_key_with(
     Ok(key)
 }
 
+/// Report why the client identity could not be read or created.
+/// A refusal that retrying cannot fix keeps its own kind on every path, not only on remote attach:
+/// local pairing and startup record it too, so onboarding shows the named cause, not a retry.
+fn record_permanent_refusal(state: &NodeState, error: &PairError) {
+    if let PairError::SecureStorageUnavailable { identity_kept } = error {
+        state.remote_retry.failed(&remote_access::RemoteError::SecureStorageUnavailable { identity_kept: *identity_kept });
+    }
+}
+
+/// A startup read of the stored pairing that failed: a missing Secure Enclave keeps its kind.
+/// Its callers are desktop startup paths only.
+#[cfg_attr(any(mobile, feature = "mobile"), allow(dead_code))]
+fn startup_storage_refused(state: &NodeState, error: remote_access::RemoteError) {
+    if let remote_access::RemoteError::SecureStorageUnavailable { identity_kept } = error {
+        // Permanent, as in client_key_refused: pairing reads as failed, so the shell offers no retry.
+        state.remote_retry.failed(&error);
+        *state.pairing_view.lock().unwrap() =
+            PairingView::from_outcome(&Err(PairError::SecureStorageUnavailable { identity_kept }));
+    }
+    set_error(state, error.to_string());
+}
+
+fn client_key_refused(state: &NodeState, error: PairError, interaction: Interaction) {
+    match error {
+        // No Secure Enclave: a permanent, named refusal. Retrying cannot help.
+        PairError::SecureStorageUnavailable { identity_kept } => {
+            state.remote_retry.failed(&remote_access::RemoteError::SecureStorageUnavailable { identity_kept });
+            let error = PairError::SecureStorageUnavailable { identity_kept };
+            set_error(state, error.to_string());
+            *state.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(error));
+        }
+        // No passcode: say so as its own kind, so the phone can open Settings.
+        error if error.to_string() == remote_access::PASSCODE_REQUIRED => {
+            state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
+            set_error(state, error.to_string());
+        }
+        // A background attempt leaves any earlier, more specific error in place.
+        _ if interaction == Interaction::Background => {
+            if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }
+        }
+        error => set_error(state, error.to_string()),
+    }
+}
+
 /// Remote mode is selected before every local-node resolution path. The only
 /// listener is the loopback Noise proxy; no sidecar is initialized or spawned.
 async fn attach_remote_with(
@@ -1998,17 +2042,7 @@ async fn attach_remote_with(
     let store = app_data_dir.join(PAIRING_STORE_DIR);
     let key = match client_key(state, &store, interaction) {
         Ok(key) => key,
-        // No passcode: say so as its own kind, so the phone can open Settings.
-        Err(error) if error.to_string() == remote_access::PASSCODE_REQUIRED => {
-            state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
-            return set_error(state, error.to_string());
-        }
-        // A background attempt leaves any earlier, more specific error in place.
-        Err(_) if interaction == Interaction::Background => {
-            if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }
-            return;
-        }
-        Err(error) => return set_error(state, error.to_string()),
+        Err(error) => return client_key_refused(state, error, interaction),
     };
     let ctx = Arc::new(PairingCtx {
         client: PairingClient::new(state.http.clone(), state.api_base.clone()),
@@ -2136,7 +2170,7 @@ async fn bootstrap_node_at(app: &AppHandle<impl tauri::Runtime>, app_data_dir: P
             return;
         }
         Ok(None) => {}
-        Err(error) => return set_error(&state, error.to_string()),
+        Err(error) => return startup_storage_refused(&state, error),
     }
     // A fresh, forgotten or invalid remote pairing must never fall back to a
     // local node, including when dev-node environment overrides are present.
@@ -2144,7 +2178,7 @@ async fn bootstrap_node_at(app: &AppHandle<impl tauri::Runtime>, app_data_dir: P
         return set_error(&state, "Pair BitSov Remote Test with your remote node to continue.");
     }
     if let Err(error) = remote_access::prepare_local_pairing(&app_data_dir, &app_data_dir.join(PAIRING_STORE_DIR)) {
-        return set_error(&state, error.to_string());
+        return startup_storage_refused(&state, error);
     }
     // Release builds: always `Ok(None)` (see `dev_node`).
     match dev_node::resolve_external(&app_data_dir) {
@@ -2728,6 +2762,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
             if state.remote_mode.load(Ordering::SeqCst) && is_definitive_token_refusal(&e) {
                 state.remote_retry.refuse();
             }
+            record_permanent_refusal(state, &e);
             *state.pairing_view.lock().unwrap() = view;
             Err(e.to_string())
         }
@@ -3782,6 +3817,37 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     Ok(RemoteImportView { restart_required: false, ..result })
 }
 
+/// An import failure as the renderer receives it. A missing Secure Enclave is
+/// permanent and keeps its typed refusal (`kind` + fixed `detail`) so the form
+/// shows the named copy without a retry; every other failure stays its message.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum ImportError {
+    Refusal(remote_access::ConnectionError),
+    Message(String),
+}
+
+impl From<String> for ImportError {
+    fn from(message: String) -> Self { Self::Message(message) }
+}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refusal(refusal) => f.write_str(&refusal.detail),
+            Self::Message(message) => f.write_str(message),
+        }
+    }
+}
+
+fn import_failure(error: remote_access::RemoteError) -> ImportError {
+    match error {
+        remote_access::RemoteError::SecureStorageUnavailable { .. } =>
+            ImportError::Refusal(remote_access::ConnectionError::from(&error)),
+        error => ImportError::Message(error.to_string()),
+    }
+}
+
 /// Validate and persist a confirmed ticket. Phones attach immediately; desktop
 /// bootstrap selects the saved remote node on the next app start.
 #[tauri::command(rename_all = "snake_case")]
@@ -3790,7 +3856,7 @@ async fn remote_access_import(
     app: AppHandle<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     link: String,
-) -> Result<RemoteImportView, String> {
+) -> Result<RemoteImportView, ImportError> {
     reject_sealed_window(&window)?;
     drop(window);
     let app_data_dir = app.path().app_data_dir()
@@ -3803,9 +3869,9 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     state: &NodeState,
     app_data_dir: &Path,
     link: &str,
-) -> Result<RemoteImportView, String> {
+) -> Result<RemoteImportView, ImportError> {
     // Validate before cancelling: a malformed ticket must not interrupt recovery.
-    remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())?;
+    remote_access::preview_pairing_link(link.trim()).map_err(import_failure)?;
     #[cfg(any(mobile, feature = "mobile"))]
     let _change = state.remote_change.lock().await;
     // Serialized with `node_setup_local`: while this Mac's first node is being
@@ -3814,11 +3880,11 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     let _change = state.remote_change.lock().await;
     #[cfg(all(desktop, not(feature = "mobile")))]
     if state.local_setup_running.load(Ordering::SeqCst) {
-        return Err("BitSov is setting up a node on this Mac. Wait until it is ready before linking a node at home.".into());
+        return Err("BitSov is setting up a node on this Mac. Wait until it is ready before linking a node at home.".to_string().into());
     }
     // Reject a live trust-boundary switch without cancelling its recovery.
     if state.remote_proxy.lock().unwrap().is_some() {
-        return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
+        return Err("remote access is already active; quit BitSov before replacing its pairing link".to_string().into());
     }
     #[cfg(any(mobile, feature = "mobile"))]
     state.remote_connect_generation.send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -3829,7 +3895,7 @@ async fn remote_access_import_at<R: tauri::Runtime>(
         // cancellation. Keep that trust boundary and resume the auth we stopped.
         #[cfg(any(mobile, feature = "mobile"))]
         spawn_remote_connect(_app, app_data_dir, false);
-        return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
+        return Err("remote access is already active; quit BitSov before replacing its pairing link".to_string().into());
     }
     let result = match remote_access::import_pairing_link(app_data_dir, link.trim()) {
         Ok(result) => result,
@@ -3838,7 +3904,7 @@ async fn remote_access_import_at<R: tauri::Runtime>(
             // connection. Cancellation must not leave its recovery stopped.
             #[cfg(any(mobile, feature = "mobile"))]
             spawn_remote_connect(_app, app_data_dir, true);
-            return Err(error.to_string());
+            return Err(import_failure(error));
         }
     };
     #[cfg(any(mobile, feature = "mobile"))]
@@ -28729,6 +28795,21 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         assert_ne!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Open);
     }
 
+    /// An import refused for a missing Secure Enclave reaches the renderer as the typed
+    /// refusal (`kind` + fixed `detail`), so it gets the named copy and no retry.
+    #[test]
+    fn an_import_refused_for_secure_storage_keeps_its_kind() {
+        use bitsov_app::remote_access::{RemoteError, SECURE_STORAGE_KEPT_CODE, SECURE_STORAGE_UNAVAILABLE_CODE};
+        for (identity_kept, detail) in [(false, SECURE_STORAGE_UNAVAILABLE_CODE), (true, SECURE_STORAGE_KEPT_CODE)] {
+            let value = serde_json::to_value(import_failure(RemoteError::SecureStorageUnavailable { identity_kept })).unwrap();
+            assert_eq!(value, serde_json::json!({"kind": "secure_storage_unavailable", "detail": detail}));
+        }
+        // Every other import failure keeps its plain message.
+        let value = serde_json::to_value(import_failure(RemoteError::Local("the remote access descriptor is corrupt".into()))).unwrap();
+        assert_eq!(value, serde_json::json!("the remote access descriptor is corrupt"));
+        assert_eq!(serde_json::to_value(ImportError::from("busy".to_string())).unwrap(), serde_json::json!("busy"));
+    }
+
     /// Desktop Import saves the link for the next start: the ask goes with it
     /// in a file, is picked up at that start, and is removed once sent.
     #[cfg(all(desktop, not(feature = "mobile")))]
@@ -31446,7 +31527,7 @@ mod remote_connect_tests;
 
 #[cfg(test)]
 mod client_key_prompt_tests {
-    use super::{client_key_with, Interaction, NodeState, CONFIRM_TO_RECONNECT};
+    use super::{client_key_refused, client_key_with, record_permanent_refusal, startup_storage_refused, Interaction, NodeState, CONFIRM_TO_RECONNECT};
     use bitsov_app::pairing::{ClientKey, PairError};
     use std::cell::Cell;
 
@@ -31487,6 +31568,53 @@ mod client_key_prompt_tests {
         assert!(client_key_with(&state, store.path(), Interaction::Background, failing).is_err());
         assert!(client_key_with(&state, store.path(), Interaction::Background, failing).is_err());
         assert_eq!(reads.get(), 1, "a Face ID sheet's own focus change cannot chain a second prompt");
+    }
+
+    #[test]
+    fn missing_secure_storage_is_reported_as_its_own_kind() {
+        use bitsov_app::remote_access::ConnectionErrorKind;
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let store = tempfile::tempdir().unwrap();
+        let missing = PairError::SecureStorageUnavailable { identity_kept: false };
+        let error = client_key_with(&state, store.path(), Interaction::User, |_| Err(missing)).unwrap_err();
+        client_key_refused(&state, error, Interaction::User);
+        let reported = |state: &NodeState| {
+            let status = state.status_snapshot();
+            (status.connection_error.map(|e| e.kind), status.error, state.pairing_snapshot().state)
+        };
+        let first = reported(&state);
+        assert_eq!(first.0, Some(ConnectionErrorKind::SecureStorageUnavailable));
+        assert_eq!(first.2, "failed");
+        let text = first.1.clone().expect("an error is shown");
+        assert!(text.contains("Secure Enclave") && !text.contains("try again"), "{text}");
+        // A background retry neither prompts nor overwrites the named cause.
+        let again = client_key_with(&state, store.path(), Interaction::Background, |_| panic!("no background read")).unwrap_err();
+        client_key_refused(&state, again, Interaction::Background);
+        assert_eq!(reported(&state), first);
+    }
+
+    #[test]
+    fn a_missing_secure_enclave_keeps_its_kind_on_local_pairing_and_at_startup() {
+        use bitsov_app::remote_access::ConnectionErrorKind;
+        let kind = |state: &NodeState| state.status_snapshot().connection_error.map(|e| e.kind);
+        // Local pairing (authenticate through pairing_ctx) records the permanent kind.
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        record_permanent_refusal(&state, &PairError::SecureStorageUnavailable { identity_kept: false });
+        assert_eq!(kind(&state), Some(ConnectionErrorKind::SecureStorageUnavailable));
+        // So does a startup read of the stored pairing, and its text names the cause without a retry.
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        startup_storage_refused(&state, bitsov_app::remote_access::RemoteError::SecureStorageUnavailable { identity_kept: true });
+        assert_eq!(kind(&state), Some(ConnectionErrorKind::SecureStorageUnavailable));
+        let text = state.status_snapshot().error.expect("an error is shown");
+        assert!(text.contains("Secure Enclave") && !text.contains("try again"), "{text}");
+        // And the shell leaves Starting: pairing reads as failed, so no retry is offered.
+        assert_eq!(state.pairing_snapshot().state, "failed");
+        // Any other failure keeps the ordinary path: no permanent kind.
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        startup_storage_refused(&state, bitsov_app::remote_access::RemoteError::Local("disk unreadable".into()));
+        assert_eq!(kind(&state), None);
+        record_permanent_refusal(&state, &PairError::Local("cancelled".into()));
+        assert_eq!(kind(&state), None);
     }
 
     #[test]
