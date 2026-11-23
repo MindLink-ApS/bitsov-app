@@ -139,13 +139,13 @@ it('waits for the saved-descriptor decision before consuming a cold link', async
 // Reviewed phone copy, bound to literals rather than to the production strings.
 const COPY = {
   en: {
-    start: 'Connect to your box', words: 'Do these words match?', open: 'Open BitSov',
+    start: 'Connect to your box', words: 'Are the same 4 words on your computer?', open: 'Open BitSov',
     trust: 'Do you trust the host of this box?', trustSaveFailed: 'Could not save. Try again.',
     stateFailed: 'Could not read the deposit status from your node. BitSov tries again by itself every few seconds.',
     stateStopped: 'Could not read the deposit status from your node. BitSov will not check again by itself. Check that your node is running, then close and reopen BitSov.',
   },
   da: {
-    start: 'Forbind til din boks', words: 'Er ordene ens?', open: 'Åbn BitSov',
+    start: 'Forbind til din boks', words: 'Står de samme 4 ord på din computer?', open: 'Åbn BitSov',
     trust: 'Stoler du på boksens vært?', trustSaveFailed: 'Kunne ikke gemme. Prøv igen.',
     stateFailed: 'Kunne ikke hente status for indbetalingen fra din node. BitSov prøver igen af sig selv med få sekunders mellemrum.',
     stateStopped: 'Kunne ikke hente status for indbetalingen fra din node. BitSov tjekker ikke igen af sig selv. Tjek at din node kører, og luk og åbn så BitSov igen.',

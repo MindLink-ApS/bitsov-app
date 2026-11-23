@@ -17,6 +17,10 @@ pub mod sponsor;
 pub mod starter;
 pub mod ai;
 pub mod spend_journal;
+// Not wired: MCP client grant checker (docs/AI-MCP-DESIGN.md). Test builds
+// and the off-by-default `mcp-grant` feature only; no command, no listener.
+#[cfg(any(test, feature = "mcp-grant"))]
+pub mod mcp;
 pub mod control;
 pub mod jarvis;
 pub mod at_rest;

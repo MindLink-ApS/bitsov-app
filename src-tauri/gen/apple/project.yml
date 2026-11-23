@@ -12,6 +12,9 @@ settingGroups:
     base:
       PRODUCT_NAME: BitSov
       PRODUCT_BUNDLE_IDENTIFIER: tech.mindlink.bitsov
+      # iPhone and iPad (1,2). Unset, Xcode builds for iPhone only and an iPad
+      # runs the app as a scaled iPhone app instead of its own layout.
+      TARGETED_DEVICE_FAMILY: "1,2"
 targetTemplates:
   app:
     type: application

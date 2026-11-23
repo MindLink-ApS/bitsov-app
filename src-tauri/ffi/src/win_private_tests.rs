@@ -230,16 +230,27 @@ fn widened_access_lists_are_refused_and_left_unchanged() {
         for access in [Access::Read, Access::ReadWrite] {
             let result = open_verified(&path, ObjectKind::File, access);
             // The OS itself already denies some of these opens; either way
-            // nothing is returned.
-            let os_denied = *why == Refusal::EmptyDacl
-                || (*why == Refusal::DenyAce && access == Access::ReadWrite);
+            // nothing is returned. A deny entry for Everyone also covers the
+            // file's owner when not elevated, so both opens stop at the OS.
+            let os_denied = *why == Refusal::EmptyDacl || *why == Refusal::DenyAce;
             if os_denied {
                 assert!(result.is_err(), "{sddl}");
                 continue;
             }
+            // Windows merges two identical allow entries when it stores the
+            // descriptor, so this fixture may reach disk with one entry. The
+            // duplicate rule itself is covered by the private_policy tests.
+            if *why == Refusal::ExtraAce {
+                if let Err(error) = result {
+                    assert_eq!(refusal(&error), Some(Refusal::ExtraAce), "{error}");
+                }
+                continue;
+            }
             assert_refused(result, *why);
         }
-        if *why != Refusal::EmptyDacl {
+        // The OS also denies the owner's own read of these two; their content
+        // was never opened for writing above.
+        if *why != Refusal::EmptyDacl && *why != Refusal::DenyAce {
             assert_eq!(std::fs::read(&path).unwrap(), b"fixture", "{sddl}");
         }
     }
@@ -305,9 +316,12 @@ fn junctions_are_refused_and_their_targets_untouched() {
         Refusal::Reparse,
     );
     assert_refused(create_dir_private(&link), Refusal::Reparse);
-    assert_eq!(
-        create_new_private(&link).unwrap_err().kind(),
-        io::ErrorKind::AlreadyExists
+    // Refused either way: an elevated process sees the existing name, a
+    // standard user is denied by the junction target's private access list.
+    let kind = create_new_private(&link).unwrap_err().kind();
+    assert!(
+        matches!(kind, io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied),
+        "{kind:?}"
     );
     assert!(sync_dir(&link).is_err());
     assert_eq!(std::fs::read(target.join("canary")).unwrap(), b"canary");
@@ -393,6 +407,45 @@ fn sync_dir_refuses_files_and_reports_errors() {
     drop(file);
     assert!(sync_dir(&dir.join("f")).is_err());
     assert!(sync_dir(&dir.join("missing")).is_err());
+}
+
+#[test]
+fn paths_are_handed_to_win32_in_long_form() {
+    let text = |path: &str| String::from_utf16(&long_path(Path::new(path)).unwrap()).unwrap();
+    assert_eq!(text(r"C:\data\a\store"), r"\\?\C:\data\a\store");
+    // `.` and `..` are resolved before the verbatim prefix turns them literal.
+    assert_eq!(text(r"C:\data\a\.\x\..\store"), r"\\?\C:\data\a\store");
+    assert_eq!(text(r"\\server\share\store"), r"\\?\UNC\server\share\store");
+    assert_eq!(text(r"\\?\C:\already"), r"\\?\C:\already");
+    // A relative path becomes absolute against the current folder.
+    assert!(text("relative").starts_with(r"\\?\"));
+    let units = wide(Path::new(r"C:\x")).unwrap();
+    assert_eq!(units.last(), Some(&0));
+    assert!(wide(Path::new("a\0b")).is_err());
+}
+
+#[test]
+fn a_store_deeper_than_max_path_works_end_to_end() {
+    unelevated!();
+    // The spend journal nests three 64-character hashed folders under the
+    // store, so its call records sit well past 260 characters.
+    let scratch = Scratch::new("deep");
+    let mut dir = scratch.private();
+    for part in ["a", "b", "c"] {
+        dir = dir.join(part.repeat(64));
+        create_dir_private(&dir).unwrap();
+        sync_dir(dir.parent().unwrap()).unwrap();
+    }
+    let dest = dir.join(format!("{}.json", "d".repeat(36)));
+    assert!(dest.as_os_str().len() > 260, "{}", dest.as_os_str().len());
+    let mut file = create_new_private(&dest.with_extension("json.next")).unwrap();
+    file.replace_contents(b"deep").unwrap();
+    assert_eq!(&*file.read_bounded(4).unwrap(), b"deep");
+    publish(file, &dest, b"deep", false).unwrap();
+    let mut read = open_verified(&dest, ObjectKind::File, Access::Read).unwrap();
+    assert_eq!(&*read.read_bounded(4).unwrap(), b"deep");
+    open_verified(&dir, ObjectKind::Dir, Access::Read).unwrap();
+    sync_dir(&dir).unwrap();
 }
 
 #[test]
