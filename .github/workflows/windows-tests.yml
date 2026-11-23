@@ -110,10 +110,29 @@ jobs:
             return $code
           }
           # The tests must not run elevated, or the store tests skip themselves.
+          # The private-file layer's gate reads TokenElevation, so check exactly
+          # that from inside the limited token (and record its groups).
           $null = Run-Limited "$env:SystemRoot\System32\whoami.exe" '/groups' 'whoami'
-          $groups = Get-Content (Join-Path $dir 'whoami.out') -Raw
-          if ($groups -notmatch 'S-1-16-8192') { throw 'the limited token is not at medium integrity' }
-          'integrity: medium (not elevated)'
+          $check = Join-Path $dir 'elevation-check.ps1'
+          Set-Content -Encoding ascii $check @(
+            'Add-Type -TypeDefinition @"',
+            'using System; using System.Runtime.InteropServices;',
+            'public static class TokenCheck {',
+            '  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();',
+            '  [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr p, uint access, out IntPtr token);',
+            '  [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetTokenInformation(IntPtr token, int cls, out int value, int length, out int returned);',
+            '  public static int Elevated() {',
+            '    IntPtr token; if (!OpenProcessToken(GetCurrentProcess(), 8, out token)) return -1;',
+            '    int value, returned; if (!GetTokenInformation(token, 20, out value, 4, out returned)) return -2;',
+            '    return value;',
+            '  }',
+            '}',
+            '"@',
+            '"elevated=$([TokenCheck]::Elevated())"')
+          $null = Run-Limited "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" "-NoProfile -ExecutionPolicy Bypass -File `"$check`"" 'elevation'
+          $elevation = (Get-Content (Join-Path $dir 'elevation.out') -Raw).Trim()
+          if ($elevation -ne 'elevated=0') { throw "the limited token is still elevated ($elevation)" }
+          'limited token: not elevated (TokenElevation = 0)'
           $failed = 0
           foreach ($e in $ffi) {
             $name = 'ffi-' + [IO.Path]::GetFileNameWithoutExtension($e)
