@@ -732,6 +732,88 @@ it.each([
   expect(document.querySelector('h1')?.textContent).not.toBe('Your box no longer accepts this phone');
   expect(props.forget).not.toHaveBeenCalled();
 });
+it('a used ticket refused during the final poll leaves the recovery actions working', async () => {
+  const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  let finish!: (v: { endpoint: string; node_id_fingerprint: string; restart_required: boolean }) => void;
+  const props = mount({ status, pairing, connect: vi.fn(() => new Promise<{ endpoint: string; node_id_fingerprint: string; restart_required: boolean }>(resolve => { finish = resolve; })) });
+  button('Scan the code with the camera').click(); await tick();
+  expect(props.connect).toHaveBeenCalledOnce();
+  // The link is saved, and the refusal lands while connect still awaits its last status read.
+  setPairing({ ...INITIAL_PAIRING, remote: true });
+  setStatus({ ready: false, node_id: null, error: null, connection_error: { kind: 'used', detail: '' } }); await tick();
+  finish({ endpoint: 'box:443', node_id_fingerprint: 'ABCD', restart_required: false }); await tick();
+  expect(button('Paste new link').disabled).toBe(false);
+  expect(document.querySelector<HTMLButtonElement>('[data-phone-forget]')!.disabled).toBe(false);
+  expect(props.forget).not.toHaveBeenCalled();
+});
+it('a second refused link still ends its attempt and lets the next link in', async () => {
+  const readText = vi.fn().mockResolvedValue('bitsov://pair/fresh');
+  vi.stubGlobal('navigator', { clipboard: { readText } });
+  const idle: NodeStatus = { ready: false, node_id: null, error: null };
+  const [status, setStatus] = createSignal<NodeStatus>(idle);
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ status, pairing, device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) as never });
+  // First refusal, before any enrollment.
+  button('Scan the code with the camera').click(); await tick();
+  setStatus({ ...idle, connection_error: { kind: 'used', detail: '' } }); await tick();
+  setStatus(idle); await tick();
+  button('Paste new link').click(); await tick();
+  expect(props.connect).toHaveBeenCalledTimes(2);
+  // The fresh link reaches the four words; then the host refuses again.
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
+  setStatus({ ready: true, node_id: 'box', error: null }); await tick();
+  expect(document.querySelectorAll('[data-pair-word]')).toHaveLength(4);
+  expect(props.join).not.toHaveBeenCalledWith({ action: 'cancel' });
+  setPairing({ ...INITIAL_PAIRING, remote: true });
+  setStatus({ ...idle, connection_error: { kind: 'used', detail: '' } }); await tick();
+  expect(props.join).toHaveBeenCalledWith({ action: 'cancel' });
+  expect(document.querySelectorAll('[data-pair-word]')).toHaveLength(0);
+  button('Paste new link').click(); await tick();
+  expect(readText).toHaveBeenCalledTimes(2);
+  expect(props.connect).toHaveBeenCalledTimes(3);
+  expect(props.forget).not.toHaveBeenCalled();
+});
+it('a new link tapped while the refused enrollment is still ending reads the clipboard in the tap', async () => {
+  const readText = vi.fn().mockResolvedValue('bitsov://pair/fresh');
+  vi.stubGlobal('navigator', { clipboard: { readText } });
+  let cancelled!: (v: { state: 'idle' }) => void;
+  const join = vi.fn((input: { action: string }) => input.action === 'cancel'
+    ? new Promise<{ state: 'idle' }>(resolve => { cancelled = resolve; })
+    : Promise.resolve({ state: 'idle' as const, second_device: true }));
+  const idle: NodeStatus = { ready: false, node_id: null, error: null };
+  const [status, setStatus] = createSignal<NodeStatus>(idle);
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ status, pairing, join: join as unknown as PhoneOnboardingProps['join'], device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) as never });
+  button('Scan the code with the camera').click(); await tick();
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
+  setStatus({ ready: true, node_id: 'box', error: null }); await tick();
+  expect(document.querySelectorAll('[data-pair-word]')).toHaveLength(4);
+  setPairing({ ...INITIAL_PAIRING, remote: true });
+  setStatus({ ...idle, connection_error: { kind: 'used', detail: '' } }); await tick();
+  button('Paste new link').click();
+  expect(readText).toHaveBeenCalledOnce();
+  await tick();
+  expect(props.connect).toHaveBeenCalledOnce();
+  cancelled({ state: 'idle' });
+  await vi.waitFor(() => expect(props.connect).toHaveBeenCalledTimes(2));
+  expect(props.connect).toHaveBeenLastCalledWith('bitsov://pair/fresh');
+});
+it('Cancel asks before it forgets a saved box, and Keep it keeps it', async () => {
+  const [pairing] = createSignal({ ...INITIAL_PAIRING, remote: true });
+  // A saved box: the phone opens straight on Connecting.
+  const props = mount({ pairing });
+  await tick();
+  button('Cancel').click(); await tick();
+  expect(props.forget).not.toHaveBeenCalled();
+  expect(document.querySelector('[data-phone-forget-confirm]')).not.toBeNull();
+  button('Keep it').click(); await tick();
+  expect(props.forget).not.toHaveBeenCalled();
+  expect(document.querySelector('[data-phone-forget-confirm]')).toBeNull();
+  button('Cancel').click(); await tick();
+  document.querySelector<HTMLButtonElement>('.phone-danger')!.click(); await tick();
+  expect(props.forget).toHaveBeenCalledOnce();
+});
 it('a new link waits for the dead attempt to end, without forgetting anything', async () => {
   let cancelled!: (v: { state: 'idle' }) => void;
   const join = vi.fn((input: { action: string }) => input.action === 'cancel'
@@ -797,7 +879,7 @@ it('asks once before forgetting the box, and Keep it changes nothing', async () 
   const props = mount({ pairing: () => ({ ...INITIAL_PAIRING, remote: true }) });
   await tick();
   button('Forget this box').click(); await tick();
-  expect(document.querySelector('[data-phone-forget-confirm]')?.textContent).toContain('Forget this box? This phone stops using it.');
+  expect(document.querySelector('[data-phone-forget-confirm]')?.textContent).toContain('Forget this box? This phone deletes its link to the box. A connection that is already open can last until you close BitSov.');
   expect(props.forget).not.toHaveBeenCalled();
   button('Keep it').click(); await tick();
   expect(document.querySelector('[data-phone-forget-confirm]')).toBeNull();

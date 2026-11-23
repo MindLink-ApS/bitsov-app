@@ -44,7 +44,7 @@ describe('quiet errors', () => {
   });
 
   it('never replaces a money warning with a generic summary or a reconnect action', () => {
-    start(() => <SoftError message="spend_unknown: connection refused" summary="Your node is unavailable." onReconnect={() => {}} />);
+    start(() => <SoftError message="spend_unknown: connection refused" summary="Your box is unavailable." onReconnect={() => {}} />);
     expect(mount.querySelector('[data-soft-summary]')!.textContent).toMatch(/spend.*unknown/i);
     expect(mount.querySelector('details')).toBeNull();
     expect(mount.querySelector('button')).toBeNull();
@@ -52,7 +52,7 @@ describe('quiet errors', () => {
 
   it.each(['budget_exhausted', 'budget_exhausted: connection refused', 'ceiling_exhausted', 'ceiling_exhausted: connection refused'])('keeps the full budget stop visible: %s', raw => {
     expect(softenError(raw)).toEqual({ summary: raw, detail: null, money: true });
-    start(() => <SoftError message={raw} summary="Your node is unavailable." onReconnect={() => {}} />);
+    start(() => <SoftError message={raw} summary="Your box is unavailable." onReconnect={() => {}} />);
     expect(mount.querySelector('[data-soft-summary]')!.textContent).toBe(raw);
     expect(mount.querySelector('details')).toBeNull();
     expect(mount.querySelector('button')).toBeNull();

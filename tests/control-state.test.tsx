@@ -159,20 +159,20 @@ describe('node pill and freshness', () => {
 
   it('says what the seat can rely on right now', () => {
     const base = { ready: true, error: null, overview: overview(now), link: 'open' as const, nowMs: now };
-    expect(nodePill(base)).toEqual({ tone: 'ok', text: 'Connected to your node', live: true });
+    expect(nodePill(base)).toEqual({ tone: 'ok', text: 'Connected to your box', live: true });
     expect(nodePill({ ...base, link: 'closed' }).tone).toBe('warn');
-    expect(nodePill({ ...base, overview: overview(now - 5 * 60_000) }).text).toBe('Node not answering');
-    expect(nodePill({ ...base, ready: false, overview: null }).text).toBe('Starting node');
+    expect(nodePill({ ...base, overview: overview(now - 5 * 60_000) }).text).toBe('Your box isn’t answering');
+    expect(nodePill({ ...base, ready: false, overview: null }).text).toBe('Starting your box');
     expect(nodePill({ ...base, error: 'boom' }).tone).toBe('err');
   });
 
-  it('a phone has no local node: unpaired it is neutral "Connect to your node", never "Node stopped"', () => {
+  it('a phone has no local node: unpaired it is neutral "Connect to your box", never "Your box has stopped"', () => {
     const phone = { phone: true, ready: false, error: 'sidecar not available', overview: null, link: null, nowMs: now };
-    expect(nodePill(phone)).toEqual({ tone: 'idle', text: 'Connect to your node', live: false });
-    expect(nodePill({ ...phone, error: null }).text).toBe('Connect to your node');
+    expect(nodePill(phone)).toEqual({ tone: 'idle', text: 'Connect to your box', live: false });
+    expect(nodePill({ ...phone, error: null }).text).toBe('Connect to your box');
     // Paired to a remote node, the remote wording applies as before.
     expect(nodePill({ ...phone, remote: true }).text).toBe('Remote connection unavailable');
-    expect(nodePill({ ...phone, phone: false }).text).toBe('Node stopped');
+    expect(nodePill({ ...phone, phone: false }).text).toBe('Your box has stopped');
   });
 });
 

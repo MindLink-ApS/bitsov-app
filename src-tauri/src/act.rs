@@ -173,7 +173,7 @@ pub struct AdmissionView {
     pub quoted: bool,
 }
 
-pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your node will retry automatically.";
+pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your box will retry automatically.";
 pub const CHAIN_UNAVAILABLE: &str = "Your box can't see the Bitcoin chain right now; nothing was paid; try again later.";
 
 pub fn chain_unavailable_refusal(status: u16, body: &str) -> bool {
@@ -229,7 +229,7 @@ pub fn readmission_capped_refusal(status: u16, body: &str) -> bool {
 /// Genome's stable `reason` for the capped re-admission refusal.
 pub const READMISSION_REQUIRED: &str = "readmission_required";
 
-pub const READMISSION_CAPPED: &str = "Not sent - nothing was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under the app's all-in cap yet. The app will not retry; sending the same message again reuses its operation, so it can never be paid twice.";
+pub const READMISSION_CAPPED: &str = "Not sent - nothing was paid. This contact asks your box to pay their admission again (every reconnect or box restart starts unpaid), and your box cannot pay that under the app's all-in cap yet. The app will not retry; sending the same message again reuses its operation, so it can never be paid twice.";
 
 /// Genome `quoted_readmission_v1` (#111 revived): under a cap that fits the
 /// contact's fresh signed quote the node pays admission again once for this
@@ -247,7 +247,7 @@ pub fn is_room_chat(plaintext: &str) -> bool {
 /// re-admission that would cost more is refused, never paid under a new cap.
 pub const ROOM_LEG_READMISSION: &str = "Not sent - nothing was paid. They reconnected and ask to be admitted again, which costs more than you confirmed for this room message. Message them once in their own chat, then send to the room again.";
 
-pub const READMISSION_CAPPED_RETRY: &str = "Not delivered - nothing new was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under an app cap yet. The paid message stays here; retry later, or stop retrying.";
+pub const READMISSION_CAPPED_RETRY: &str = "Not delivered - nothing new was paid. This contact asks your box to pay their admission again (every reconnect or box restart starts unpaid), and your box cannot pay that under an app cap yet. The paid message stays here; retry later, or stop retrying.";
 
 /// Neutral proven-non-dispatch copy. Fee-limit wording is added only when the
 /// node's reason identifies a route/fee ceiling (see [`not_dispatched_message`]).
@@ -948,9 +948,9 @@ pub fn operation_conflict(status: u16, body: &str) -> Option<&'static str> {
     ["operation_mismatch", "payment_unresolved", "failed_paid"].into_iter().find(|c| v["code"] == *c)
 }
 
-pub const OPERATION_MISMATCH: &str = "Your node refused this retry: its text differs from the message it retries. Nothing was paid. Retry with the original text, or send it as a new message once the earlier one is resolved.";
-pub const PAYMENT_UNKNOWN: &str = "Payment unknown: your node has not resolved whether this message's payment went through. It will not pay for it again, and the app will not resend it. Check the pending result later.";
-pub const FAILED_PAID: &str = "Paid, and the recipient's node refused this message for good. The payment is not refundable. Do not send it again.";
+pub const OPERATION_MISMATCH: &str = "Your box refused this retry: its text differs from the message it retries. Nothing was paid. Retry with the original text, or send it as a new message once the earlier one is resolved.";
+pub const PAYMENT_UNKNOWN: &str = "Payment unknown: your box has not resolved whether this message's payment went through. It will not pay for it again, and the app will not resend it. Check the pending result later.";
+pub const FAILED_PAID: &str = "Paid, and the recipient's box refused this message for good. The payment is not refundable. Do not send it again.";
 
 /// Compose reports a payment whose message is not delivered. The amount is
 /// this attempt's new payment; a retained-payment handover adds nothing.
@@ -1563,8 +1563,8 @@ pub const FILE_LIST_WINDOWS: [usize; 3] = [50, 200, 1000];
 /// Error text the renderer tells apart: the file exists but is not audio
 /// (a name that only looks like a voice note).
 pub const NOT_A_VOICE_NOTE: &str = "not a voice note";
-pub const VOICE_NOT_STORED: &str = "voice note not stored on this node";
-pub const FILE_NOT_STORED: &str = "file not stored on this node";
+pub const VOICE_NOT_STORED: &str = "voice note not stored on this box";
+pub const FILE_NOT_STORED: &str = "file not stored on this box";
 /// Received file over the app's 1.4 MB send/receive cap.
 pub const FILE_TOO_LARGE: &str = "file over 1.4 MB";
 /// The whole response passed [`FILE_BODY_MAX`], so the file inside was never
