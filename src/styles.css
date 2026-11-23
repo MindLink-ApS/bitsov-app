@@ -1657,6 +1657,19 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   :root { --input-font-min: 16px; }
 }
 
+/* Touch screens wider than a phone (tablets) keep the desktop rail, but every
+   control is a 44 px touch target. A mouse keeps the compact sizes. The
+   message cost toggle keeps its inline size and gets a larger invisible tap area. */
+@media (pointer: coarse) {
+  .rail .track-link, .rail .new-track, .rail summary { min-height: 44px; }
+  .track-head > .track-title-btn { min-width: 44px; min-height: 44px; }
+  .icon-btn, .call-button.icon-btn, .context-toggle.icon-btn, .composer .attach { min-width: 44px; min-height: 44px; }
+  .send-btn.primary, .primary.soft.send-btn, .send-btn { height: 44px; min-height: 44px; border-radius: 22px; }
+  .composer-info > summary { width: 44px; height: 44px; }
+  .stamp .cost-toggle { position: relative; }
+  .stamp .cost-toggle::after { content: ''; position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; transform: translate(-50%, -50%); }
+}
+
 /* Mobile WKWebView draws edge to edge with viewport-fit=cover. The shell
    owns each inset once, so its bar and composer stay inside it
    in both orientations. Fixed overlays need their own safe content area.
