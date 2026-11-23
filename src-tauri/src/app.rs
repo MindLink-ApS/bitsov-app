@@ -1987,8 +1987,11 @@ fn record_permanent_refusal(state: &NodeState, error: &PairError) {
 
 /// A startup read of the stored pairing that failed: a missing Secure Enclave keeps its kind.
 fn startup_storage_refused(state: &NodeState, error: remote_access::RemoteError) {
-    if matches!(error, remote_access::RemoteError::SecureStorageUnavailable { .. }) {
+    if let remote_access::RemoteError::SecureStorageUnavailable { identity_kept } = error {
+        // Permanent, as in client_key_refused: pairing reads as failed, so the shell offers no retry.
         state.remote_retry.failed(&error);
+        *state.pairing_view.lock().unwrap() =
+            PairingView::from_outcome(&Err(PairError::SecureStorageUnavailable { identity_kept }));
     }
     set_error(state, error.to_string());
 }
@@ -31556,6 +31559,8 @@ mod client_key_prompt_tests {
         assert_eq!(kind(&state), Some(ConnectionErrorKind::SecureStorageUnavailable));
         let text = state.status_snapshot().error.expect("an error is shown");
         assert!(text.contains("Secure Enclave") && !text.contains("try again"), "{text}");
+        // And the shell leaves Starting: pairing reads as failed, so no retry is offered.
+        assert_eq!(state.pairing_snapshot().state, "failed");
         // Any other failure keeps the ordinary path: no permanent kind.
         let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
         startup_storage_refused(&state, bitsov_app::remote_access::RemoteError::Local("disk unreadable".into()));
