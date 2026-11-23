@@ -97,7 +97,7 @@ jobs:
           # Performance Log Users (S-1-5-32-559) holds the batch logon right by
           # default and no administrative rights.
           Add-LocalGroupMember -SID 'S-1-5-32-559' -Member $testUser
-          $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 25) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+          $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 12) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
           function Run-Limited([string]$exe, [string]$argline, [string]$name) {
             $out = Join-Path $dir "$name.out"
             $done = Join-Path $dir "$name.done"
@@ -114,22 +114,28 @@ jobs:
               -User $testUser -Password $plain -RunLevel Limited -Force | Out-Null
             Start-ScheduledTask -TaskName $task
             # The marker appears before its exit code is written: wait for content.
+            # Each executable gets 10 minutes, so a hang names itself (libtest
+            # reports a test running over 60 s) well inside the job's limit.
             $waited = 0
             $text = $null
-            while ($waited -lt 1500) {
+            while ($waited -lt 600) {
               if (Test-Path $done) { $text = Get-Content $done -Raw -ErrorAction SilentlyContinue }
               if ($text -and $text.Trim()) { break }
               Start-Sleep -Seconds 2; $waited += 2
             }
             $info = Get-ScheduledTaskInfo -TaskName $task -ErrorAction SilentlyContinue
+            Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
             Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
-            if (Test-Path $out) { Get-Content $out }
+            # Only the exit code is this function's output; everything else is
+            # printed to the host so callers can compare the code.
+            if (Test-Path $out) { Get-Content $out | ForEach-Object { Write-Host $_ } }
             if (-not ($text -and $text.Trim())) {
-              "$name did not finish within $waited s (task result 0x{0:X8})" -f [int]$info.LastTaskResult
+              Write-Host ("$name did not finish within $waited s (task result 0x{0:X8})" -f [int]$info.LastTaskResult)
+              Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($exe)) -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
               return 1
             }
             $code = [int]$text.Trim()
-            "$name exit code: $code (0x{0:X8})" -f $code
+            Write-Host ("$name exit code: $code (0x{0:X8})" -f $code)
             return $code
           }
           # The tests must not run elevated, or the store tests skip themselves.
