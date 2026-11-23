@@ -1683,7 +1683,9 @@ pub fn save_new_file(dir: &std::path::Path, name: &str, data_b64: &str) -> Resul
     };
     let ext = if raw_ext.is_empty() { String::new() } else {
         let clean = safe_save_name(raw_ext);
-        if clean == "file" { String::new() } else { format!(".{clean}") }
+        // "file" is also the cleaner's fallback for nothing usable: drop it then,
+        // but keep a genuine ".file" extension.
+        if clean == "file" && raw_ext.trim() != "file" { String::new() } else { format!(".{clean}") }
     };
     // File systems cap a name in bytes (255 on APFS and ext4), not characters:
     // leave room for the widest suffix, " (99)", and cut only on a character boundary.
@@ -1820,6 +1822,9 @@ mod save_new_file_tests {
         let path = save_new_file(dir.path(), &cjk, &b64(b"3")).unwrap();
         assert!(path.file_name().unwrap().to_str().unwrap().len() <= SAVE_NAME_MAX_BYTES);
         assert_eq!(byte_prefix("a\u{6587}b", 2), "a");
+        // A genuine ".file" extension is kept; one that cleans to nothing is dropped.
+        assert_eq!(save_new_file(dir.path(), "data.file", &b64(b"4")).unwrap().file_name().unwrap(), "data.file");
+        assert_eq!(save_new_file(dir.path(), "notes.\u{1}", &b64(b"5")).unwrap().file_name().unwrap(), "notes._");
         assert_eq!(byte_prefix("abc", 10), "abc");
     }
 
