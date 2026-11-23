@@ -4789,6 +4789,8 @@ function ReceivedFile(props: {
         <button type="button" class="link" data-file-save disabled={busy() || saved()} onClick={() => void onSave()}>
           {saved() ? tr('caSaved641') : busy() ? '…' : tr('extraSave')}
         </button>
+        {/* iOS saves with no dialog, into the app's folder in Files: say where. */}
+        <Show when={saved() && appPlatform() === 'ios'}>{' '}<span class="hint" data-file-saved-where>{tr('caSavedInFiles')}</span></Show>
       </Show>
     </div>
   );

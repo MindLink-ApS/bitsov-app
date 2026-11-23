@@ -8435,7 +8435,25 @@ async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSa
     })
 }
 
-#[cfg(any(mobile, feature = "mobile"))]
+/// iOS: fetch, then write into the app's own Documents folder, which the Files
+/// app shows under BitSov (`UIFileSharingEnabled`). Never replaces a file:
+/// a taken name becomes `name (2)`. Nothing else of the app lives there.
+#[cfg(target_os = "ios")]
+async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSaveResult, String> {
+    let blob = do_file_fetch(state, message_id).await?;
+    let home = std::env::var_os("HOME").ok_or_else(|| "could not save: no app folder".to_string())?;
+    let dir = std::path::PathBuf::from(home).join("Documents");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not save: {e}"))?;
+    act::save_new_file(&dir, &blob.filename, &blob.data_b64)?;
+    Ok(act::FileSaveResult {
+        saved: true,
+        filename: blob.filename,
+        mime_type: blob.mime_type,
+        size_bytes: blob.size_bytes,
+    })
+}
+
+#[cfg(all(any(mobile, feature = "mobile"), not(target_os = "ios")))]
 async fn do_file_save(
     _state: &NodeState,
     _message_id: &str,

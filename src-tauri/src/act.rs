@@ -1649,6 +1649,68 @@ pub fn write_file_bytes(path: &std::path::Path, data_b64: &str) -> Result<(), St
     std::fs::write(path, bytes).map_err(|e| format!("could not save: {e}"))
 }
 
+/// Longest file name, in bytes, most file systems accept (APFS, ext4, NTFS in UTF-16 units).
+const SAVE_NAME_MAX_BYTES: usize = 255;
+/// Longest extension kept apart from the stem when a name is shortened.
+const SAVE_EXT_MAX_BYTES: usize = 16;
+
+/// The longest prefix of `text` within `max` bytes, ending on a character boundary.
+fn byte_prefix(text: &str, max: usize) -> &str {
+    if text.len() <= max { return text; }
+    let mut end = max;
+    while !text.is_char_boundary(end) { end -= 1; }
+    &text[..end]
+}
+
+/// Save into a folder the app owns (a phone's Files folder), with no dialog:
+/// decode, then create `name` or the first free `name (2)`, `name (3)`, …
+/// there. An existing file is never opened or replaced. Returns the path.
+pub fn save_new_file(dir: &std::path::Path, name: &str, data_b64: &str) -> Result<std::path::PathBuf, String> {
+    use base64::Engine;
+    use std::io::Write;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|_| "corrupt file data".to_string())?;
+    if bytes.len() > FILE_MAX_BYTES {
+        return Err(FILE_TOO_LARGE.into());
+    }
+    // Split the extension off the last path segment before any shortening, so a
+    // long name keeps its type. A long "extension" is not one: it stays in the stem.
+    let last = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let (raw_stem, raw_ext) = match last.rfind('.') {
+        Some(dot) if dot > 0 && last.len() - dot <= SAVE_EXT_MAX_BYTES => (&last[..dot], &last[dot + 1..]),
+        _ => (last, ""),
+    };
+    let ext = if raw_ext.is_empty() { String::new() } else {
+        let clean = safe_save_name(raw_ext);
+        // "file" is also the cleaner's fallback for nothing usable: drop it then,
+        // but keep a genuine ".file" extension.
+        if clean == "file" && raw_ext.trim() != "file" { String::new() } else { format!(".{clean}") }
+    };
+    // File systems cap a name in bytes (255 on APFS and ext4), not characters:
+    // leave room for the widest suffix, " (99)", and cut only on a character boundary.
+    let stem_full = safe_save_name(raw_stem);
+    let stem = byte_prefix(&stem_full, SAVE_NAME_MAX_BYTES - ext.len() - " (99)".len());
+    let name = format!("{stem}{ext}");
+    for n in 1..=99u32 {
+        let candidate = if n == 1 { name.clone() } else { format!("{stem} ({n}){ext}") };
+        let path = dir.join(candidate);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!("could not save: {error}"));
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("could not save: {error}")),
+        }
+    }
+    Err("could not save: too many files with this name".into())
+}
+
 /// Result of a user-chosen save (or cancel).
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct FileSaveResult {
@@ -1706,6 +1768,74 @@ pub struct FileReceipt {
 /// text), or a pairing refusal. Either way the token cannot do this.
 pub fn is_scope_refusal(status: u16) -> bool {
     status == 403
+}
+
+#[cfg(test)]
+mod save_new_file_tests {
+    use super::*;
+    use base64::Engine;
+
+    fn b64(bytes: &[u8]) -> String { base64::engine::general_purpose::STANDARD.encode(bytes) }
+
+    #[test]
+    fn a_new_name_is_used_as_is_and_later_ones_are_numbered_before_the_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = save_new_file(dir.path(), "report.pdf", &b64(b"one")).unwrap();
+        let second = save_new_file(dir.path(), "report.pdf", &b64(b"two")).unwrap();
+        let third = save_new_file(dir.path(), "notes", &b64(b"x")).unwrap();
+        let fourth = save_new_file(dir.path(), "notes", &b64(b"y")).unwrap();
+        assert_eq!(first.file_name().unwrap(), "report.pdf");
+        assert_eq!(second.file_name().unwrap(), "report (2).pdf");
+        assert_eq!(third.file_name().unwrap(), "notes");
+        assert_eq!(fourth.file_name().unwrap(), "notes (2)");
+        // An existing file is never replaced.
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+        assert_eq!(std::fs::read(&second).unwrap(), b"two");
+    }
+
+    #[test]
+    fn a_peer_name_cannot_leave_the_folder_or_hide_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["../../escape.txt", "/etc/passwd", ".hidden", "a\\b.txt"] {
+            let path = save_new_file(dir.path(), name, &b64(b"z")).unwrap();
+            assert_eq!(path.parent().unwrap(), dir.path(), "{name}");
+            assert!(!path.file_name().unwrap().to_string_lossy().starts_with('.'), "{name}");
+        }
+    }
+
+    #[test]
+    fn long_multibyte_names_fit_the_byte_limit_even_when_numbered() {
+        let dir = tempfile::tempdir().unwrap();
+        // 180 four-byte characters: 720 bytes, well over a 255-byte name.
+        let wide = format!("{}.pdf", "\u{1F600}".repeat(180));
+        let first = save_new_file(dir.path(), &wide, &b64(b"1")).unwrap();
+        let second = save_new_file(dir.path(), &wide, &b64(b"2")).unwrap();
+        for path in [&first, &second] {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(name.len() <= SAVE_NAME_MAX_BYTES, "{} bytes", name.len());
+            assert!(name.ends_with(".pdf"), "{name}");
+        }
+        assert!(second.file_name().unwrap().to_str().unwrap().ends_with(" (2).pdf"));
+        // Three-byte characters cut on a boundary, and an over-long "extension"
+        // is cut as part of the name rather than kept whole.
+        let cjk = format!("{}.{}", "\u{6587}".repeat(120), "x".repeat(200));
+        let path = save_new_file(dir.path(), &cjk, &b64(b"3")).unwrap();
+        assert!(path.file_name().unwrap().to_str().unwrap().len() <= SAVE_NAME_MAX_BYTES);
+        assert_eq!(byte_prefix("a\u{6587}b", 2), "a");
+        // A genuine ".file" extension is kept; one that cleans to nothing is dropped.
+        assert_eq!(save_new_file(dir.path(), "data.file", &b64(b"4")).unwrap().file_name().unwrap(), "data.file");
+        assert_eq!(save_new_file(dir.path(), "notes.\u{1}", &b64(b"5")).unwrap().file_name().unwrap(), "notes._");
+        assert_eq!(byte_prefix("abc", 10), "abc");
+    }
+
+    #[test]
+    fn corrupt_or_oversized_data_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(save_new_file(dir.path(), "a.bin", "%%%").is_err());
+        let big = b64(&vec![0u8; FILE_MAX_BYTES + 1]);
+        assert_eq!(save_new_file(dir.path(), "a.bin", &big).unwrap_err(), FILE_TOO_LARGE);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 }
 
 #[cfg(test)]

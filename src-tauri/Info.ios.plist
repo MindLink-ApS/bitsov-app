@@ -17,6 +17,12 @@
   <string>BitSov uses the camera only during a video call you place or accept, or while you scan a pairing QR code.</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>BitSov needs access to your local network to connect to your box and call peers.</string>
+  <!-- A received file the owner saves goes to the app's Documents folder, shown
+       in the Files app under BitSov. Nothing else of the app is kept there. -->
+  <key>UIFileSharingEnabled</key>
+  <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key>
+  <true/>
   <!-- bitsov://pair/… links (and their QR codes, via the Camera app) open the app;
        pairing_link_ios.rs queues only pairing links, for owner review. -->
   <key>CFBundleURLTypes</key>

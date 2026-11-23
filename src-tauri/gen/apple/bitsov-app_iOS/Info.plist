@@ -53,6 +53,10 @@
 	<string>BitSov uses the camera only during a video call you place or accept, or while you scan a pairing QR code.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>BitSov needs access to your local network to connect to your box and call peers.</string>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
