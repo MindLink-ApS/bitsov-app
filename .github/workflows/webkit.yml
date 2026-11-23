@@ -26,7 +26,9 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The browser and Linux package install alone has taken up to 10 minutes,
+    # and the suite takes 5-6, so the old 10-minute limit cancelled healthy runs.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -80,9 +82,23 @@ jobs:
       - name: Install locked frontend dependencies
         if: steps.changes.outputs.run != 'false'
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install WebKit and Linux dependencies
+      # The browser build is keyed on the locked Playwright version; the Linux
+      # packages it needs are still installed on every run.
+      - name: Cache the Playwright WebKit browser
+        id: browser-cache
         if: steps.changes.outputs.run != 'false'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-webkit-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install WebKit and Linux dependencies
+        if: steps.changes.outputs.run != 'false' && steps.browser-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 12
         run: npx playwright install --with-deps webkit
+      - name: Install WebKit's Linux dependencies (cached browser)
+        if: steps.changes.outputs.run != 'false' && steps.browser-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 12
+        run: npx playwright install-deps webkit
       - name: Safe areas, Dynamic Type, keyboard and inputs
         if: steps.changes.outputs.run != 'false'
         run: npm run test:webkit
