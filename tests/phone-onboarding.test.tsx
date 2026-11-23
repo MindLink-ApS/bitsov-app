@@ -554,6 +554,7 @@ it.each([
   expect(onContinue).toHaveBeenCalledTimes(2);
   expect(document.querySelector('[role="alert"]')).toBeNull();
   expect(action().disabled).toBe(false);
+});
 // A failed pairing or a stalled connection ends the wait with one plain action.
 const connectingProps = (pairing: () => ReturnType<PhoneOnboardingProps['pairing']>) => ({
   pairing,
@@ -683,7 +684,8 @@ it.each([
   ['en', 'Your box no longer accepts this phone', 'Paste new link', 'Try again'],
   ['da', 'Din boks godkender ikke længere denne telefon', 'Indsæt nyt link', 'Prøv igen'],
 ])('the typed refusal stops at one new-link action and keeps the saved box until a new link replaces it (%s)', async (locale, heading, action, tryAgain) => {
-  vi.stubGlobal('navigator', { clipboard: { readText: vi.fn().mockResolvedValue('bitsov://pair/fresh') } });
+  // The host refusal text is localized through the system language.
+  vi.stubGlobal('navigator', { language: locale, clipboard: { readText: vi.fn().mockResolvedValue('bitsov://pair/fresh') } });
   const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
   const props = mount({ locale, pairing });
   button(locale === 'en' ? 'Scan the code with the camera' : 'Scan koden med kameraet').click(); await tick();
