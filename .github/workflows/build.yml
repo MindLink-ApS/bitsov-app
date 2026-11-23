@@ -59,6 +59,7 @@ jobs:
       # and this expression is already true.
       code: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') || steps.filter.outputs.code == 'true' }}
       android: ${{ steps.filter.outputs.android }}
+      ios: ${{ steps.filter.outputs.ios }}
       sidecar: ${{ steps.filter.outputs.sidecar }}
     steps:
       # pull_request only. paths-filter reads the PR file list from the API.
@@ -90,6 +91,9 @@ jobs:
             # src-tauri/** includes the generated Android project.
             android:
               - '{src-tauri/**,scripts/check-android-release.py,.github/workflows/build.yml}'
+            # src-tauri/** includes the generated Xcode project.
+            ios:
+              - '{src-tauri/**,.github/workflows/build.yml}'
             # Includes bootstrap/config sources, lockfiles, release pins, smoke
             # scripts and CI plumbing. A failed classifier still runs Sidecar.
             sidecar:
@@ -155,6 +159,42 @@ jobs:
       # Missing generated output fails rather than silently skipping the check.
       - name: Android release — keep rules and safe defaults
         run: python3 scripts/check-android-release.py --generated
+
+  ios-check:
+    name: iOS Rust (aarch64 cargo check)
+    needs: changes
+    # Fail closed if classification fails; skip unrelated PRs and non-PR events.
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.ios == 'true') }}
+    # The iOS SDK and the Swift bridge need Xcode. No signing, no secrets.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - name: Install iOS Rust target
+        run: rustup target add aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri
+          shared-key: tauri-ios-check
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+
+      # Real target cfg selects the iOS code (Secure Enclave key, Keychain
+      # sealer, startup guard). --tests type-checks tests; it neither links
+      # nor runs iOS binaries.
+      - name: Rust — iOS library and tests
+        working-directory: src-tauri
+        run: cargo check --locked -p bitsov-app --target aarch64-apple-ios --lib --tests
 
   build:
     name: Build (tsc + vite + cargo check)
