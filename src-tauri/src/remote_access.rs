@@ -1196,6 +1196,14 @@ fn load_with(
     if migrate {
         // The atomic replacement unlinks the file that held the plaintext code.
         if let Err(error) = persist_with(path, &descriptor, sealer) {
+            // A missing Secure Enclave refuses before anything is written, so the
+            // existing pairing on disk is untouched: report it as kept.
+            let error = match error {
+                RemoteError::SecureStorageUnavailable { .. } => {
+                    RemoteError::SecureStorageUnavailable { identity_kept: true }
+                }
+                other => other,
+            };
             if !sealer.is_some_and(|sealer| sealer.allows_plaintext_fallback()) {
                 return Err(error);
             }
@@ -3454,7 +3462,9 @@ mod tests {
         let (_dir, path, descriptor, _) = sealed_fixture(63);
         persist_with(&path, &descriptor, None).unwrap();
         let original = std::fs::read(&path).unwrap();
-        assert!(load_with(&path, Some(&NoEnclaveBridge)).is_err());
+        // The saved pairing is untouched, so the refusal says it was kept, never "nothing was saved".
+        let error = load_with(&path, Some(&NoEnclaveBridge)).unwrap_err();
+        assert!(matches!(error, RemoteError::SecureStorageUnavailable { identity_kept: true }), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert!(!path.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp")).exists());
     }
