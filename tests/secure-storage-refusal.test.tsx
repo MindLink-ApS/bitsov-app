@@ -4,8 +4,8 @@ import { copy, setLanguagePref } from '../src/i18n';
 import { Onboarding } from '../src/onboarding/Onboarding';
 import { connectionErrorDetail, type NodeStatus, type PairingView } from '../src/onboarding/pairing';
 
-const EN = 'This Mac has no Secure Enclave, so BitSov cannot store your pairing key safely in this test build. Nothing was saved. Use a Mac with Apple silicon or a T2 chip, or a signed BitSov build.';
-const DA = 'Denne Mac har ingen Secure Enclave, så BitSov kan ikke gemme din parringsnøgle sikkert i denne testudgave. Intet er gemt. Brug en Mac med Apple silicon eller T2-chip, eller en signeret BitSov-udgave.';
+const EN = 'This Mac has no Secure Enclave, so BitSov cannot store your pairing key safely. Nothing was saved. Use a Mac with Apple silicon or a T2 chip.';
+const DA = 'Denne Mac har ingen Secure Enclave, så BitSov kan ikke gemme din parringsnøgle sikkert. Intet er gemt. Brug en Mac med Apple silicon eller T2-chip.';
 const key = (locale: 'en' | 'da', name: string) => (copy[locale] as Record<string, string>)[name];
 
 const failed: PairingView = {
