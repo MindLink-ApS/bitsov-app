@@ -22,6 +22,8 @@ const PROVEN_UNPAID = new Set([
   'call_no_consent', 'call_no_reservation', 'call_hold_above_consent', 'call_hold_unconfirmed', 'call_hold_changed', 'call_minutes_unpayable',
   'call_offer_price_above_consent', 'call_offer_hold_above_consent', 'call_hangup_unpayable',
   'call_hangup_above_message_max', 'call_price_unknown', 'call_minutes_above_hold',
+  // A free call reply carries a zero cap: whatever happened to it, nothing could be paid.
+  'call_reply_not_free', 'call_reply_not_sent', 'call_reply_unknown',
 ]);
 export const provenUnpaid = (code: string) => PROVEN_UNPAID.has(code);
 

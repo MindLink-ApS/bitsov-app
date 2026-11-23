@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import ts from 'typescript';
+import ts from 'typescript-api';
 import { expect, it } from 'vitest';
 import { SAMPLE_ROOMS, SAMPLE_ROOM_ID } from '../src/control/sample';
 

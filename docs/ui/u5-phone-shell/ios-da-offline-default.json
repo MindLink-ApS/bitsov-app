@@ -135,7 +135,7 @@
     {
       "tag": "BUTTON",
       "class": "track-link",
-      "text": "Maya",
+      "text": "Robin",
       "rect": {
         "x": 15.984375,
         "y": 537.484375,
@@ -161,7 +161,7 @@
     {
       "tag": "BUTTON",
       "class": "track-link",
-      "text": "Josh",
+      "text": "Kim",
       "rect": {
         "x": 15.984375,
         "y": 585.46875,

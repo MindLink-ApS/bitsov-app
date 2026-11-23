@@ -336,6 +336,9 @@ struct SendOrderState {
     /// Frames that came early. `None`: a send that failed its checks, which
     /// only frees its place.
     held: std::collections::BTreeMap<u64, Option<Vec<u8>>>,
+    /// The frame counted `u64::MAX` has been released: no count comes after it,
+    /// so every later counted frame is dropped.
+    finished: bool,
 }
 
 impl SendOrder {
@@ -358,7 +361,7 @@ impl SendOrder {
             return;
         };
         let next = *state.next.get_or_insert(order);
-        if order < next {
+        if order < next || state.finished {
             // Its place was given up, or it belongs to an earlier session:
             // dropped, so nothing leaves out of capture order.
             return;
@@ -372,7 +375,13 @@ impl SendOrder {
             if let Some(payload) = payload {
                 queue.push(payload);
             }
-            next += 1;
+            // The order comes from the renderer, so it may sit at the top of
+            // the range: nothing counts past it.
+            let Some(after) = next.checked_add(1) else {
+                state.finished = true;
+                break;
+            };
+            next = after;
             // Too many waited behind a gap: skip it.
             if !state.held.contains_key(&next) && state.held.len() > SEND_ORDER_HOLD {
                 next = *state.held.keys().next().expect("a frame is held");
@@ -502,6 +511,12 @@ impl SentWindow {
     fn has_room(&mut self, now: tokio::time::Instant) -> bool {
         self.forget_old(now);
         self.sent.len() < self.max_messages && self.bytes + SEQ_BYTES + MAX_PAYLOAD <= self.max_bytes
+    }
+}
+
+impl Default for VideoPath {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -713,6 +728,7 @@ pub enum SessionEnd {
 /// frames up (assigning `seq`) and validated frames down into `downlink`,
 /// until the socket closes, drops, or `stopping` says so. Errors never quote
 /// the URL (it holds the token).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_media_session(
     url: &str,
     token: &str,
@@ -806,7 +822,7 @@ pub async fn run_media_session_full(
     on_open: &(dyn Fn(MediaLink) + Send + Sync),
 ) -> Result<(), SessionEnd> {
     let dropped = |why: &str| SessionEnd::Dropped(why.to_string());
-    let ws_protocols = |token: &str| ws_protocols(token).map_err(|why| SessionEnd::Dropped(why));
+    let ws_protocols = |token: &str| ws_protocols(token).map_err(SessionEnd::Dropped);
     let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
         .map_err(|_| dropped("the media request could not be built"))?;
     request.headers_mut().insert(
@@ -1278,6 +1294,49 @@ mod tests {
         assert_eq!(sent, [0, 2, 3, 4, 5, 6, 7]);
         assert_capture_order(&sent);
         assert_eq!(order.held(), 0);
+    }
+
+    #[test]
+    fn a_frame_counted_at_the_top_of_the_range_is_sent_once() {
+        let order = SendOrder::starting_at(Some(u64::MAX - 1));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(u64::MAX - 1), Some(vec![1]), &queue);
+        order.admit(Some(u64::MAX), Some(vec![2]), &queue);
+        assert_eq!(drain(&queue), [1, 2]);
+        // Nothing counts past it: a repeat or a lower count is dropped.
+        order.admit(Some(u64::MAX), Some(vec![3]), &queue);
+        order.admit(Some(u64::MAX - 1), Some(vec![4]), &queue);
+        assert!(drain(&queue).is_empty());
+        assert_eq!(order.held(), 0);
+        // Sends without a count still go straight on.
+        order.admit(None, Some(vec![5]), &queue);
+        assert_eq!(drain(&queue), [5]);
+    }
+
+    #[test]
+    fn a_first_frame_at_the_top_of_the_range_is_sent() {
+        let order = SendOrder::starting_at(None);
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(u64::MAX), Some(vec![9]), &queue);
+        assert_eq!(drain(&queue), [9]);
+        assert_eq!(order.held(), 0);
+    }
+
+    #[test]
+    fn a_skip_that_lands_at_the_top_of_the_range_is_sent() {
+        let top = u64::MAX;
+        let order = SendOrder::starting_at(Some(top - SEND_ORDER_HOLD as u64 - 1));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        // The expected frame never comes; the hold fills up to the top count.
+        for count in top - SEND_ORDER_HOLD as u64..top {
+            order.admit(Some(count), Some(vec![(top - count) as u8]), &queue);
+        }
+        assert!(drain(&queue).is_empty(), "the hold waits for the gap");
+        order.admit(Some(top), Some(vec![0]), &queue);
+        assert_eq!(drain(&queue), [4, 3, 2, 1, 0]);
+        assert_eq!(order.held(), 0);
+        order.admit(Some(top), Some(vec![7]), &queue);
+        assert!(drain(&queue).is_empty(), "nothing counts past the top");
     }
 
     #[test]

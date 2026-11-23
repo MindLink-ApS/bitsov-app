@@ -607,7 +607,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
       capabilities: ['call_meeting_v1'] }),
     peers_list: () => [
-      { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true },
+      { node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, meetings: true },
       { node_id: B, addr: null, label: 'Jon', connected: true, fingerprint: null, meetings: true },
     ],
     rooms_list: () => [],
@@ -652,7 +652,7 @@ describe('meetings in the shell', () => {
     vi.stubGlobal('RTCPeerConnection', FakePc);
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async (c: MediaStreamConstraints) => stream(!!c.video) } });
     resetContactsForTests();
-    setPetname(A, 'Maya');
+    setPetname(A, 'Robin');
     setPetname(B, 'Jon');
   });
   afterEach(() => {
@@ -742,7 +742,7 @@ describe('meetings in the shell', () => {
     await vi.waitFor(() => expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([400, 400, 403, 403]));
   });
 
-  async function inviteMaya() {
+  async function inviteRobin() {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="meeting"]')!.click();
@@ -753,7 +753,7 @@ describe('meetings in the shell', () => {
   it('leaving while the offer is in flight says it is settling, never "paid nothing", then shows what it paid', async () => {
     let land!: (r: unknown) => void;
     stubHost({ call_signal: () => new Promise((resolve) => { land = resolve; }) });
-    await inviteMaya();
+    await inviteRobin();
     await vi.waitFor(() => expect(land).toBeDefined());
     await vi.waitFor(() => expect($('[data-meeting-paid]')?.getAttribute('data-meeting-paid')).toBe('pending'));
     $<HTMLButtonElement>('[data-meeting-leave]')!.click();
@@ -795,14 +795,14 @@ describe('meetings in the shell', () => {
 
   it('a refused offer ends the meeting with "This meeting paid nothing."; a lost one is "not known yet"', async () => {
     stubHost({ call_signal: () => { throw { code: 'spend_refused', message: 'token lacks required scope: spend' }; } });
-    await inviteMaya();
+    await inviteRobin();
     await vi.waitFor(() => expect($('[data-meeting-panel="ended"]')).not.toBeNull());
     expect($('[data-meeting-paid]')!.getAttribute('data-meeting-paid')).toBe('nothing');
     expect(text('[data-meeting-paid]')).toBe('This meeting paid nothing.');
     dispose?.(); dispose = undefined; mount.remove();
 
     stubHost({ call_signal: () => { throw 'connection lost'; } });
-    await inviteMaya();
+    await inviteRobin();
     await vi.waitFor(() => expect($('[data-meeting-paid]')?.getAttribute('data-meeting-paid')).toBe('unknown'));
     expect(text('[data-meeting-paid]')).toBe('No payment for this meeting is confirmed. One signal’s result is not known yet (up to 15 sats in all if it went through): check pending result. Media is not billed.');
   });
@@ -865,8 +865,8 @@ describe('meetings in the shell', () => {
     await vi.waitFor(() => expect($('[data-meeting-panel="invited"]')).not.toBeNull());
     // No 1:1 ring card for a meeting leg.
     expect($('[data-call-panel]')).toBeNull();
-    expect(text('[data-meeting-panel="invited"] .who')).toBe('Maya invites you, with Jon');
-    // Answer + hangup to Maya (2 x 6), a call to Jon (21).
+    expect(text('[data-meeting-panel="invited"] .who')).toBe('Robin invites you, with Jon');
+    // Answer + hangup to Robin (2 x 6), a call to Jon (21).
     await vi.waitFor(() => expect(text('[data-meeting-join]')).toBe('Join · 33 sats'));
     expect(host.used('call_signal')).toHaveLength(0);
     $<HTMLButtonElement>('[data-meeting-join]')!.click();
@@ -919,7 +919,7 @@ describe('meetings in the shell', () => {
     const C_ID = 'c'.repeat(64);
     const host = stubHost({
       peers_list: () => [
-        { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true },
+        { node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, meetings: true },
         { node_id: B, addr: null, label: 'Jon', connected: true, fingerprint: null, meetings: false },
         { node_id: C_ID, addr: null, label: 'Lee', connected: false, fingerprint: null, meetings: false },
       ],
@@ -938,7 +938,7 @@ describe('meetings in the shell', () => {
   });
 
   it('#138 N1: a contact without the advert is not pre-picked, and nothing can be invited', async () => {
-    const host = stubHost({ peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: false }] });
+    const host = stubHost({ peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, meetings: false }] });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="meeting"]')!.click();
@@ -965,7 +965,7 @@ describe('meetings in the shell', () => {
   it('#138 N1: joining never rings a later participant whose node lacks the advert', async () => {
     const host = stubHost({
       peers_list: () => [
-        { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true },
+        { node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, meetings: true },
         { node_id: B, addr: null, label: 'Jon', connected: true, fingerprint: null, meetings: false },
       ],
     });

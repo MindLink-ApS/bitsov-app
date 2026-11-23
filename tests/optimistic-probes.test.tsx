@@ -148,7 +148,7 @@ describe('room caps snapshot', () => {
     setShowLegacyRoomsUi(true);
     try {
     await open(source);
-    await press('to Maya first');
+    await press('to Robin first');
     await vi.waitFor(() => expect(pending).toHaveLength(1));
     await go(`room:${room}`);
     await press('to the room');
@@ -189,7 +189,7 @@ describe('live region', () => {
 });
 
 describe('owner-approved first contact × queue', () => {
-  // B (Josh) is a first contact behind an owner approval; A (Maya) sends at once.
+  // B (Kim) is a first contact behind an owner approval; A (Robin) sends at once.
   async function start() {
     const source = sampleSource({ firstLiveMs: 1e9 });
     const budget: BudgetView = {
@@ -238,22 +238,22 @@ describe('owner-approved first contact × queue', () => {
   });
 
   // A first approved send is in flight; a second approved send waits its turn behind it.
-  async function approvedBehindJosh() {
+  async function approvedBehindKim() {
     const ctx = await start();
-    await pressHere('to Maya first');
+    await pressHere('to Robin first');
     await vi.waitFor(() => expect($('[data-contact-approval]')).not.toBeNull());
     ctx.approve();
     await vi.waitFor(() => expect(ctx.pending).toHaveLength(1), { timeout: 2500 });
     await pressHere('first hello');
     await vi.waitFor(() => expect(sending()).toHaveLength(2), { timeout: 2500 });
-    expect(sending().map((b) => b.querySelector('.bubble')!.textContent)).toEqual(['to Maya first', 'first hello']);
+    expect(sending().map((b) => b.querySelector('.bubble')!.textContent)).toEqual(['to Robin first', 'first hello']);
     expect(area().value).toBe('');
     expect(ctx.pending).toHaveLength(1); // still waiting its turn
     return ctx;
   }
 
   it('approved while waiting its turn: an edit during the queue wait is never erased', async () => {
-    const { source, pending } = await approvedBehindJosh();
+    const { source, pending } = await approvedBehindKim();
     type('a newer draft');
     pending[0].settle(receipt('j1', A, { amount_msat: 14000 }));
     await vi.waitFor(() => expect(pending).toHaveLength(2));
@@ -265,20 +265,20 @@ describe('owner-approved first contact × queue', () => {
   });
 
   it('approved while waiting its turn: a chat switch and a new draft there are never erased', async () => {
-    const { pending } = await approvedBehindJosh();
+    const { pending } = await approvedBehindKim();
     await go(`peer:${B}`);
-    type('for Josh again');
+    type('for Kim again');
     pending[0].settle(receipt('j1', A, { amount_msat: 14000 }));
     await vi.waitFor(() => expect(pending).toHaveLength(2));
     pending[1].fail({ code: 'price_changed', message: 'Nothing was sent.' });
     await new Promise((r) => setTimeout(r, 20));
-    expect(area().value).toBe('for Josh again'); // never Maya's text in Josh's box
+    expect(area().value).toBe('for Kim again'); // never Robin's text in Kim's box
     await go(`peer:${A}`);
     await vi.waitFor(() => expect(unsent().map((u) => u.querySelector('.bubble')!.textContent)).toEqual(['first hello']));
   });
 
   it('an unknown result before the approved send’s turn holds it: not sent, nothing paid', async () => {
-    const { source, pending } = await approvedBehindJosh();
+    const { source, pending } = await approvedBehindKim();
     pending[0].fail({ code: 'payment_unknown', message: 'Outcome unknown.' });
     await vi.waitFor(() => expect(unsent().map((u) => u.getAttribute('data-unsent'))).toEqual(['held']));
     expect(unsent()[0].querySelector('.bubble')!.textContent).toBe('first hello');
@@ -353,15 +353,15 @@ describe('round 4: the queue outlives any composer', () => {
   it('in flight, then another chat: an unknown result is said there too, and the hold applies everywhere', async () => {
     const { source, pending } = deferredSource();
     await open(source);
-    await press('to Maya');
+    await press('to Robin');
     await vi.waitFor(() => expect(pending).toHaveLength(1));
     await go(`peer:${B}`);
     pending[0].fail({ code: 'spend_unknown', message: 'Outcome unknown.' });
     await vi.waitFor(() => expect($('[data-send-live]')?.textContent).toBe('Message payment result unknown.'));
-    type('to Josh');
+    type('to Kim');
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toContain('Check pending result'));
-    expect(area().value).toBe('to Josh');
+    expect(area().value).toBe('to Kim');
     expect(source.send).toHaveBeenCalledTimes(1);
   });
 

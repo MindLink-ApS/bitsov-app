@@ -200,7 +200,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
     }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }, { node_id: C, addr: null, label: 'Josh', connected: true, fingerprint: null }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null }, { node_id: C, addr: null, label: 'Kim', connected: true, fingerprint: null }],
     rooms_list: () => [],
     messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
@@ -304,7 +304,7 @@ describe('voice notes in the composer and thread', () => {
   });
 
   it('a budget stop pays nothing and does not retry', async () => {
-    const host = stubHost({ file_send: () => Promise.reject({ code: 'budget_exhausted', message: 'Maya’s budget is used up.' }) });
+    const host = stubHost({ file_send: () => Promise.reject({ code: 'budget_exhausted', message: 'Robin’s budget is used up.' }) });
     await openShell();
     await recordClip();
     await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · up to 8 sats$/));
@@ -369,6 +369,24 @@ describe('voice notes in the composer and thread', () => {
     $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
     await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] audio[data-voice-audio]`)?.getAttribute('src')).toMatch(/^blob:/));
     expect(host.used('voice_note_fetch').map((c) => c.args)).toEqual([{ message_id: IN_ID }]);
+  });
+
+  it('a voice note that failed to load for another reason can be tried again', async () => {
+    let fail = true;
+    stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [{ id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 1000, plaintext: '[file: voice-note-20260929-120000.webm]', payment_amount_msat: 3000 }]
+        : []),
+      voice_note_fetch: () => fail ? Promise.reject('connection dropped') : ({ filename: 'voice-note-20260929-120000.webm', mime_type: 'audio/webm', size_bytes: 2, data_b64: 'aGk=' }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-message="${IN_ID}"] [data-voice-play]`)).toMatch(/could not load/));
+    expect($<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.disabled).toBe(false);
+    fail = false;
+    $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toMatch(/could not load/));
   });
 
   it('names a voice note this device does not hold', async () => {

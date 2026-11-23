@@ -59,8 +59,8 @@ const modPow = (b: bigint, e: bigint, m: bigint) => {
 };
 const be32 = (n: bigint) => Uint8Array.from(n.toString(16).padStart(64, '0').match(/../g)!.map((h) => parseInt(h, 16)));
 
-/** Maya's own Lightning key and a stranger's, as private scalars. */
-const MAYA_KEY = 0x4d617961n;
+/** Robin's own Lightning key and a stranger's, as private scalars. */
+const ROBIN_KEY = 0x526f62696en;
 const STRANGER_KEY = 0x5374726e676572n;
 const pubOf = (key: bigint) => compress(pointMul(G, key)!);
 
@@ -90,7 +90,7 @@ function invoice(opts: { hrp?: string; purpose?: string | null; descBytes?: Uint
     ...(opts.expiry === undefined ? [] : tag(6, words(opts.expiry, 3))),
     ...(opts.payeeTags ?? []).flatMap((n) => tag(19, bytesToWords(Uint8Array.from(n.match(/../g)!.map((h) => parseInt(h, 16)))))),
   ];
-  const all = [...data, ...sign(hrp, data, opts.key ?? MAYA_KEY)];
+  const all = [...data, ...sign(hrp, data, opts.key ?? ROBIN_KEY)];
   const out = hrp + '1' + [...all, ...bech32Checksum(hrp, all)].map((w) => BECH32_CHARSET[w]).join('');
   HOST_READS.set(out, hostReadOf(hrp, opts, desc));
   return out;
@@ -108,7 +108,7 @@ const UNIT: Record<string, number> = { '': 100_000_000_000, m: 100_000_000, u: 1
 
 function hostReadOf(hrp: string, opts: Parameters<typeof invoice>[0] & object, desc: Uint8Array | null): Omit<InvoiceAmount, 'bolt11'> | null {
   const h = HRP.exec(hrp);
-  const signer = pubOf(opts.key ?? MAYA_KEY);
+  const signer = pubOf(opts.key ?? ROBIN_KEY);
   const tags = opts.payeeTags ?? [];
   // lightning-invoice checks the signature against the first n; this file never writes two.
   if (!h || !h[2] || opts.hash === false || tags.length > 1 || (tags.length === 1 && tags[0] !== signer)) return null;
@@ -175,13 +175,13 @@ describe('reading a chat invoice', () => {
   // filter therefore names no payee at all; only the host's decode does.
   it('never names a payee: not for canonical, non-canonical or n-carrying invoices', () => {
     expect('invoicePayee' in bolt11Module).toBe(false);
-    const maya = pubOf(MAYA_KEY);
-    for (const body of [invoice(), invoice({ key: STRANGER_KEY }), invoice({ payeeTags: [maya] }), invoice({ payeeTags: [pubOf(STRANGER_KEY)] }), ...NONCANONICAL]) {
+    const robin = pubOf(ROBIN_KEY);
+    for (const body of [invoice(), invoice({ key: STRANGER_KEY }), invoice({ payeeTags: [robin] }), invoice({ payeeTags: [pubOf(STRANGER_KEY)] }), ...NONCANONICAL]) {
       const r = readChatInvoice(body, 0, 'regtest'); // expiry aside
       const inv = r?.ok ? r.invoice : null;
       expect(inv).not.toBeNull();
       expect(inv).not.toHaveProperty('payee');
-      expect(JSON.stringify(inv)).not.toContain(maya.slice(2, 20));
+      expect(JSON.stringify(inv)).not.toContain(robin.slice(2, 20));
     }
     // The display contract: anything displayed for these is null or the node's payee.
     for (const body of NONCANONICAL) {
@@ -191,8 +191,8 @@ describe('reading a chat invoice', () => {
       expect(() => hostDecode(body)).toThrow();
     }
     // More than one n is refused before the host is asked.
-    expect(readChatInvoice(invoice({ payeeTags: [maya, pubOf(STRANGER_KEY)] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
-    expect(readChatInvoice(invoice({ payeeTags: [maya, maya] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
+    expect(readChatInvoice(invoice({ payeeTags: [robin, pubOf(STRANGER_KEY)] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
+    expect(readChatInvoice(invoice({ payeeTags: [robin, robin] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
   });
 
   it('checks the host reading against network, bounds and expiry', () => {
@@ -227,10 +227,10 @@ describe('reading a chat invoice', () => {
   });
 
   it('names the payee as the contact only when their Lightning node id is known and matches', () => {
-    const maya = pubOf(MAYA_KEY);
-    expect(payeeView(maya, maya.toUpperCase(), 'Maya')).toEqual({ verified: true, text: 'Maya' });
-    expect(payeeView(maya, null, 'Maya')).toEqual({ verified: false, text: `Lightning node ${maya.slice(0, 8)}…${maya.slice(-4)}, not verified as Maya` });
-    expect(payeeView(pubOf(STRANGER_KEY), maya, 'Maya').verified).toBe(false);
+    const robin = pubOf(ROBIN_KEY);
+    expect(payeeView(robin, robin.toUpperCase(), 'Robin')).toEqual({ verified: true, text: 'Robin' });
+    expect(payeeView(robin, null, 'Robin')).toEqual({ verified: false, text: `Lightning node ${robin.slice(0, 8)}…${robin.slice(-4)}, not verified as Robin` });
+    expect(payeeView(pubOf(STRANGER_KEY), robin, 'Robin').verified).toBe(false);
   });
 
   it.each([null, 'unknown', 'future-network'])('fails closed for unknown home network %s', home => {
@@ -281,7 +281,7 @@ describe('reading a chat invoice', () => {
 
   it('ignores ordinary text and anything that is not only an invoice', () => {
     const good = invoice();
-    for (const body of [null, '', 'gm Maya', 'lnbc is lightning', `pay this: ${good}`, `${good} thanks`, `${good}\n${good}`, `<b>${good}</b>`, 'x'.repeat(5000), `ln${'q'.repeat(3000)}1`]) {
+    for (const body of [null, '', 'gm Robin', 'lnbc is lightning', `pay this: ${good}`, `${good} thanks`, `${good}\n${good}`, `<b>${good}</b>`, 'x'.repeat(5000), `ln${'q'.repeat(3000)}1`]) {
       expect(readChatInvoice(body, NOW, 'regtest')).toBeNull();
     }
   });
@@ -313,7 +313,7 @@ const msg = (id: string, plaintext: string, sender = A, kind = 1) =>
 
 function stubHost(overrides: Record<string, Reply> = {}, network: string | null = 'regtest') {
   resetContactsForTests();
-  setPetname(A, 'Maya');
+  setPetname(A, 'Robin');
   const calls: Call[] = [];
   const spend = { v: view('locked') };
   const REPLIES: Record<string, Reply> = {
@@ -325,7 +325,7 @@ function stubHost(overrides: Record<string, Reply> = {}, network: string | null 
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
       ...(network ? { network } : {}),
     }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null }],
     rooms_list: () => [],
     messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
@@ -397,7 +397,7 @@ describe('a request in chat', () => {
     host.spend.v = openView();
     await openShell();
     $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
-    expect(text('[data-request-hint]')).toContain('Send it in chat so Maya can pay it');
+    expect(text('[data-request-hint]')).toContain('Send it in chat so Robin can pay it');
     expect($('[data-send-in-chat]')).toBeNull();
     type('[data-request-amount]', '21');
     type('[data-request-note]', 'dinner');
@@ -438,7 +438,7 @@ describe('a request in chat', () => {
     await vi.waitFor(() => expect($('[data-message="in-1"] [data-request-card]')).not.toBeNull());
     const card = $('[data-message="in-1"] [data-request-card]')!;
     expect(card.getAttribute('data-request-msat')).toBe('21000');
-    expect(card.textContent).toContain('Payment request from Maya');
+    expect(card.textContent).toContain('Payment request from Robin');
     expect(card.textContent).toContain('21');
     expect(text('[data-request-purpose]')).toBe('For: tacos for the team');
     expect($('[data-message="in-1"] .bubble')).toBeNull();
@@ -473,7 +473,7 @@ describe('a request in chat', () => {
     await openShell();
     await vi.waitFor(() => expect($('[data-request-card]')).not.toBeNull());
     const short = `${stranger.slice(0, 8)}…${stranger.slice(-4)}`;
-    expect(text('[data-request-card] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Maya.`);
+    expect(text('[data-request-card] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Robin.`);
     expect($('[data-request-card] [data-payee]')!.getAttribute('data-payee')).toBe('unverified');
     expect($('[data-request-card] [data-payee]')!.getAttribute('title')).toBe(stranger);
 
@@ -481,8 +481,8 @@ describe('a request in chat', () => {
     await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
     const review = text('[data-pay-review]');
     expect(text('[data-pay-review] .pay-review-title')).toBe('Pay this Lightning invoice');
-    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Maya.`);
-    expect(review).not.toContain('Pay Maya');
+    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Robin.`);
+    expect(review).not.toContain('Pay Robin');
     expect(review).not.toContain('their invoice');
     expect(host.used('payment_pay')).toHaveLength(0);
   });
@@ -495,7 +495,7 @@ describe('a request in chat', () => {
     expect($('[data-request-card] [data-payee]')!.getAttribute('data-payee')).toBe('unverified');
   });
 
-  // The #83 pasted-invoice review had the same "Pay Maya · their invoice" wording.
+  // The #83 pasted-invoice review had the same "Pay Robin · their invoice" wording.
   it('a pasted invoice’s review names its payee, not verified as the contact', async () => {
     const stranger = pubOf(STRANGER_KEY);
     const host = stubHost();
@@ -507,15 +507,15 @@ describe('a request in chat', () => {
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect($('[data-pay-review] [data-payee]')).not.toBeNull());
     expect(text('[data-pay-review] .pay-review-title')).toBe('Pay this Lightning invoice');
-    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${stranger.slice(0, 8)}…${stranger.slice(-4)}, not verified as Maya.`);
-    expect(text('[data-pay-review]')).not.toContain('Pay Maya');
+    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${stranger.slice(0, 8)}…${stranger.slice(-4)}, not verified as Robin.`);
+    expect(text('[data-pay-review]')).not.toContain('Pay Robin');
     expect(text('[data-pay-review]')).not.toContain('their invoice');
     expect(host.used('payment_pay')).toHaveLength(0);
   });
 
   // The card must not name a second n while the node pays the first.
   it('an invoice with two n fields, or an n the host refuses, is plain text with a note: no card, no Pay, no payee', async () => {
-    const bolt11 = invoice({ payeeTags: [pubOf(MAYA_KEY), pubOf(STRANGER_KEY)] });
+    const bolt11 = invoice({ payeeTags: [pubOf(ROBIN_KEY), pubOf(STRANGER_KEY)] });
     const host = stubHost({ messages_list: () => [msg('two-n', bolt11), msg('bad-n', invoice({ payeeTags: [pubOf(STRANGER_KEY)] }))] });
     host.spend.v = openView();
     await openShell();
@@ -537,8 +537,8 @@ describe('a request in chat', () => {
     expect(host.used('payment_pay')).toHaveLength(0);
   });
 
-  // A typed pubkey in Maya's thread is not Maya's node either.
-  it('the Direct review names the typed node, not verified as the contact, not "Pay Maya"', async () => {
+  // A typed pubkey in Robin's thread is not Robin's node either.
+  it('the Direct review names the typed node, not verified as the contact, not "Pay Robin"', async () => {
     const stranger = pubOf(STRANGER_KEY);
     const host = stubHost();
     host.spend.v = openView();
@@ -552,9 +552,9 @@ describe('a request in chat', () => {
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
     expect(text('[data-pay-review] .pay-review-title')).toBe('Pay a Lightning node directly');
-    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${stranger.slice(0, 8)}…${stranger.slice(-4)}, not verified as Maya.`);
+    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${stranger.slice(0, 8)}…${stranger.slice(-4)}, not verified as Robin.`);
     expect($('[data-pay-review] [data-payee]')!.getAttribute('data-payee')).toBe('unverified');
-    expect(text('[data-pay-review]')).not.toContain('Pay Maya');
+    expect(text('[data-pay-review]')).not.toContain('Pay Robin');
     expect(host.used('payment_keysend')).toHaveLength(0);
   });
 
@@ -699,9 +699,9 @@ describe('a request in chat', () => {
   // Card and confirm show only the host's decode.
   it('card and confirm show the host’s payee and amount, and pay its canonical invoice', async () => {
     const hostPayee = pubOf(STRANGER_KEY);
-    const signedByMaya = invoice({ purpose: 'dinner' });
+    const signedByRobin = invoice({ purpose: 'dinner' });
     const host = stubHost({
-      messages_list: () => [msg('in-1', `lightning:${signedByMaya.toUpperCase()}`)],
+      messages_list: () => [msg('in-1', `lightning:${signedByRobin.toUpperCase()}`)],
       // Whatever a local decoder would recover, the host's answer is what is shown.
       invoice_amount: (args) => ({ ...hostDecode(args!.bolt11 as string), payee: hostPayee, amount_msat: 22_000, description: 'host says lunch' }),
     });
@@ -711,17 +711,17 @@ describe('a request in chat', () => {
     const short = `${hostPayee.slice(0, 8)}…${hostPayee.slice(-4)}`;
     expect($('[data-request-card]')!.getAttribute('data-request-msat')).toBe('22000');
     expect(text('[data-request-purpose]')).toBe('For: host says lunch');
-    expect(text('[data-request-card] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Maya.`);
-    expect(text('[data-request-card]')).not.toContain(pubOf(MAYA_KEY).slice(0, 8));
+    expect(text('[data-request-card] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Robin.`);
+    expect(text('[data-request-card]')).not.toContain(pubOf(ROBIN_KEY).slice(0, 8));
 
     $<HTMLButtonElement>('[data-request-pay]')!.click();
     await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
-    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Maya.`);
+    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Robin.`);
     expect(text('[data-review-amount]')).toBe('22 sats');
     $<HTMLButtonElement>('[data-pay-confirm]')!.click();
     await vi.waitFor(() => expect(host.used('payment_pay')).toHaveLength(1));
     // The canonical string the host returned, not the prefixed upper-case body.
-    expect(host.used('payment_pay')[0].args).toEqual({ bolt11: signedByMaya, amount_msat: 22_000, max_msat: 27_000 });
+    expect(host.used('payment_pay')[0].args).toEqual({ bolt11: signedByRobin, amount_msat: 22_000, max_msat: 27_000 });
   });
 
   it('until the host answers, a received invoice is plain text with no card, amount or payee', async () => {

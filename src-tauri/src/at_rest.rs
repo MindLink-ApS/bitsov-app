@@ -26,6 +26,12 @@ pub trait Sealer: Send + Sync {
     fn allows_plaintext_fallback(&self) -> bool {
         false
     }
+
+    /// Whether the hardware key this sealer needs exists on this device.
+    /// Asked before any seal, open or file write; it never prompts.
+    fn hardware_available(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
@@ -84,6 +90,18 @@ pub(crate) mod test_sealer {
             Ok(Zeroizing::new(
                 body.iter().map(|byte| byte ^ 0xa5).collect(),
             ))
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos", not(feature = "mobile")))]
+mod tests {
+    use super::Sealer;
+
+    #[test]
+    fn mac_sealers_never_allow_plaintext_fallback() {
+        for enclave in [|| true, || false] {
+            assert!(!super::macos::MacSealer::with_probe(enclave).allows_plaintext_fallback());
         }
     }
 }

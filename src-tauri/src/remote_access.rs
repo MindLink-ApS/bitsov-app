@@ -342,6 +342,9 @@ pub enum RemoteError {
     Expired(u64),
     /// This device has no passcode, so its protected identity cannot be stored or read.
     DeviceUnavailable,
+    /// This Mac has no Secure Enclave: secrets cannot be stored safely here.
+    /// `identity_kept`: an existing identity was left untouched.
+    SecureStorageUnavailable { identity_kept: bool },
 }
 
 fn elapsed_text(seconds: u64) -> String {
@@ -371,6 +374,11 @@ impl fmt::Display for RemoteError {
             Self::AndroidLocalNetwork => f.write_str("Local network access is unavailable. Allow Nearby devices for BitSov in Android Settings, then return to BitSov or tap Reconnect."),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
             Self::DeviceUnavailable => f.write_str(PASSCODE_REQUIRED),
+            Self::SecureStorageUnavailable { identity_kept } => {
+                f.write_str(NO_SECURE_ENCLAVE)?;
+                if *identity_kept { f.write_str(IDENTITY_KEPT)?; }
+                Ok(())
+            }
             Self::RateLimited(seconds) => write!(f, "Remote connection limited; waiting {seconds} s"),
             Self::Waiting(seconds) => write!(f, "Remote connection unavailable; waiting {seconds} s"),
         }
@@ -416,6 +424,8 @@ pub enum ConnectionErrorKind {
     ClaimMismatch,
     /// No device passcode (and so no Face ID / Touch ID): protected storage is off.
     DeviceUnavailable,
+    /// No Secure Enclave on this Mac. Permanent; never the passcode message.
+    SecureStorageUnavailable,
     Other,
 }
 
@@ -432,6 +442,14 @@ pub const PASSCODE_REQUIRED_CODE: &str = "device_passcode_required";
 /// link). Kept here so every target compiles the classification; a test binds
 /// the two copies wherever the bridge exists.
 pub const PASSCODE_REQUIRED: &str = "This device has no passcode, so Face ID and protected storage are off. Turn on a passcode in Settings, then try again.";
+/// A Mac without a Secure Enclave. The renderer shows its own copy for these.
+pub const SECURE_STORAGE_UNAVAILABLE_CODE: &str = "secure_storage_unavailable";
+/// The same, when an existing pairing was kept untouched for its original Mac.
+pub const SECURE_STORAGE_KEPT_CODE: &str = "secure_storage_unavailable_identity_kept";
+/// Mirrors `bitsov_ffi::keychain_status::NO_SECURE_ENCLAVE` (Android links no
+/// bridge); a test binds the two copies wherever the bridge exists.
+pub const NO_SECURE_ENCLAVE: &str = "This Mac has no Secure Enclave, so BitSov cannot store its pairing key safely. Nothing was saved.";
+pub const IDENTITY_KEPT: &str = " Your existing pairing is kept and works again on the Mac it was made on.";
 
 /// Classify the node's refusal of a pairing code by its reason, for every ticket
 /// kind (first pairing, owner, second device, legacy). Only a fixed local
@@ -497,6 +515,8 @@ impl From<&RemoteError> for ConnectionError {
             RemoteError::DeviceUnavailable => (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
             RemoteError::Local(message) if message == PASSCODE_REQUIRED =>
                 (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
+            RemoteError::SecureStorageUnavailable { identity_kept } => (SecureStorageUnavailable,
+                if *identity_kept { SECURE_STORAGE_KEPT_CODE } else { SECURE_STORAGE_UNAVAILABLE_CODE }.into()),
             _ => (Other, CONNECTION_FAILED_CODE.into()),
         };
         // Peer text may echo authentication codes. Only fixed local copy crosses.
@@ -550,7 +570,7 @@ pub fn node_id_fingerprint(node_id_hex: &str) -> String {
 
 pub fn new_local_auth_token() -> Result<String, RemoteError> {
     let mut token = [0u8; 32];
-    getrandom::getrandom(&mut token).map_err(|error| {
+    getrandom::fill(&mut token).map_err(|error| {
         RemoteError::Local(format!("cannot secure remote loopback proxy: {error}"))
     })?;
     Ok(hex::encode(token))
@@ -966,6 +986,9 @@ fn open_sealed_code(
             "protected storage is unavailable for this pairing link; try again on the original device".into(),
         ));
     };
+    if !sealer.hardware_available() {
+        return Err(RemoteError::SecureStorageUnavailable { identity_kept: true });
+    }
     if stored.code.is_some() {
         return Err(RemoteError::Local("the remote access descriptor is corrupt".into()));
     }
@@ -991,6 +1014,10 @@ fn persist_with(
     descriptor: &RemoteDescriptor,
     sealer: Option<&dyn Sealer>,
 ) -> Result<(), RemoteError> {
+    // A code that cannot be sealed is never written, not even to a tempfile.
+    if descriptor.code.is_some() && sealer.is_some_and(|sealer| !sealer.hardware_available()) {
+        return Err(RemoteError::SecureStorageUnavailable { identity_kept: false });
+    }
     let dir = path
         .parent()
         .ok_or_else(|| RemoteError::Local("remote config has no parent directory".into()))?;
@@ -1169,6 +1196,14 @@ fn load_with(
     if migrate {
         // The atomic replacement unlinks the file that held the plaintext code.
         if let Err(error) = persist_with(path, &descriptor, sealer) {
+            // A missing Secure Enclave refuses before anything is written, so the
+            // existing pairing on disk is untouched: report it as kept.
+            let error = match error {
+                RemoteError::SecureStorageUnavailable { .. } => {
+                    RemoteError::SecureStorageUnavailable { identity_kept: true }
+                }
+                other => other,
+            };
             if !sealer.is_some_and(|sealer| sealer.allows_plaintext_fallback()) {
                 return Err(error);
             }
@@ -1389,7 +1424,7 @@ async fn pinned_handshake_bound<S: AsyncRead + AsyncWrite + Unpin>(
             .map_err(|_| RemoteError::Local("invalid built-in Noise protocol".into()))?;
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_initiator()
+            .and_then(|b| b.build_initiator())
             .map_err(|e| RemoteError::Local(format!("cannot initialize Noise: {e}")))?;
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let length = noise
@@ -2603,6 +2638,7 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
         .redirect(reqwest::redirect::Policy::none())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_proxy(
     api_base: &str,
     app_data_dir: &Path,
@@ -3393,6 +3429,58 @@ mod tests {
         }
     }
 
+    /// A Mac without an enclave: a native call here would be a bug.
+    struct NoEnclaveSealer;
+    impl Sealer for NoEnclaveSealer {
+        fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> { panic!("seal called without an enclave") }
+        fn open(&self, _: &str, _: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> { panic!("open called without an enclave") }
+        fn hardware_available(&self) -> bool { false }
+    }
+    /// The same Mac, as the native bridge answers if it is asked anyway.
+    struct NoEnclaveBridge;
+    impl Sealer for NoEnclaveBridge {
+        fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> { Err("no Secure Enclave".into()) }
+        fn open(&self, _: &str, _: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> { Err("no Secure Enclave".into()) }
+        fn hardware_available(&self) -> bool { false }
+    }
+
+    #[test]
+    fn persisting_a_pairing_code_without_enclave_refuses_and_writes_nothing() {
+        let (dir, path, descriptor, code) = sealed_fixture(61);
+        assert!(descriptor.code.is_some());
+        let error = persist_with(&path, &descriptor, Some(&NoEnclaveSealer)).unwrap_err();
+        assert!(matches!(error, RemoteError::SecureStorageUnavailable { identity_kept: false }), "{error}");
+        assert!(!error.to_string().contains("try again"), "{error}");
+        assert!(!error.to_string().contains(&code));
+        assert!(!path.exists());
+        assert!(!path.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp")).exists());
+        assert!(!dir.path().join(REMOTE_CONFIG_DIR).exists(), "no directory or file was created");
+    }
+
+    #[test]
+    fn plaintext_code_migration_without_enclave_keeps_file_and_refuses() {
+        let (_dir, path, descriptor, _) = sealed_fixture(63);
+        persist_with(&path, &descriptor, None).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        // The saved pairing is untouched, so the refusal says it was kept, never "nothing was saved".
+        let error = load_with(&path, Some(&NoEnclaveBridge)).unwrap_err();
+        assert!(matches!(error, RemoteError::SecureStorageUnavailable { identity_kept: true }), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!path.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp")).exists());
+    }
+
+    #[test]
+    fn sealed_code_without_enclave_is_refused_not_rewritten() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        let (_dir, path, descriptor, _) = sealed_fixture(65);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        let sealed = std::fs::read(&path).unwrap();
+        assert!(load_with(&path, Some(&NoEnclaveBridge)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), sealed);
+        assert!(load_with(&path, None).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), sealed);
+    }
+
     #[test]
     fn import_view_exposes_only_a_short_node_id_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
@@ -3643,17 +3731,34 @@ mod tests {
         assert_eq!(ConnectionError::from(&RemoteError::Local("other".into())).kind, ConnectionErrorKind::Other);
     }
 
+    #[test]
+    fn secure_storage_unavailable_maps_to_its_own_connection_kind() {
+        for (identity_kept, code) in [(false, SECURE_STORAGE_UNAVAILABLE_CODE), (true, SECURE_STORAGE_KEPT_CODE)] {
+            let mapped = ConnectionError::from(&RemoteError::SecureStorageUnavailable { identity_kept });
+            assert_eq!((mapped.kind, mapped.detail.as_str()), (ConnectionErrorKind::SecureStorageUnavailable, code));
+            assert_ne!(mapped.kind, ConnectionErrorKind::DeviceUnavailable);
+            assert_ne!(mapped.detail, PASSCODE_REQUIRED_CODE);
+        }
+        assert_eq!(SECURE_STORAGE_UNAVAILABLE_CODE, "secure_storage_unavailable");
+        assert_eq!(serde_json::to_value(ConnectionErrorKind::SecureStorageUnavailable).unwrap(), "secure_storage_unavailable");
+        let text = RemoteError::SecureStorageUnavailable { identity_kept: true }.to_string();
+        assert!(text.contains("Secure Enclave") && text.contains("kept"), "{text}");
+        assert!(!text.contains("try again") && !text.to_lowercase().contains("clear"), "{text}");
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(bitsov_ffi::keychain_status::NO_SECURE_ENCLAVE, NO_SECURE_ENCLAVE);
+    }
+
     fn transport_pair() -> (TransportState, TransportState) {
         let params: snow::params::NoiseParams = NOISE_PROTOCOL.parse().unwrap();
         let initiator_secret = [41u8; 32];
         let responder_secret = [42u8; 32];
         let mut initiator = Builder::new(params.clone())
             .local_private_key(&initiator_secret)
-            .build_initiator()
+            .and_then(|b| b.build_initiator())
             .unwrap();
         let mut responder = Builder::new(params)
             .local_private_key(&responder_secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut message = vec![0u8; MAX_HANDSHAKE_FRAME];
         let mut plaintext = vec![0u8; MAX_HANDSHAKE_FRAME];
@@ -4027,7 +4132,7 @@ mod tests {
         let params = NOISE_PROTOCOL.parse().unwrap();
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
@@ -4047,7 +4152,7 @@ mod tests {
         let params = NOISE_PROTOCOL.parse().unwrap();
         let mut noise = Builder::new(params)
             .local_private_key(&secret)
-            .build_responder()
+            .and_then(|b| b.build_responder())
             .unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
@@ -4078,7 +4183,7 @@ mod tests {
     // Count socket handshakes, not requests, so losing pooling fails this test.
     async fn polling_responder(mut stream: TcpStream, secret: [u8; 32]) -> Result<(), RemoteError> {
         let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
-            .local_private_key(&secret).build_responder().unwrap();
+            .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
@@ -4302,7 +4407,7 @@ mod tests {
     // Complete the handshake and read the app's authentication request.
     async fn read_auth_request(stream: &mut TcpStream, secret: [u8; 32]) -> Result<TransportState, RemoteError> {
         let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
-            .local_private_key(&secret).build_responder().unwrap();
+            .local_private_key(&secret).and_then(|b| b.build_responder()).unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
@@ -4947,7 +5052,7 @@ mod tests {
             let key = ClientKey::load_or_create(store.path()).unwrap();
             remember_endpoint(&descriptor, &answering_endpoint);
 
-            let error = connect_authenticated(&descriptor, &key, "test phone").await.err().expect("the box refused");
+            let error = connect_authenticated(&descriptor, &key, "test phone").await.expect_err("the box refused");
             assert!(expected(&error), "{error}");
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(requests.load(Ordering::SeqCst), 1);

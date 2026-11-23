@@ -40,7 +40,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
     }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null }],
     rooms_list: () => [{ id: ROOM, name: 'Mexico build', created_by: OWN, created_at: null }],
     room_members: () => [OWN, A],
     room_quote: () => ({ room_id: ROOM, members: [{ node_id: A, msat: 2000, advertised: true, connected: true }], total_msat: 2000, unreachable: [], estimate: false }),
@@ -181,7 +181,7 @@ describe('paid, not delivered: in the conversation', () => {
   async function sendUndelivered(host: ReturnType<typeof stubHost>) {
     host.spend.v = openView();
     await openShell();
-    type('[data-composer] textarea', 'hello Maya');
+    type('[data-composer] textarea', 'hello Robin');
     submit();
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).not.toBeNull());
   }
@@ -203,9 +203,9 @@ describe('paid, not delivered: in the conversation', () => {
 
     $<HTMLButtonElement>('[data-retry-delivery]')!.click();
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
-    expect(host.used('message_retry').map((c) => c.args)).toEqual([{ recipient: A, plaintext: 'hello Maya', approved_msat: null }]);
+    expect(host.used('message_retry').map((c) => c.args)).toEqual([{ recipient: A, plaintext: 'hello Robin', approved_msat: null }]);
     expect(host.used('message_send')).toHaveLength(1);
-    await vi.waitFor(() => expect(mount.textContent).toContain('hello Maya'));
+    await vi.waitFor(() => expect(mount.textContent).toContain('hello Robin'));
   });
 
   it('offers no retry when the node did not say it will not pay again', async () => {
@@ -244,7 +244,7 @@ describe('paid, not delivered: in the conversation', () => {
     $<HTMLButtonElement>('article.msg.out .sats-meta')!.click();
     expect(text('article.msg.out')).toContain('paid 4 sats · network fee amount unknown');
     expect(host.used('message_send')).toHaveLength(1);
-    await vi.waitFor(() => expect(mount.textContent).toContain('hello Maya'));
+    await vi.waitFor(() => expect(mount.textContent).toContain('hello Robin'));
   });
 
   it('stops retrying on the owner’s word, without dispatching anything', async () => {
@@ -334,7 +334,7 @@ describe('paid, not delivered: in the conversation', () => {
     await vi.waitFor(() => expect(mount.querySelectorAll('[data-stop-retrying]')).toHaveLength(2));
     $<HTMLButtonElement>('[data-artifact="undelivered"] [data-stop-retrying]')!.click();
     await vi.waitFor(() => expect(mount.querySelectorAll('[data-stop-retrying]')).toHaveLength(0));
-    type('[data-composer] textarea', 'hello Maya'); submit();
+    type('[data-composer] textarea', 'hello Robin'); submit();
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).not.toBeNull());
     expect(mount.querySelectorAll('[data-stop-retrying]')).toHaveLength(1);
     expect(pending).toBe('attempt-2');

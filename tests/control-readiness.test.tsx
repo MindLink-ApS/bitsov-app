@@ -108,7 +108,6 @@ describe('node money readiness', () => {
       expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(true);
     }
     expect(mount.querySelectorAll('[data-money-notice]')).toHaveLength(1);
-    vi.useFakeTimers();
     status.money_ready = true;
     await vi.advanceTimersByTimeAsync(10_000);
     expect(mount.querySelector('[data-money-notice]')).toBeNull();
