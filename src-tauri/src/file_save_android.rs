@@ -37,7 +37,9 @@ pub fn download_name(filename: &str) -> String {
     };
     let ext = if raw_ext.is_empty() { String::new() } else {
         let clean = act::safe_save_name(raw_ext);
-        if clean == "file" { String::new() } else { format!(".{clean}") }
+        // "file" is also the cleaner's fallback for nothing usable: drop it then,
+        // but keep a genuine ".file" extension.
+        if clean == "file" && raw_ext.trim() != "file" { String::new() } else { format!(".{clean}") }
     };
     let stem = act::safe_save_name(raw_stem);
     let mut end = stem.len().min(MAX_BYTES - ext.len() - SUFFIX_ROOM);
@@ -144,6 +146,9 @@ mod tests {
         assert!(cjk.len() + " (99)".len() <= 255, "{} bytes", cjk.len());
         assert_eq!(download_name("report.pdf"), "report.pdf");
         assert_eq!(download_name("notes"), "notes");
+        // A genuine ".file" extension is kept; one that cleans to nothing is dropped.
+        assert_eq!(download_name("data.file"), "data.file");
+        assert_eq!(download_name("notes.  "), "notes");
     }
 
     #[test]
