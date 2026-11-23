@@ -69,7 +69,7 @@ fn refusal(status: u16) -> ActionError {
     let message = match status {
         403 => "Only an enrolled owner device can add devices. This pairing or approval key is not authorized, or was revoked.",
         404 | 405 => "This node does not support this device request, or the request expired, was used, or was cancelled. Start again.",
-        409 | 410 => "This ticket or device request expired, was already used, or the node restarted. Start again with a new ticket.",
+        409 | 410 => "This ticket or device request expired, was already used, or your box restarted. Start again with a new ticket.",
         429 => "Too many device requests. Wait before trying again; the node allows five tickets in 15 minutes.",
         _ => "The node did not confirm the device request. Check the connection before trying again.",
     };
@@ -457,7 +457,7 @@ fn enrollment_refusal(status: u16, finalizing: bool) -> ActionError {
         403 if finalizing => "The comparison could not be verified. Check the 18-character claim code provided by your node's owner or printed on a BitSov box's sticker. Cancel the pending setup before trying again.",
         403 => "This pairing cannot enroll an owner device, or setup is closed. Use an enrolled owner device and check that the home node is unlocked.",
         404 | 405 => "This node does not support this enrollment request, or the request was lost. Cancel pending setup and reconnect.",
-        409 | 410 => "The enrollment expired or the node restarted. Cancel pending setup and start again.",
+        409 | 410 => "The enrollment expired or your box restarted. Cancel pending setup and start again.",
         429 => "Another enrollment is pending, or requests are too frequent. Finish or cancel it on the joining device, or wait up to 15 minutes for it to expire.",
         _ => "The node did not confirm enrollment. Check its connection before trying again.",
     });
@@ -639,7 +639,7 @@ pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platfo
             || Instant::now() >= j.deadline
         {
             setup.join = None;
-            return Err(ActionError::new("enrollment_restart", "This enrollment expired, was cancelled, or the node restarted. Cancel any pending setup and start again."));
+            return Err(ActionError::new("enrollment_restart", "This enrollment expired, was cancelled, or your box restarted. Cancel any pending setup and start again."));
         }
         if matches!(input, JoinInput::Status | JoinInput::Poll) {
             return Ok(j.view());

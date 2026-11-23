@@ -31,9 +31,9 @@ it('updates onboarding status labels when the language changes', () => {
     pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}} />);
   expect(root.querySelector('[data-step="node"]')?.textContent).toContain('now');
   setLanguagePref('da');
-  expect(root.querySelector('[data-step="node"] .step-label')?.textContent).toBe('Start node');
+  expect(root.querySelector('[data-step="node"] .step-label')?.textContent).toBe('Start din boks');
   expect(root.querySelector('[data-step="node"] .step-status')?.textContent).toBe('nu');
-  expect(root.querySelector('h1')?.textContent).toBe('Hvor skal din node køre?');
+  expect(root.querySelector('h1')?.textContent).toBe('Hvor skal din boks køre?');
 });
 it('localizes local ticket validation while preserving host errors', async () => {
   setLanguagePref('da');

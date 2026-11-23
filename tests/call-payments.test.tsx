@@ -289,7 +289,7 @@ describe('paying the minutes of one outgoing call', () => {
   });
 
   // The refusal a real node gives while its chain source is silent.
-  const NOT_READY = 'Money is not ready yet. Your node will retry automatically.';
+  const NOT_READY = 'Money is not ready yet. Your box will retry automatically.';
 
   it('a minute refused for a passing reason keeps the call: tried again, paid once when it clears', async () => {
     for (const code of ['not_ready', 'peer_not_ready', 'grant_rate_limited', 'grant_velocity', 'call_liquidity_unavailable']) {
@@ -3150,7 +3150,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
   it('money not ready does not end the call: the shell holds the minute until the node reads ready, then it is paid once', async () => {
     let refusals = 1;
     const host = stubHost({ block: (args) => {
-      if (refusals-- > 0) throw { code: 'not_ready', message: 'Money is not ready yet. Your node will retry automatically.' };
+      if (refusals-- > 0) throw { code: 'not_ready', message: 'Money is not ready yet. Your box will retry automatically.' };
       const seq = (args as { seq: number }).seq;
       host.node.settle(seq);
       return receipt(seq);

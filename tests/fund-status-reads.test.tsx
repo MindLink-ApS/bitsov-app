@@ -332,8 +332,8 @@ it('closing settings only hides the wallet; reopening shows the same live panel'
 });
 
 it.each([
-  ['en', 'about 600 sats', ' of about 1 000 sats seen', 'Your node observed about 1 000 sats'],
-  ['da', 'ca. 600 sats', ' af ca. 1 000 sats registreret', 'Din node har registreret ca. 1 000 sats'],
+  ['en', 'about 600 sats', ' of about 1 000 sats seen', 'Your box observed about 1 000 sats'],
+  ['da', 'ca. 600 sats', ' af ca. 1 000 sats registreret', 'Din boks har registreret ca. 1 000 sats'],
 ] as const)('rounds received down and required up at fractional sats (%s)', async (lang, received, required, observed) => {
   vi.useFakeTimers();
   const host = stubHost();

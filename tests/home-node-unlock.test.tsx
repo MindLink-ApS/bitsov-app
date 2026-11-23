@@ -57,7 +57,7 @@ it('shows passive host failures on a locked node without requesting credentials'
 it('shows the locked badge and biometric unlock action on mobile', () => {
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode mobile typedUnlockSupported onUnlock={async () => {}} />, mount);
-  expect(mount.querySelector('[data-locked-badge]')?.textContent).toBe('Node locked');
+  expect(mount.querySelector('[data-locked-badge]')?.textContent).toBe('Box locked');
   expect([...mount.querySelectorAll('button')].some(
     button => button.textContent === 'Unlock with biometrics',
   )).toBe(true);
@@ -67,7 +67,7 @@ it('shows the locked badge and biometric unlock action on mobile', () => {
 it('does not offer typing without the host capability', () => {
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
-  expect(buttonNamed(mount, 'Type your node password instead')).toBeUndefined();
+  expect(buttonNamed(mount, 'Type your box password instead')).toBeUndefined();
   expect(mount.querySelector('input[type="password"]')).toBeNull();
   expect(mount.textContent).not.toContain('Remember on this phone');
 });
@@ -78,10 +78,10 @@ it('lets an Android owner type the node password, then clears the field', async 
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode mobile typedUnlockSupported onUnlock={async () => {}} onUnlockWithPassword={async (password) => { typed.push(password); }} />, mount);
   expect(mount.querySelector('input[type="password"]')).toBeNull();
-  buttonNamed(mount, 'Type your node password instead')!.click();
+  buttonNamed(mount, 'Type your box password instead')!.click();
   const input = typePassword(mount, 'correct horse');
   expect(input.type).toBe('password');
-  expect(mount.textContent).toContain('Your node checks it. This phone keeps it only in memory, unless you then choose to remember it here behind biometrics.');
+  expect(mount.textContent).toContain('Your box checks it. This phone keeps it only in memory, unless you then choose to remember it here behind biometrics.');
   buttonNamed(mount, 'Unlock with password')!.click();
   await vi.waitFor(() => expect(typed).toEqual(['correct horse']));
   expect(input.value).toBe('');
@@ -92,9 +92,9 @@ it('refuses an empty typed password without calling the host', async () => {
   const onUnlockWithPassword = vi.fn(async () => {});
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode mobile typedUnlockSupported onUnlock={async () => {}} onUnlockWithPassword={onUnlockWithPassword} />, mount);
-  buttonNamed(mount, 'Type your node password instead')!.click();
+  buttonNamed(mount, 'Type your box password instead')!.click();
   buttonNamed(mount, 'Unlock with password')!.click();
-  await vi.waitFor(() => expect(mount.querySelector('[role="alert"]')?.textContent).toBe('Type the password you chose for your home node.'));
+  await vi.waitFor(() => expect(mount.querySelector('[role="alert"]')?.textContent).toBe('Type the password you chose for your box.'));
   expect(onUnlockWithPassword).not.toHaveBeenCalled();
 });
 
@@ -156,7 +156,7 @@ it.each(['Android', 'Mac'])('on %s, unlocks with a typed password and asks to re
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <App />, mount);
   await vi.waitFor(() => expect(buttonNamed(mount, mobile ? 'Unlock with biometrics' : 'Unlock with Touch ID')).toBeDefined());
-  buttonNamed(mount, 'Type your node password instead')!.click();
+  buttonNamed(mount, 'Type your box password instead')!.click();
   typePassword(mount, 'correct horse');
   buttonNamed(mount, 'Unlock with password')!.click();
   await vi.waitFor(() => expect(mount.querySelector('[data-node-locked]')).toBeNull());
@@ -246,7 +246,7 @@ it('can cancel the automatically opened no-password form', async () => {
   typePassword(mount, 'clear on cancel');
   buttonNamed(mount, 'Cancel')!.click();
   expect(mount.querySelector('input[type="password"]')).toBeNull();
-  buttonNamed(mount, 'Type your node password instead')!.click();
+  buttonNamed(mount, 'Type your box password instead')!.click();
   expect(mount.querySelector<HTMLInputElement>('input')!.value).toBe('');
 });
 

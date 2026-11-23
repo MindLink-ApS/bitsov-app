@@ -401,11 +401,11 @@ describe('invisible payments in the composer and the context panel', () => {
     expect($('[data-composer]')?.textContent).not.toContain('Approval needed');
     expect(host.used('budget_approve')).toHaveLength(0);
     host.emit('closed');
-    await waitFor(() => expect(mount.textContent).toContain('live feed reconnecting'));
+    await waitFor(() => expect(mount.textContent).toContain('live updates are reconnecting'));
     host.state.budget = budgetView(); // Node revoked the grant during its restart.
     host.emit('open');
     await waitFor(() => expect($('[data-budget="off"]')).not.toBeNull(), { timeout: 500 });
-    expect(mount.textContent).not.toContain('live feed reconnecting');
+    expect(mount.textContent).not.toContain('live updates are reconnecting');
     expect(host.used('message_send')).toHaveLength(0);
   });
 
@@ -457,9 +457,9 @@ describe('invisible payments in the composer and the context panel', () => {
   });
 
   it.each([
-    ['en', 'device_remote_unsupported', "Your node can't take device approvals over remote access yet. Nothing was approved. Update your node, or approve at the node."],
-    ['en', 'device_unsupported', 'This node version does not take device approvals. Approve at the node instead.'],
-    ['da', 'device_remote_unsupported', 'Din node kan endnu ikke modtage enhedsgodkendelser via fjernadgang. Intet blev godkendt. Opdater din node, eller godkend direkte på noden.'],
+    ['en', 'device_remote_unsupported', "Your box can't take device approvals over remote access yet. Nothing was approved. Update your box, or approve at the box."],
+    ['en', 'device_unsupported', 'This box version does not take device approvals. Approve on your box instead.'],
+    ['da', 'device_remote_unsupported', 'Din boks kan endnu ikke modtage enhedsgodkendelser via fjernadgang. Intet blev godkendt. Opdater din boks, eller godkend direkte på boksen.'],
     ['en', 'device_cancelled', 'Touch ID was cancelled.'],
     ['en', 'node', 'The node could not be reached.'],
   ] as const)('shows a %s %s approval failure in budget mode and keeps the draft', async (lang, code, expected) => {

@@ -3,7 +3,7 @@ import type { Source } from './source';
 import type { NodeOverview } from './types';
 import { ago } from './format';
 
-export const MONEY_NOT_READY = 'Money is not ready yet. Your node will retry automatically.';
+export const MONEY_NOT_READY = 'Money is not ready yet. Your box will retry automatically.';
 
 /** Every app operation that can prepare or dispatch money. Reads and cancellation stay usable. */
 const moneyMethods = new Set<keyof Source>([

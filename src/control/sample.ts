@@ -1090,7 +1090,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         available: true,
         state: 'pending',
         fingerprint: '3F9A-12C4-77B0-E51D',
-        owner_action: 'konsensus device approve --op 7c2e91d04b5a3f6e8d1c0b2a --config /Users/you/bitsov/konsensus.toml',
+        owner_action: 'konsensus device approve --op 7c2e91d04b5a3f6e8d1c0b2a --config bitsov/konsensus.toml',
         expires_at_ms: Date.now() + 15 * 60_000,
       };
       return ok(device);
@@ -1276,17 +1276,17 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     callHold: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     voiceNote: async (messageId) => {
       const note = voiceNotes.get(messageId);
-      return note ? note : refuse('invalid', 'voice note not stored on this node');
+      return note ? note : refuse('invalid', 'voice note not stored on this box');
     },
     fileFetch: async (messageId) => {
       const file = receivedFiles.get(messageId);
-      if (!file) return refuse('invalid', 'file not stored on this node');
+      if (!file) return refuse('invalid', 'file not stored on this box');
       if (file.size_bytes > 1_400_000) return refuse('invalid', 'file over 1.4 MB');
       return file;
     },
     fileSave: async (messageId) => {
       const file = receivedFiles.get(messageId);
-      if (!file) return refuse('invalid', 'file not stored on this node');
+      if (!file) return refuse('invalid', 'file not stored on this box');
       if (file.size_bytes > 1_400_000) return refuse('invalid', 'file over 1.4 MB');
       // Sample has no native dialog: treat as saved (tests inject their own host).
       const result: FileSaveResult = { saved: true, filename: file.filename, mime_type: file.mime_type, size_bytes: file.size_bytes };
