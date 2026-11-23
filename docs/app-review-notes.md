@@ -5,7 +5,7 @@
 BitSov is a non-custodial remote control for the user's own Lightning node.
 The node holds the wallet keys and executes payments. The phone is a client,
 not a Lightning node. On Mac, the user can also run their own local node.
-MindLink does not hold the user's funds. A user who chooses a third-party
+The BitSov project does not hold the user's funds. A user who chooses a third-party
 node host must trust that host, as explained in onboarding.
 
 For paid messages, 100% of the per-message sats go to the recipient's node.
@@ -15,7 +15,7 @@ go node to node. There are no in-app purchases, app credits, paid feature
 unlocks or project revenue in the app. Spending approvals authorize the
 user's node to spend their own funds; they are not purchases of app access.
 An optional, user-configured remote AI provider can bill the user's own
-provider account outside the app; MindLink receives no share.
+provider account outside the app; the BitSov project receives no share.
 
 The iOS background audio mode is used only for live calls, including
 reconnection of an existing live call. It is released when the call ends.
@@ -58,7 +58,7 @@ instructions must match the actual submitted build and node capabilities.
 BitSov er en fjernbetjening uden depotfunktion til brugerens egen
 Lightning-node. Noden opbevarer wallet-nøglerne og udfører betalinger.
 Telefonen er en klient, ikke en Lightning-node. På Mac kan brugeren også
-køre sin egen lokale node. MindLink opbevarer ikke brugerens penge. En
+køre sin egen lokale node. BitSov-projektet opbevarer ikke brugerens penge. En
 bruger, som vælger en ekstern vært til noden, skal stole på værten, som
 forklaret under opsætningen.
 
@@ -70,7 +70,7 @@ betalte funktionsoplåsninger eller projektindtægter i appen.
 Forbrugsgodkendelser tillader noden at bruge brugerens egne penge; de er
 ikke køb af adgang til appen. En valgfri ekstern AI-udbyder, som brugeren
 selv konfigurerer, kan fakturere brugerens egen udbyderkonto uden for
-appen; MindLink modtager ingen andel.
+appen; BitSov-projektet modtager ingen andel.
 
 iOS-baggrundslyd bruges kun til aktive opkald, herunder genoprettelse af
 et eksisterende aktivt opkald. Lydsessionen frigives, når opkaldet slutter.

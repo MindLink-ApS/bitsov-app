@@ -7,7 +7,7 @@
 BitSov is a non-custodial client for your own Lightning node. Your phone or computer controls that node; the phone does not run a Lightning node. A Mac can
 also run a local node. Windows and Linux builds are previews that connect to a node you
 already run. The node holds the wallet and Lightning keys, and
-executes payments. MindLink does not take custody of your funds through
+executes payments. The BitSov project does not take custody of your funds through
 the app. If someone else hosts your node, that host has access to the
 machine holding your keys: use a host you trust.
 
@@ -36,7 +36,7 @@ watch settings locally. The app does not persist its raw AI disclosure
 request bodies in that history. Messages and files are read from your
 node for display; files you explicitly save remain on your device. Local
 diagnostic output may also be produced. This is not an automatic upload
-to MindLink.
+to the BitSov project.
 
 ### What goes where
 
@@ -48,7 +48,7 @@ to MindLink.
 - **Payments:** Lightning payments go from your node to the recipient's
   node over the Lightning network. The per-message payment goes 100% to
   the recipient's node. Separate routing fees and, when required, the
-  recipient's admission charge may apply. MindLink takes no in-app cut.
+  recipient's admission charge may apply. The BitSov project takes no in-app cut.
   Your node also makes its own Bitcoin and Lightning network connections;
   a local node's configuration can include external blockchain services.
   The app's local-node setup configuration names Blockstream and
@@ -78,7 +78,7 @@ to MindLink.
 ### Analytics, retention and contact
 
 The app includes no analytics SDKs, advertising trackers or automatic
-crash-report uploads. It does not send usage telemetry to MindLink.
+crash-report uploads. It does not send usage telemetry to the BitSov project.
 Optional AI requests, calls and website visits described above are
 separate from analytics.
 
@@ -101,7 +101,7 @@ BitSov er en klient uden depotfunktion til din egen Lightning-node. Din
 telefon eller computer styrer noden; telefonen kører ikke en Lightning-node.
 En Mac kan også køre en lokal node. Windows- og Linux-versionerne er prøveversioner,
 der forbinder til en node, du allerede kører. Noden opbevarer wallet- og
-Lightning-nøglerne og udfører betalinger. MindLink overtager ikke dine
+Lightning-nøglerne og udfører betalinger. BitSov-projektet overtager ikke dine
 penge gennem appen. Hvis andre er vært for din node, har de adgang til
 maskinen med dine nøgler: brug en vært, du stoler på.
 
@@ -131,7 +131,7 @@ Assistenten på Mac kan gemme krypteret historik over spørgsmål og svar
 samt overvågningsindstillinger lokalt. Appen gemmer ikke de rå
 AI-anmodninger i denne historik. Beskeder og filer hentes fra din node
 til visning; filer, du selv gemmer, bliver på din enhed. Der kan også
-blive dannet lokalt diagnoseoutput. Det sendes ikke automatisk til MindLink.
+blive dannet lokalt diagnoseoutput. Det sendes ikke automatisk til BitSov-projektet.
 
 ### Hvad sendes hvorhen
 
@@ -143,7 +143,7 @@ blive dannet lokalt diagnoseoutput. Det sendes ikke automatisk til MindLink.
 - **Betalinger:** Lightning-betalinger går fra din node til modtagerens
   node gennem Lightning-netværket. Betalingen pr. besked går 100 % til
   modtagerens node. Separate routinggebyrer og eventuelt modtagerens
-  adgangsbetaling kan komme oveni. MindLink tager ingen andel i appen.
+  adgangsbetaling kan komme oveni. BitSov-projektet tager ingen andel i appen.
   Din node opretter også sine egne forbindelser til Bitcoin- og
   Lightning-netværket; en lokal nodes konfiguration kan omfatte eksterne
   blockchain-tjenester. Appens konfiguration til lokal nodeopsætning
@@ -173,7 +173,7 @@ blive dannet lokalt diagnoseoutput. Det sendes ikke automatisk til MindLink.
 ### Analyse, opbevaring og kontakt
 
 Appen indeholder ingen analyse-SDK'er, reklamesporing eller automatiske
-uploads af fejlrapporter. Den sender ikke brugsstatistik til MindLink.
+uploads af fejlrapporter. Den sender ikke brugsstatistik til BitSov-projektet.
 Valgfrie AI-anmodninger, opkald og hjemmesidebesøg beskrevet ovenfor er
 adskilt fra brugsanalyse.
 
