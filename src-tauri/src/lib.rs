@@ -49,6 +49,7 @@ pub mod home_node;
 
 mod app;
 mod phone_recovery;
+mod file_save_android;
 
 #[cfg(any(target_os = "android", test))]
 mod android_network;
