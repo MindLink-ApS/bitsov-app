@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an unsigned, local-only arm64 remote signet test archive."""
+"""Build an ad-hoc sealed (not identity-signed), local-only arm64 remote signet test archive."""
 import argparse
 from contextlib import contextmanager
 import fcntl
@@ -229,6 +229,15 @@ def verify_bundle(app):
         raise RuntimeError("The app executable must contain only arm64 code.")
 
 
+def verify_seal(app):
+    # The linker signs only the executable. Without a sealed bundle, macOS can
+    # report a downloaded copy as damaged instead of offering Open.
+    try:
+        probe(["codesign", "--verify", "--deep", "--strict", str(app)], app.parent)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError("The sealed app bundle does not verify.") from error
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -277,8 +286,11 @@ def build(root, target, output):
     check_inputs(root)
     check_source(root, commit, env=env)
     verify_bundle(app)
+    # Ad-hoc seal only: no signing identity, keychain or notarization.
+    run(["codesign", "--force", "--deep", "--sign", "-", str(app)], root, env, deadline, gate=False)
+    verify_seal(app)
     metadata = {"commit": commit, "target": TARGET, "profile": "remote-only-signet",
-                "signing": "none", "versions": {
+                "signing": "ad-hoc", "versions": {
                     name: probe(command, root / "src-tauri" if name in ("rustc", "cargo") else root, env)
                     for name, command in (
                         ("rustc", ["rustc", "--version"]), ("cargo", ["cargo", "--version"]),
