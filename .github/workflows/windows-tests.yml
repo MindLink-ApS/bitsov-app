@@ -107,7 +107,9 @@ jobs:
               '@echo off',
               "cd /d `"$dir`"",
               "`"$exe`" $argline > `"$out`" 2>&1",
-              "echo %ERRORLEVEL%> `"$done`"")
+              # Parenthesised: a bare "echo 0> file" makes cmd read "0>" as a
+              # redirect of handle 0, so a passing run wrote no exit code.
+              "(echo %ERRORLEVEL%)> `"$done`"")
             $task = "bitsov-test-$name"
             $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument "/c `"$wrapper`""
             Register-ScheduledTask -TaskName $task -Action $action -Settings $settings `
