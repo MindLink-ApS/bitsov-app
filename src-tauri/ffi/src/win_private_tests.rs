@@ -237,6 +237,15 @@ fn widened_access_lists_are_refused_and_left_unchanged() {
                 assert!(result.is_err(), "{sddl}");
                 continue;
             }
+            // Windows merges two identical allow entries when it stores the
+            // descriptor, so this fixture may reach disk with one entry. The
+            // duplicate rule itself is covered by the private_policy tests.
+            if *why == Refusal::ExtraAce {
+                if let Err(error) = result {
+                    assert_eq!(refusal(&error), Some(Refusal::ExtraAce), "{error}");
+                }
+                continue;
+            }
             assert_refused(result, *why);
         }
         // The OS also denies the owner's own read of these two; their content
