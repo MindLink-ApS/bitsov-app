@@ -18,19 +18,38 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-fn storage_error(status: i32) -> String {
-    match status {
-        -3 => "protected blob is invalid or belongs to another Mac; clear <app data dir>/app-client/ and pair again".into(),
-        code => format!("Secure Enclave or Keychain storage is temporarily unavailable ({code}); try again"),
+/// Why protected storage refused. Only the fixed text crosses to callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageError {
+    /// This device has no Secure Enclave. Permanent; retrying cannot help.
+    SecureStorageUnavailable,
+    Failed(String),
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SecureStorageUnavailable => f.write_str(crate::keychain_status::NO_SECURE_ENCLAVE),
+            Self::Failed(message) => f.write_str(message),
+        }
     }
 }
 
-fn crypt(sealing: bool, purpose: &str, input: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+fn storage_error(status: i32) -> StorageError {
+    StorageError::Failed(match status {
+        -1 => return StorageError::SecureStorageUnavailable,
+        -3 => "protected blob is invalid or belongs to another Mac; clear <app data dir>/app-client/ and pair again".into(),
+        code => format!("Secure Enclave or Keychain storage is temporarily unavailable ({code}); try again"),
+    })
+}
+
+fn crypt(sealing: bool, purpose: &str, input: &[u8]) -> Result<Zeroizing<Vec<u8>>, StorageError> {
+    let invalid = |message: &str| StorageError::Failed(message.into());
     let limit = if sealing { MAX_PLAIN } else { MAX_SEALED };
     if input.is_empty() || input.len() > limit || purpose.is_empty() || purpose.len() > 256 {
-        return Err("invalid protected storage input".into());
+        return Err(invalid("invalid protected storage input"));
     }
-    let purpose = CString::new(purpose).map_err(|_| "invalid protected storage purpose")?;
+    let purpose = CString::new(purpose).map_err(|_| invalid("invalid protected storage purpose"))?;
     let mut output = Zeroizing::new(vec![0; if sealing { MAX_SEALED } else { MAX_PLAIN }]);
     let mut length = 0;
     // SAFETY: all buffers are live for this synchronous call; Swift checks
@@ -50,18 +69,26 @@ fn crypt(sealing: bool, purpose: &str, input: &[u8]) -> Result<Zeroizing<Vec<u8>
         return Err(storage_error(status));
     }
     if length == 0 || length > output.len() {
-        return Err("invalid protected storage output length".into());
+        return Err(invalid("invalid protected storage output length"));
     }
     output.truncate(length);
     Ok(output)
 }
 
-pub fn seal(purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+pub fn try_seal(purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, StorageError> {
     crypt(true, purpose, plaintext).map(|bytes| bytes.to_vec())
 }
 
-pub fn open(purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+pub fn try_open(purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, StorageError> {
     crypt(false, purpose, sealed)
+}
+
+pub fn seal(purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    try_seal(purpose, plaintext).map_err(|error| error.to_string())
+}
+
+pub fn open(purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+    try_open(purpose, sealed).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -73,7 +100,7 @@ mod tests {
         let purpose = "client-ed25519-seed-v1";
         let plain = [42; 32];
         if !crate::device_key::enclave_available() {
-            assert!(seal(purpose, &plain).unwrap_err().contains("try again"));
+            assert_eq!(try_seal(purpose, &plain).unwrap_err(), StorageError::SecureStorageUnavailable);
             return;
         }
         let sealed = seal(purpose, &plain).expect("prompt-free enclave seal");
@@ -95,15 +122,28 @@ mod tests {
 
     #[test]
     fn only_invalid_blobs_recommend_clearing_the_pairing_folder() {
-        let invalid = storage_error(-3);
+        let invalid = storage_error(-3).to_string();
         assert!(invalid.contains("<app data dir>/app-client/"));
         assert!(invalid.contains("pair again"));
-        for status in [-1, -2, -6, -25308, -25291, -50] {
-            let temporary = storage_error(status);
+        for status in [-2, -6, -25308, -25291, -50] {
+            let temporary = storage_error(status).to_string();
             assert!(temporary.contains("try again"), "{temporary}");
             assert!(!temporary.to_lowercase().contains("clear"), "{temporary}");
             assert!(!temporary.contains("another Mac"), "{temporary}");
         }
+    }
+
+    #[test]
+    fn no_enclave_status_is_permanent_not_try_again() {
+        let missing = storage_error(-1);
+        assert_eq!(missing, StorageError::SecureStorageUnavailable);
+        let text = missing.to_string();
+        assert!(text.contains("Secure Enclave"), "{text}");
+        for word in ["temporarily", "try again", "clear", "delete"] {
+            assert!(!text.to_lowercase().contains(word), "{text}");
+        }
+        assert!(matches!(storage_error(-3), StorageError::Failed(_)));
+        assert!(storage_error(-6).to_string().contains("try again"));
     }
 
     #[test]

@@ -80,29 +80,78 @@ The checker requires `--arch`, including when all paths are supplied. For the
 implicit ARM package, also pass
 `--app src-tauri/target/release/bundle/macos/BitSov.app`.
 
-### Manual Intel CI artifact
+### Local Intel remote-only archive build
 
-`.github/workflows/mac-package-intel.yml` is a separate workflow with only
-`workflow_dispatch`. It has no push, pull-request, tag or schedule trigger.
-Additional Intel runner use remains an operator decision; adding this file
-does not start an Intel build. The existing ARM workflow is unchanged.
-The native runner is `macos-15-intel`, as listed in the
-[hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+The local preview uses the existing `tech.mindlink.bitsov.remotetest` identifier
+and `BitSov Remote Test` product. That immutable identifier selects the existing
+signet-only, remote-only policy. `--beta` is a different profile and still
+bundles a node. The local wrapper passes `--remote-only` to the existing package
+script; it neither downloads nor bundles a node and needs no GitHub credentials.
 
-When manually dispatched, it uses the existing ad-hoc packaging path, then
-verifies the final resource seal and archives the app and Intel DMG. It uses
-only a read-only workflow token for downloads, with no signing credentials,
-notarization or release publication. It uploads
-`bitsov-unsigned-macos-x86_64-<full-source-sha>` for seven days, containing
-`BitSov-unsigned-macos-x86_64.app.zip`, the `_x86_64.dmg`, `build-info.txt`
-(source SHA, target, node release/asset/source checksum and tool versions)
-and archive `SHA256SUMS`. The `unsigned` name follows the ARM artifact's
-convention; the bundle is ad-hoc signed.
+On the source-producing checkout, choose the exact reviewed commit and create a
+source archive, recording its full SHA separately:
 
-This workflow does not launch the app or run the hardware-dependent Keychain
-smoke. A native package build does not establish protected-storage support,
-pairing or runtime acceptance on a physical Intel Mac. Those checks and the
-sidecar's printed `minos` still need acceptance evidence on supported hardware.
+```bash
+source_sha=$(git rev-parse HEAD)
+git archive --format=tar "$source_sha" | gzip > "bitsov-source-$source_sha.tar.gz"
+printf '%s\n' "$source_sha"
+```
+
+Transfer that archive and SHA through the approved private channel. On the
+native Intel build host, extract it into an otherwise empty directory and run:
+
+```bash
+export CARGO_BUILD_JOBS=2
+export CARGO_TARGET_DIR="$PWD/local-target"
+bash scripts/build-local-mac-intel.sh <full-source-sha>
+```
+
+Replace `<full-source-sha>` with the producer's full 40-character lowercase SHA.
+The extracted source needs no `.git` directory. The argument records producer
+provenance; it cannot authenticate an archive by itself. The operator must
+supply the exact reviewed archive. Requires native Intel macOS, Node 22,
+Rust/Cargo with the `x86_64-apple-darwin` target, Python 3, and Apple Command Line
+Tools (`xcrun clang`, `codesign`, `ditto`, `otool`, `hdiutil`, and `plutil`). Full
+Xcode, `gh`, `gpg`, Rustup and Git are not required on this build path. Package
+installation still needs registry access for locked npm/Cargo dependencies.
+
+The wrapper refuses other hosts, Rosetta, failed translation probes, missing or
+malformed SHAs, the wrong profile configuration, wrong bundle identity, and a
+node anywhere in the remote-only bundle. It always selects ad-hoc signing and
+no notarization, regardless of inherited `BITSOV_MAC_*` signing settings. The
+existing resource-seal and strict signature verification run before packaging.
+It never launches the app or node and never uploads artifacts.
+
+Outputs sit together in
+`<target-dir>/x86_64-apple-darwin/release/bundle/dmg/`:
+
+- `BitSov_<version>_x86_64.dmg`
+- `BitSov-remote-test-macos-x86_64.app.zip`
+- `build-info.txt`: supplied full source SHA, actual bundle identifier/product,
+  checked app architecture, plist deployment minimum, each Mach-O deployment
+  minimum (including legacy load commands), Node/npm/Rust/Cargo/Clang/macOS
+  versions, selected profile, and SHA256 hashes of its source selector/config.
+- `SHA256SUMS`: DMG, app ZIP and build-info hashes, verified before success.
+
+Verify the same manifest again after copying the artifacts:
+
+```bash
+shasum -a 256 -c SHA256SUMS
+```
+
+Stop on any mismatch. Missing deployment-minimum metadata or failed toolchain
+version collection also stops the wrapper. The receipt reports build evidence;
+it does not establish runtime compatibility or protected-storage support.
+Keep artifacts private for no more than seven days. Local build operation is
+limited to one run at a time, eight runs per day across platforms and 90 minutes
+per run; the operator stops and records an overlong run.
+
+### Manual Intel CI artifact (separate product path)
+
+The existing `.github/workflows/mac-package-intel.yml` remains manual-only and
+builds the ordinary product profile. It is not the remote-only local preview.
+Do not dispatch it for local preview work: no hosted runner is authorized for
+this path. No workflow triggers or permissions are changed.
 
 `python3 scripts/test-package-mac-arch.py` exercises native target selection,
 custom output roots, source-asset selection and architecture refusals offline.
@@ -346,7 +395,7 @@ tested support claim. Recheck the rc24 sidecar minos in CI using its published s
 ## CI artifact
 
 `.github/workflows/mac-package.yml` ("Mac Package") does not run on every
-push to `main`. macos-14 is billed at 10× Linux, so the ad-hoc signed Tauri
+push to `main`. The ad-hoc signed app
 bundle runs nightly (05:00 UTC, default branch), on `v*` tags, on
 `workflow_dispatch`, and on a pull request when `full-ci` is added. The
 label sticks: later pushes to that PR build again. Adding or removing any
@@ -360,7 +409,7 @@ unsupported previews. These packaging jobs are not required checks.
   `contents: read` only. It uses `github.token` read-only for `gh release download`.
 - Fetches the pinned sidecar and explicitly re-verifies all sidecars before
   `scripts/package-mac.sh --dmg --use-existing-sidecar`. The offline checker
-  unit tests run on Linux in Authority Check, not on this 10× runner. The
+  unit tests run on Linux. The
   package script and Tauri hook re-check the sidecars too.
   The package script compares the bundled node to the source before signing.
   Before zipping, CI requires the resource seal and repeats strict signature
@@ -406,86 +455,29 @@ directory. Do not run it next to another BitSov app instance.
 
 ## Intel Mac tester install (not ready yet)
 
-> **Do not install this build yet.** This package bundles a node and starts
-> it on first launch (see above). The bundled node release creates a
-> **mainnet** configuration by default, and this app does not yet force or
-> check signet. Wait until a beta build is pinned to signet before following
-> these steps. Until then, these steps are a draft for that build.
+> **Installation remains on hold.** The local remote-only build path above
+> produces private operator artifacts, not a tester handoff. No successful
+> native build or physical Intel acceptance is established by these instructions.
 
-Use an Intel (`x86_64`) Mac and a **signet node only** for this preview.
-Intel packaging is proposed in [#482](https://github.com/MindLink-ApS/bitsov-app/pull/482);
-until a successful **Mac Package Intel** run supplies the artifact below, there
-is no Intel download to install from these instructions. The existing arm64
-artifact is for Apple Silicon. Intel runtime compatibility and the minimum
-supported macOS version still need validation on physical hardware.
+Use the [local Intel archive path](#local-intel-remote-only-archive-build) for
+packaging. Do not substitute an ARM artifact, the ordinary product app, or the
+separate `--beta` profile. A handoff needs the exact reviewed source SHA,
+verified `SHA256SUMS`, matching remote test identifier/product, and both plist
+and Mach-O minimum-OS evidence for the intended machine.
 
-1. **Check for T2 before installing.** In Terminal, run this read-only command:
+The initial build host has Intel i7 hardware, macOS 13.7.8, Apple T1 and Command
+Line Tools only. The intended host toolchain is Homebrew Rust 1.99.1 and Node
+22.17.1. These are build inputs, not evidence of a completed build or a supported
+minimum OS. T1 does not provide the T2/Secure Enclave pairing path. Building a
+package does not authorize pairing, installation or a fallback store on that
+host; protected-storage support remains a separate prerequisite.
 
-   ```bash
-   system_profiler SPiBridgeDataType
-   ```
-
-   Look for **Apple T2 Security Chip**. If it is absent or the result is
-   unclear, stop and report the hardware result before trying to pair. The
-   current ad-hoc app requires a Secure Enclave for pairing; an Intel Mac
-   without T2 cannot use that pairing path. T2 presence does not establish
-   that the app works on that Mac, and does not mean Touch ID is available.
-
-2. **Download the Intel artifact.** In this repository's **Actions → Mac
-   Package Intel**, open the successful run for the intended source commit.
-   Under **Summary → Artifacts**, download
-   `bitsov-unsigned-macos-x86_64-<full-source-sha>`, matching the run's full
-   commit SHA. The proposed artifact is retained for seven days and contains
-   `BitSov-unsigned-macos-x86_64.app.zip`, an `_x86_64.dmg`, `build-info.txt`
-   and `SHA256SUMS`. If it is missing or expired, request a new artifact;
-   do not substitute the arm64 build.
-
-3. **Unzip and install.** Open the downloaded artifact ZIP in Finder. In the
-   extracted folder, check that `build-info.txt` names the intended source
-   SHA and `x86_64-apple-darwin` target. In Terminal, change to that folder
-   and verify its files before continuing:
-
-   ```bash
-   shasum -a 256 -c SHA256SUMS
-   ```
-
-   Stop if any checksum differs. Unzip
-   `BitSov-unsigned-macos-x86_64.app.zip`, then drag the extracted
-   `BitSov.app` into `/Applications`. Quit any other BitSov instance first;
-   this app uses the normal application data directory. Use a separate macOS
-   test account if this Mac already has a BitSov installation you need to keep.
-
-4. **Clear quarantine for this copy.** The preview is ad-hoc signed, despite
-   the `unsigned` filename, and is not notarized. Only for the app obtained
-   from the intended repository run, remove its download quarantine:
-
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/BitSov.app
-   ```
-
-   This removes Gatekeeper's quarantine check for this copy. It does not
-   establish trust in an unknown download. If the command is refused or
-   macOS still blocks the app, stop and report the message.
-
-5. **First launch and signet check.** Open `/Applications/BitSov.app` in
-   Finder. Follow the [signet pairing instructions](../README.md#pair-with-your-own-signet-node)
-   with the designated node. Confirm it is on signet before any test payment.
-   The app does not show the node's network today. Ask the node owner to
-   confirm that the node's `konsensus.toml` contains `network = "signet"`,
-   or that its `/status` response reports `"network": "signet"`. Do not
-   continue if they cannot confirm it.
-   After pairing,
-   send and receive a message, then send and receive a signet payment with
-   the node owner available to approve. These are tester checks to perform,
-   not established Intel acceptance results.
-
-On a T2 Mac, missing or unavailable Touch ID is separate from pairing storage.
-After successful pairing, receiving messages and payments does not require
-Touch ID. For sending or paying when approval is needed, **approve at the
-node**: ask the node owner to approve the requested spending window or budget,
-then retry in the app. In-app Touch ID approvals and Touch ID-based
-“Remember on this Mac” are unavailable without working Touch ID. Node-side
-approval does not provide a pairing fallback for a Mac without T2.
+After an approved handoff on supported hardware, follow the
+[signet pairing instructions](../README.md#pair-with-your-own-signet-node) with
+the designated signet node and its owner-approved spending limit. First launch,
+pair/quit/reopen, messaging and separately authorized signet payments still
+need physical acceptance. An ad-hoc signature is not notarization or independent
+proof of provenance. Stop on an unexplained integrity or storage failure.
 
 ## HUMAN
 

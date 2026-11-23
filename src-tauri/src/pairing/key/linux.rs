@@ -134,7 +134,7 @@ fn load_with(
             Some(primary) => primary.seed.clone(),
             None => {
                 let mut seed = Zeroizing::new([0; 32]);
-                getrandom::getrandom(&mut seed[..])
+                getrandom::fill(&mut seed[..])
                     .map_err(|_| local("no randomness for the client identity"))?;
                 seed
             }

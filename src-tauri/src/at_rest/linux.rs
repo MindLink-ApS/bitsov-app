@@ -69,7 +69,7 @@ impl Sealer for LinuxSealer {
         if wrapping_key_id(&wrapping_key) != self.key_id { return Err(failed(())); }
         let key = WrappingCipher::new_from_slice(&wrapping_key).map_err(failed)?;
         let mut nonce = [0; 12];
-        getrandom::getrandom(&mut nonce).map_err(failed)?;
+        getrandom::fill(&mut nonce).map_err(failed)?;
         let mut sealed = Vec::with_capacity(PREFIX_LEN + plaintext.len() + 16);
         sealed.extend_from_slice(HEADER);
         sealed.extend_from_slice(&self.key_id);

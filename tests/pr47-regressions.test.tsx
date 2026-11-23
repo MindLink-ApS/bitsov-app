@@ -6,8 +6,8 @@ import { membraneNode } from '../src/control/body';
 import type { Source } from '../src/control/source';
 import type { MembraneEvent } from '../src/control/types';
 
-// PR #47 merge-gate regressions (/tmp/bitsov-codex/47-verdict.txt, findings
-// 5-7), from the reviewer's independent reproductions. Findings 1-4 are
+// PR #47 frontend regressions cover findings 5-7 from independent
+// reproductions. Findings 1-4 are
 // host-side: src-tauri/src/main.rs (`review_regression_*`, `pr47_*`) and
 // src-tauri/tests/pr47_budget.rs.
 describe('PR47 independent frontend regressions', () => {

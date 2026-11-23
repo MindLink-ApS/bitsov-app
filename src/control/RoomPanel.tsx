@@ -10,7 +10,7 @@ import { t as tr } from '../i18n';
 import { createEffect, createMemo, createSignal, For, on, Show, Switch, Match, type JSX } from 'solid-js';
 import { t, type CopyKey } from '../i18n';
 import { createStore, reconcile } from 'solid-js/store';
-import { amount as fmtAmount, clock, day, sats, satUnit } from './format';
+import { amount as fmtAmount, shownTotal, shownTotalFigure, clock, day, estimatedSats, satUnit } from './format';
 import {
   MAX_MEMBERS, newMsgId, planLegs, planTotal, roomChatText, roomRefusalWords, roomThread,
   type LegOutcome, type LegPlan, type LocalRoom, type MemberInfo, type RoomEntry,
@@ -33,6 +33,8 @@ function unpickable(c: RoomContact, nodeRooms: boolean): string | null {
 
 /** Pick 1 to 3 contacts. Creating a room is local and free: nothing is sent. */
 export function NewRoomPanel(props: {
+  contactsPending?: boolean;
+  contactsError?: boolean;
   contacts: RoomContact[];
   /** Our own node checks room bindings (`room_binding_v1` on /status). */
   nodeRooms: boolean;
@@ -47,7 +49,7 @@ export function NewRoomPanel(props: {
     <aside class="call-panel meeting-panel room-panel" data-room-panel="new" role="dialog" aria-label={tr('caNewRoom')}>
       <header><strong>{tr('caNewRoom')}</strong><span class="who">{tr('caYouAndUpTo')}{' '}{MAX_MEMBERS - 1}{' '}{tr('caContacts')}</span></header>
       <ul class="meeting-legs">
-        <For each={props.contacts} fallback={<li class="hint">{tr('caNoContactsYet')}</li>}>
+        <For each={props.contacts} fallback={<li class="hint">{props.contactsError ? tr('caCouldNotLoadContacts') : props.contactsPending ? tr('chatLoading') : tr('caNoContactsYet')}</li>}>
           {(c) => (
             <li>
               <label>
@@ -98,6 +100,8 @@ export function RoomThread(props: {
   read: ThreadRead;
   /** The read's error, shown instead of any "empty" claim when it failed. */
   error?: string;
+  /** An earlier page could not be read: the room's messages are all still here. */
+  earlierFailed?: boolean;
   room: LocalRoom;
   ownId: string;
   nameOf: (id: string) => string;
@@ -150,6 +154,8 @@ export function RoomThread(props: {
   }));
   const total = () => planTotal(legs());
   const estimate = () => legs().some((l) => l.state === 'pay' && l.estimate);
+  // The headline is the sum of the legs as shown below it, so the figures add up.
+  const headline = () => shownTotalFigure(total()!, legs().flatMap((l) => (l.state === 'pay' ? [l.msat] : [])), estimate(), true);
 
   const [draft, setDraft] = createSignal('');
   const [busy, setBusy] = createSignal(false);
@@ -191,7 +197,7 @@ export function RoomThread(props: {
   createEffect(on(() => items().length, () => queueMicrotask(() => stream?.scrollTo?.({ top: stream.scrollHeight }))));
 
   const legLine = (l: LegPlan) =>
-    l.state === 'pay' ? `${l.estimate ? '≈ ' : ''}${fmtAmount(l.msat)}` : l.state === 'skip' ? l.reason : t('roomReadingPrice');
+    l.state === 'pay' ? `${estimatedSats(l.msat, l.estimate, 'up')} ${satUnit(l.msat, 'up')}` : l.state === 'skip' ? l.reason : t('roomReadingPrice');
 
   return (
     <>
@@ -220,6 +226,7 @@ export function RoomThread(props: {
             <button type="button" class="link" data-room-earlier disabled={props.loadingEarlier} onClick={() => props.onEarlier()}>
               {props.loadingEarlier ? t('chatLoading') : t('chatEarlier')}
             </button>
+            <Show when={props.earlierFailed}><p class="err-note" role="status" data-room-earlier-failed>{tr('caRoomEarlierFailed')}</p></Show>
           </Show>
           <For each={[...keyedItems().keys()]} fallback={
             <Switch>
@@ -282,7 +289,7 @@ export function RoomThread(props: {
                           <span class="kind" data-room-send-msat={s().outcomes.reduce((t, o) => t + o.paidMsat, 0)}>
                             {s().outcomes.every((o) => o.state === 'sent')
                               ? roomCostCopy(s().outcomes.map((o) => o.paidMsat), 'paid')
-                              : t('roomMessageTotal', fmtAmount(s().outcomes.reduce((t, o) => t + o.paidMsat, 0)))}
+                              : t('roomMessageTotal', shownTotal(s().outcomes.reduce((t, o) => t + o.paidMsat, 0), s().outcomes.map((o) => o.paidMsat)))}
                           </span>
                           <ul class="room-legs">
                             <For each={s().outcomes}>
@@ -302,6 +309,10 @@ export function RoomThread(props: {
               );
             }}
           </For>
+          {/* A failed re-read with messages on screen says so once, after them, as the direct chat does. */}
+          <Show when={props.read === 'failed' && items().length > 0}>
+            <p class="err-note" role="alert" data-room-read-note>{props.error ?? t('roomReadError')}</p>
+          </Show>
         </div>
       </div>
       </StreamFrame>
@@ -334,7 +345,7 @@ export function RoomThread(props: {
                 <div class="cost" data-cost>
                   <span class="label">{t('uiCostToSend')}</span>
                   <Show when={total() !== null} fallback={<span class="sats">…</span>}>
-                    <span class="sats" data-cost-msat={total()!}>{estimate() ? '≈ ' : ''}{sats(total()!, true)}<span class="unit">{satUnit(total()!)}</span></span>
+                    <span class="sats" data-cost-msat={total()!}>{headline().figure}<span class="unit">{headline().unit}</span></span>
                   </Show>
                   <span class="basis">{legs().some((l) => l.state === 'reading')
                     ? t('roomReadingPrices')
@@ -358,13 +369,13 @@ export function RoomThread(props: {
                     <>
                       <dt>{props.nameOf(l.peer)}</dt>
                       <dd data-review-leg={l.peer} data-review-leg-msat={l.state === 'pay' ? l.msat : 0}>
-                        {l.state === 'pay' ? t('roomAtMost', fmtAmount(l.msat)) : l.state === 'skip' ? l.reason : t('roomSkipped')}
+                        {l.state === 'pay' ? t('roomAtMost', fmtAmount(l.msat, 'up')) : l.state === 'skip' ? l.reason : t('roomSkipped')}
                       </dd>
                     </>
                   )}
                 </For>
                 <dt>{t('roomTotalAtMost')}</dt>
-                <dd data-review-total>{fmtAmount(rv().total)}</dd>
+                <dd data-review-total>{shownTotal(rv().total, rv().legs.map((l) => (l.state === 'pay' ? l.msat : 0)))}</dd>
               </dl>
               <div class="composer-bar">
                 <button type="button" class="link" data-room-back disabled={busy()} onClick={() => setReview(null)}>{t('uiBack')}</button>
@@ -389,16 +400,18 @@ export function RoomThread(props: {
  */
 function legOutcome(o: LegOutcome): string {
   if (o.state === 'failed' && o.paidMsat === 0 && o.note) return o.note;
-  const reached = o.principalMsat !== undefined ? t('roomReached', fmtAmount(o.principalMsat)) : '';
-  const paid = o.paidMsat > 0 ? ` · ${t(o.state === 'unknown' ? 'roomPossiblyPaid' : 'roomYouPaid', fmtAmount(o.paidMsat), reached)}` : ` · ${t('roomNotCharged')}`;
+  // What reached them is money they received (rounds down); what this leg paid is a cost (rounds up),
+  // so the part shown is never larger than the whole shown beside it.
+  const reached = o.principalMsat !== undefined ? t('roomReached', fmtAmount(o.principalMsat, 'down')) : '';
+  const paid = o.paidMsat > 0 ? ` · ${t(o.state === 'unknown' ? 'roomPossiblyPaid' : 'roomYouPaid', fmtAmount(o.paidMsat, 'up'), reached)}` : ` · ${t('roomNotCharged')}`;
   return `${t(OUTCOME[o.state])}${paid}${o.note && o.state !== 'sent' ? ` · ${o.note}` : ''}`;
 }
 
 /** Only say “each member” when everyone has the same ceiling and nobody is skipped. */
 function roomCostCopy(amounts: number[], verb: 'pay' | 'paid', allMembers = true): string {
-  const total = fmtAmount(amounts.reduce((sum, n) => sum + n, 0));
+  const total = shownTotal(amounts.reduce((sum, n) => sum + n, 0), amounts);
   if (allMembers && amounts.length > 0 && amounts.every((n) => n === amounts[0])) {
-    return t(verb === 'pay' ? 'roomPayEach' : 'roomPaidEach', fmtAmount(amounts[0]), total);
+    return t(verb === 'pay' ? 'roomPayEach' : 'roomPaidEach', fmtAmount(amounts[0], 'up'), total);
   }
   return t(verb === 'pay' ? 'roomPayTotal' : 'roomPaidTotal', total);
 }

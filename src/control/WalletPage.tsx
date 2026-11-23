@@ -20,7 +20,8 @@ import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show
 import { qrSvg } from '../qr';
 import { copyPlainText } from '../assistant/copy';
 import { deviceWord } from '../platform';
-import { amount as fmtAmount, allIn, clock, day, routingFee, sats, satUnit, shortId } from './format';
+import { AmountWithExact } from './ExactAmount';
+import { amount as fmtAmount, shownTotal, allIn, clock, day, routingFee, sats, satUnit, shortId } from './format';
 import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { denom } from './prefs';
 import type { CustodyMode, FundingAddress, InvoiceAmount, InvoiceStatus, InvoiceView, Message, PaymentReceipt, SpendView, WalletOverview } from './types';
@@ -29,7 +30,7 @@ import { spendLine } from './state';
 import {
   activityTotals, bitcoinUri, channelWords, filterActivity, loggedActivity, mergeActivity, messageActivity, openInvoices, readRecipient,
   sortedChannels, splitBalance, statusWords, updateInvoice,
-  type Activity, type DirectionFilter, type KindFilter,
+  type Activity, type DirectionFilter, type KindFilter, type LoggedActivity,
 } from './wallet';
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } };
@@ -101,7 +102,7 @@ function AmountInput(props: { data: string; label: string; value: string; onInpu
     if (ambiguousThousands(props.value, denom())) return t('amountUseSpaces');
     const msat = parseAmount(props.value, denom());
     if (msat === null) return t('uiUseDigitsAndOneDotAtMostDecimals', denom() === 'btc' ? 11 : 3);
-    return inPaymentBounds(msat) ? null : t('uiBetweenAnd', fmtAmount(MIN_PAYMENT_MSAT), fmtAmount(MAX_PAYMENT_MSAT));
+    return inPaymentBounds(msat) ? null : t('uiBetweenAnd', fmtAmount(MIN_PAYMENT_MSAT, 'up'), fmtAmount(MAX_PAYMENT_MSAT, 'up'));
   };
   return (
     <>
@@ -166,19 +167,28 @@ export function WalletPage(props: {
   const [starterOpen, setStarterOpen] = createSignal(false);
 
   // Invoices we issued: read whether they were paid while this page is open.
+  // Each invoice keeps its own last read: one that could not be read, or that the node
+  // could not place, says so on that invoice only, never on another.
   let reading = false;
+  const [invoiceChecks, setInvoiceChecks] = createSignal<Record<string, InvoiceCheck>>({});
   const readInvoices = async () => {
     if (reading) return;
     reading = true;
     try {
-      for (const a of openInvoices(loggedActivity(), Date.now()).slice(0, 10)) {
+      const open = openInvoices(loggedActivity(), Date.now()).slice(0, 10);
+      const checks: Record<string, InvoiceCheck> = {};
+      for (const a of open) {
         const status = await props.reads.invoiceStatus(a.bolt11!).catch(() => null);
-        if (status) updateInvoice(a.id, status);
+        if (!status) checks[a.bolt11!] = 'unread';
+        else if (status.state === 'unknown') checks[a.bolt11!] = 'unknown';
+        else updateInvoice(a.id, status);
       }
+      setInvoiceChecks(checks);
     } finally {
       reading = false;
     }
   };
+  const invoiceCheck = (bolt11: string | undefined): InvoiceCheck | undefined => (bolt11 ? invoiceChecks()[bolt11] : undefined);
   createEffect(() => {
     void readInvoices();
     const timer = window.setInterval(() => void readInvoices(), 4000);
@@ -213,12 +223,12 @@ export function WalletPage(props: {
             {(s) => (
               <>
                 <span class="wallet-total" data-balance-total={s().total}
-                  style={{ '--wallet-amount-chars': String(sats(s().total).length), '--wallet-unit-chars': String(satUnit(s().total).length) }}>
-                  {sats(s().total)}<span class="unit">{satUnit(s().total)}</span>
+                  style={{ '--wallet-amount-chars': String(sats(s().total, 'down').length), '--wallet-unit-chars': String(satUnit(s().total, 'down').length) }}>
+                  {sats(s().total, 'down')}<span class="unit">{satUnit(s().total, 'down')}</span>
                 </span>
                 <CustodyBadgeView mode={props.custody} />
                 <span class="hint" data-balance-pending={s().pending ?? 'unknown'}>
-                  {s().pending === null ? t('uiPendingOnChainUnknown') : t('uiPending', fmtAmount(s().pending!))}
+                  {s().pending === null ? t('uiPendingOnChainUnknown') : t('uiPending', fmtAmount(s().pending!, 'down'))}
                 </span>
                 <Show when={s().hasBreakdown} fallback={<>
                   <div class="wallet-split">
@@ -245,33 +255,33 @@ export function WalletPage(props: {
                   <div class="wallet-split">
                     <div class="split" data-balance-lightning={s().lightning ?? 'unknown'}>
                       <span class="split-name">{t('uiLightningSpendableOutboundCapacity')}</span>
-                      <span class="split-amount" classList={{ unknown: s().lightning === null }}>{s().lightning === null ? t('uiUnknown') : fmtAmount(s().lightning!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().lightning === null }}>{s().lightning === null ? t('uiUnknown') : fmtAmount(s().lightning!, 'down')}</span>
                       <span class="hint">{t('uiOutboundCapacityNotAGuaranteeAPaymentOf')}</span>
                     </div>
                     <div class="split" data-balance-onchain-total={s().onchainTotal ?? 'unknown'}>
                       <span class="split-name">{t('uiOnChainTotal')}</span>
-                      <span class="split-amount" classList={{ unknown: s().onchainTotal === null }}>{s().onchainTotal === null ? t('uiUnknown') : fmtAmount(s().onchainTotal!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().onchainTotal === null }}>{s().onchainTotal === null ? t('uiUnknown') : fmtAmount(s().onchainTotal!, 'down')}</span>
                       <span class="hint">{t('uiTotalOnChainWalletFundsIncludingUnconfirmedFunds')}</span>
                     </div>
                     <div class="split" data-balance-onchain={s().onchain ?? 'unknown'}>
                       <span class="split-name">{t('uiOnChainSpendable')}</span>
-                      <span class="split-amount" classList={{ unknown: s().onchain === null }}>{s().onchain === null ? t('uiUnknown') : fmtAmount(s().onchain!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().onchain === null }}>{s().onchain === null ? t('uiUnknown') : fmtAmount(s().onchain!, 'down')}</span>
                       <span class="hint">{t('uiSpendableAfterConfirmationRequirementsAndTheAnchorReserve')}</span>
                     </div>
                     <div class="split" data-balance-reserved={s().reserved ?? 'unknown'}>
                       <span class="split-name">{t('uiReservedAnchorClosingFees')}</span>
-                      <span class="split-amount" classList={{ unknown: s().reserved === null }}>{s().reserved === null ? t('uiUnknown') : fmtAmount(s().reserved!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().reserved === null }}>{s().reserved === null ? t('uiUnknown') : fmtAmount(s().reserved!, 'down')}</span>
                       <span class="hint">{t('uiOnChainFundsHeldForAnchorChannelClosing')}</span>
                     </div>
                     <div class="split" data-balance-closing={s().closing ?? 'unknown'}>
                       <span class="split-name">{t('uiClosingClosuresAndSweeps')}</span>
-                      <span class="split-amount" classList={{ unknown: s().closing === null }}>{s().closing === null ? t('uiUnknown') : fmtAmount(s().closing!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().closing === null }}>{s().closing === null ? t('uiUnknown') : fmtAmount(s().closing!, 'down')}</span>
                       <span class="hint">{t('uiTrackedClosuresTimeLocksAndSweepsSomeProceeds')}</span>
                     </div>
                     <Show when={(s().contested ?? 0) > 0}>
                       <div class="split" data-balance-contested={s().contested}>
                         <span class="split-name">{t('uiContested')}</span>
-                        <span class="split-amount">{fmtAmount(s().contested!)}</span>
+                        <span class="split-amount">{fmtAmount(s().contested!, 'down')}</span>
                         <span class="hint">{t('uiConditionalClaimsNotGuaranteedWalletFundsOrSpendable')}</span>
                       </div>
                     </Show>
@@ -311,6 +321,7 @@ export function WalletPage(props: {
               nameOf={props.nameOf}
               messages={props.reads.messages}
               now={props.now}
+              invoiceCheck={invoiceCheck}
               onReceive={() => props.onTab('receive')}
             />
           </Match>
@@ -318,7 +329,7 @@ export function WalletPage(props: {
             <ChannelsView wallet={props.wallet} nameOf={props.nameOf} error={props.walletError} onReconnect={props.onReconnect} />
           </Match>
           <Match when={props.tab === 'receive'}>
-            <ReceiveView moneyBlocked={props.moneyBlocked} actions={props.actions} reads={props.reads} now={props.now} />
+            <ReceiveView moneyBlocked={props.moneyBlocked} actions={props.actions} reads={props.reads} now={props.now} invoiceCheck={invoiceCheck} />
           </Match>
           <Match when={props.tab === 'send'}>
             <SendView moneyBlocked={props.moneyBlocked} spend={props.spend} spendGate={props.spendGate} now={props.now} actions={props.actions} />
@@ -361,6 +372,7 @@ function ActivityView(props: {
   nameOf: (id: string) => string;
   messages: (id: string) => Promise<Message[]>;
   now: number;
+  invoiceCheck?: (bolt11: string | undefined) => InvoiceCheck | undefined;
 }) {
   const [kind, setKind] = createSignal<KindFilter>('all');
   const [direction, setDirection] = createSignal<DirectionFilter>('all');
@@ -403,8 +415,8 @@ function ActivityView(props: {
       </div>
       <Show when={!loading() && incomplete()}><p class="err-note" role="status" data-activity-incomplete>{t('caActivityNotComplete')}</p></Show>
       <p class="wallet-totals" data-activity-totals>
-        <span>{t('extraReceived')} <strong data-activity-in={totals().in}>{fmtAmount(totals().in)}</strong></span>
-        <span>{t('extraSent')} <strong data-activity-out={totals().out}>{fmtAmount(totals().out)}</strong></span>
+        <span>{t('extraReceived')} <strong data-activity-in={totals().in}><AmountWithExact msat={totals().in} round="down" /></strong></span>
+        <span>{t('extraSent')} <strong data-activity-out={totals().out}><AmountWithExact msat={totals().out} round="up" /></strong></span>
       </p>
       <Show when={!loading() || shown().length > 0} fallback={<DelayedSpinner />}>
         <ul class="wallet-list" data-activity-list>
@@ -422,7 +434,7 @@ function ActivityView(props: {
           }>
             {(a, i) => {
               const newDay = () => i() === 0 || day(shown()[i() - 1].at) !== day(a.at);
-              const status = () => statusWords(a, props.now);
+              const status = () => invoiceWords(a, props.now, props.invoiceCheck?.((a as LoggedActivity).bolt11));
               return (
                 <>
                   <Show when={newDay()}><li class="wallet-day">{day(a.at)}</li></Show>
@@ -435,7 +447,7 @@ function ActivityView(props: {
                       </span>
                     </span>
                     <span class="wallet-row-amount" classList={{ in: a.direction === 'in', pending: a.kind === 'invoice' && a.status !== 'paid' }}>
-                      {a.msat === null ? '' : `${a.direction === 'in' ? '+' : '−'}${fmtAmount(a.msat)}`}
+                      {a.msat === null ? '' : <AmountWithExact msat={a.msat} round={a.direction === 'in' ? 'down' : 'up'} prefix={a.direction === 'in' ? '+' : '−'} />}
                     </span>
                   </li>
                 </>
@@ -463,8 +475,8 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
       <Show when={props.wallet} fallback={<Show when={!props.error} fallback={<SoftError message={props.error!} data="channels-read" onReconnect={props.onReconnect} />}><DelayedSpinner /></Show>}>
         <p class="wallet-totals" data-channels-summary>
           <span>{open().length}{' '}{tr('uiOf')}{' '}{channels().length}{' '}{tr('caOpen867')}</span>
-          <span>{tr('caYouCanSend')}{' '}<strong>{fmtAmount(canSend())}</strong></span>
-          <span>{tr('caAndReceive')}{' '}<strong>{fmtAmount(canReceive())}</strong></span>
+          <span>{tr('caYouCanSend')}{' '}<strong>{fmtAmount(canSend(), 'down')}</strong></span>
+          <span>{tr('caAndReceive')}{' '}<strong>{fmtAmount(canReceive(), 'down')}</strong></span>
         </p>
         <ul class="wallet-channels">
           <For each={channels()} fallback={<li class="empty hint" data-channels-empty>{NO_CHANNELS()}</li>}>
@@ -483,9 +495,9 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
                     <div class="in" style={{ width: `${inn()}%` }} />
                   </div>
                   <dl class="channel-facts">
-                    <dt>{tr('caYouCanSend')}</dt><dd data-channel-out={c.local_balance_msat}>{fmtAmount(c.local_balance_msat)}</dd>
-                    <dt>{tr('caYouCanReceive')}</dt><dd data-channel-in={c.remote_balance_msat}>{fmtAmount(c.remote_balance_msat)}</dd>
-                    <dt>{tr('caSize')}</dt><dd data-channel-capacity={c.capacity_msat}>{fmtAmount(c.capacity_msat)}</dd>
+                    <dt>{tr('caYouCanSend')}</dt><dd data-channel-out={c.local_balance_msat}>{fmtAmount(c.local_balance_msat, 'down')}</dd>
+                    <dt>{tr('caYouCanReceive')}</dt><dd data-channel-in={c.remote_balance_msat}>{fmtAmount(c.remote_balance_msat, 'down')}</dd>
+                    <dt>{tr('caSize')}</dt><dd data-channel-capacity={c.capacity_msat}>{fmtAmount(c.capacity_msat, 'down')}</dd>
                   </dl>
                   <p class="hint" data-channel-words>{words().line}</p>
                 </li>
@@ -502,7 +514,16 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
 
 // ---- receive -----------------------------------------------------------------
 
-function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; reads: WalletReads; now: number }) {
+/** An open invoice's last read: it could not be read, or the node could not say whether it was paid. */
+type InvoiceCheck = 'unread' | 'unknown';
+
+/** An invoice the node could not place is neither paid nor unpaid: it says it is unknown. */
+function invoiceWords(a: Activity, now: number, check: InvoiceCheck | undefined): string | null {
+  if (a.kind === 'invoice' && a.status === 'waiting' && check === 'unknown') return tr('caInvoiceStateUnknown');
+  return statusWords(a, now);
+}
+
+function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; reads: WalletReads; now: number; invoiceCheck?: (bolt11: string | undefined) => InvoiceCheck | undefined }) {
   const [how, setHow] = createSignal<'lightning' | 'onchain'>('lightning');
   const [amount, setAmount, amountCleared] = createAmountDraft();
   const [note, setNote] = createSignal('');
@@ -512,11 +533,13 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
   const [invoice, setInvoice] = createSignal<InvoiceView | null>(null);
   const [address, setAddress] = createSignal<FundingAddress | null>(null);
   const [addressError, setAddressError] = createSignal<string | null>(null);
+  const [addressRetry, setAddressRetry] = createSignal(0);
   const msat = () => typedMsat(amount());
 
   // A new amount or note is a new request: the shown invoice was for the old one.
   createEffect(on([amount, note, how], () => { setInvoice(null); setError(null); }, { defer: true }));
   createEffect(() => {
+    addressRetry();
     if (how() !== 'onchain' || address() || props.moneyBlocked) return;
     void props.reads.fundingAddress().then(
       (a) => { setAddress(a); setAddressError(null); },
@@ -536,10 +559,13 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
     else setError(r.error.message);
   };
   const received = () => loggedActivity().find(a => a.kind === 'invoice' && a.bolt11 === invoice()?.bolt11);
+  // This invoice's own last read: not read just now, or read but the node could not say.
+  const check = () => (received()?.status === 'waiting' ? props.invoiceCheck?.(invoice()?.bolt11) : undefined);
   const status = () => {
     const inv = invoice();
     if (!inv) return null;
     const logged = received();
+    if (check() === 'unknown') return tr('caInvoiceStateUnknown');
     return logged ? statusWords(logged, props.now) : t('extraWaitingToBePaid');
   };
   const uri = () => {
@@ -569,7 +595,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
               fallback={
                 <Show when={!props.moneyBlocked} fallback={<p class="hint">{t('receiveNotReady')}</p>}>
                   <Show when={addressError()} fallback={<DelayedSpinner />}>
-                    <div data-receive-error><SoftError message={addressError()!} summary={t('receiveNoAddress')} /></div>
+                    <div data-receive-error><SoftError message={addressError()!} summary={t('receiveNoAddress')} onReconnect={() => { setAddressError(null); setAddressRetry(n => n + 1); }} /></div>
                   </Show>
                 </Show>
               }
@@ -604,11 +630,13 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
             <div class="wallet-request" data-receive-invoice data-receive-status={status() ?? ''}>
               <Show when={received()?.status === 'paid'} fallback={<>
                 <QR value={inv().bolt11.toUpperCase()} label={t('receiveInvoiceQR')} />
-                <span class="wallet-request-amount">{fmtAmount(inv().amount_msat)}</span>
+                <span class="wallet-request-amount"><AmountWithExact msat={inv().amount_msat} round="down" /></span>
               </>}>
                 <SettledPayment direction="received" msat={received()?.msat ?? null} />
               </Show>
               <span class="wallet-status" classList={{ ok: received()?.status === 'paid' }} data-receive-state>{status()}</span>
+              <Show when={check() === 'unread'}><p class="hint" role="status" data-receive-unread>{tr('caInvoiceNotChecked')}</p></Show>
+              <Show when={check() === 'unknown'}><p class="hint" role="status" data-receive-unknown>{tr('caInvoiceUnknownHint')}</p></Show>
               <code class="address" data-bolt11>{inv().bolt11}</code>
               <div class="row wallet-request-actions">
                 <CopyButton text={inv().bolt11} label={t('receiveCopyInvoice')} />
@@ -716,7 +744,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
       const receipt = r.value;
       if (receipt.status === 'settled') {
         const knownFee = receipt.fee_paid_msat !== undefined && Number.isSafeInteger(receipt.fee_paid_msat) && receipt.fee_paid_msat >= 0;
-        setResult({ ok: true, settledMsat: receipt.amount_msat, text: knownFee ? t('extraNetworkFee', fmtAmount(receipt.fee_paid_msat!)) : t('extraNetworkFeeUnknown') });
+        setResult({ ok: true, settledMsat: receipt.amount_msat, text: knownFee ? t('extraNetworkFee', fmtAmount(receipt.fee_paid_msat!, 'up')) : t('extraNetworkFeeUnknown') });
       } else {
         setResult({ ok: receipt.status !== 'failed', text: receipt.status === 'failed' ? t('extraPaymentFailed') : t('extraPaymentInProgressSettlementIsNotConfirmedYet') });
       }
@@ -749,7 +777,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
             <Show when={read()}>
               {(inv) => (
                 <p class="hint" data-send-invoice={inv().amount_msat}>
-                  {t('uiInvoiceFor')} {fmtAmount(inv().amount_msat)} {t('extraToNode')} {shortId(inv().payee)}
+                  {t('uiInvoiceFor')} {fmtAmount(inv().amount_msat, 'up')} {t('extraToNode')} {shortId(inv().payee)}
                   {inv().description ? ` · “${inv().description}”` : ''}
                 </p>
               )}
@@ -757,8 +785,8 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
             <Show when={mismatch()}>
               {(m) => (
                 <p class="err-note" data-send-mismatch>
-                  {t('extraThisInvoiceAsksFor')} {fmtAmount(m())}{t('extraNotTheAmountAbove')}{' '}
-                  <button type="button" class="link" data-send-use-invoice onClick={() => setAmount(amountText(m(), denom()))}>{t('extraUse')} {fmtAmount(m())}</button>
+                  {t('extraThisInvoiceAsksFor')} {fmtAmount(m(), 'up')}{t('extraNotTheAmountAbove')}{' '}
+                  <button type="button" class="link" data-send-use-invoice onClick={() => setAmount(amountText(m(), denom()))}>{t('extraUse')} {fmtAmount(m(), 'up')}</button>
                 </p>
               )}
             </Show>
@@ -766,9 +794,9 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
               <div class="cost" data-cost>
                 <span class="label">{t('uiTotalAtMost')}</span>
                 <Show when={msat() !== null} fallback={<span class="sats">…</span>}>
-                  <span class="sats" data-cost-msat={allIn(msat()!)}>{sats(allIn(msat()!), true)}<span class="unit">{satUnit(allIn(msat()!))}</span></span>
+                  <span class="sats" data-cost-msat={allIn(msat()!)}>{sats(allIn(msat()!), 'up', true)}<span class="unit">{satUnit(allIn(msat()!), 'up')}</span></span>
                 </Show>
-                <span class="basis">{t('extraTheAmountAndANetworkFeeOfAt')} {fmtAmount(routingFee(msat() ?? 0))}</span>
+                <span class="basis">{t('extraTheAmountAndANetworkFeeOfAt')} {fmtAmount(routingFee(msat() ?? 0), 'up')}</span>
               </div>
               <button type="submit" class="primary soft money" data-send-review disabled={!ready() && !approvable()}>{buttonLabel()}</button>
             </div>
@@ -788,11 +816,11 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
             </p>
             <dl>
               <dt>{t('uiAmount')}</dt>
-              <dd data-review-amount>{fmtAmount(rv().msat)}</dd>
+              <dd data-review-amount>{fmtAmount(rv().msat, 'up')}</dd>
               <dt>{t('uiNetworkFee')}</dt>
-              <dd data-review-fee>{t('uiUpTo178')} {fmtAmount(routingFee(rv().msat))}</dd>
+              <dd data-review-fee>{t('uiUpTo178')} {fmtAmount(routingFee(rv().msat), 'up')}</dd>
               <dt>{t('uiTotalAtMost')}</dt>
-              <dd data-review-total>{fmtAmount(allIn(rv().msat))}</dd>
+              <dd data-review-total>{shownTotal(allIn(rv().msat), [rv().msat, routingFee(rv().msat)])}</dd>
               <Show when={rv().kind === 'keysend' && (rv() as { memo: string }).memo.trim()}>
                 <dt>{t('uiNote')}</dt>
                 <dd>{(rv() as { memo: string }).memo.trim()}</dd>

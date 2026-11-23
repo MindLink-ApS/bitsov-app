@@ -69,7 +69,7 @@ No money wording, amount formatting, signed bytes or native code changed.
 
 `.github/workflows/webkit.yml` runs **WebKit (safe areas + type + keyboard)**
 on PRs to main, pushes to main and merge groups, with no path/job skip filter.
-**Atlas should make this job a required check in branch protection.**
+**Make this job a required check in branch protection.**
 
 The job uses Build's Node 22, npm cache and `npm ci --no-audit --no-fund` setup.
 All action references are pinned to commit SHAs; workflow and job permissions

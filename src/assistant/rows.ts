@@ -31,5 +31,4 @@ export function rowsText(rows: SitRow[]): string {
 }
 
 /** Shown instead of a blank window when the host handed over no rows. */
-export const NO_ROWS_TEXT = () => tr('caNothingToShowYetCloseThisWindowAndOpen') +
-  tr('caDevelopersStartTheAppWithNpmRunTauriAssistant');
+export const NO_ROWS_TEXT = () => tr('caNothingToShowYetCloseThisWindowAndOpen');

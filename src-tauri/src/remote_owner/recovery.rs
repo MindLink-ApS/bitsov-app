@@ -5,6 +5,7 @@ use super::*;
 const FILE: &str = "remote-first-run.json";
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Recovery {
     pub node_id: String,
     pub box_key: String,
@@ -342,6 +343,26 @@ mod tests {
                 AuthMode::Unauthenticated
             ));
         }
+    }
+
+    /// The first-run journal gates recovery and the setup password: any
+    /// damaged file is refused, never read as "no first run in progress".
+    #[cfg(unix)]
+    #[test]
+    fn first_run_context_fails_closed() {
+        use crate::store_matrix::{assert_refuses, json_cases, Store};
+        let valid = tempfile::tempdir().unwrap();
+        context().save(valid.path()).unwrap();
+        let store = Store {
+            name: "remote-first-run.json",
+            valid: std::fs::read(valid.path().join(FILE)).unwrap(),
+            version_key: None,
+            prepare: &|_| {},
+            file: &|dir| dir.join(FILE),
+            load: &|dir| Recovery::load(dir).map(drop),
+            may_create: &[],
+        };
+        assert_ne!(assert_refuses(&store, &json_cases(&store)), 0);
     }
 
     #[test]

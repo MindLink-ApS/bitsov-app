@@ -465,8 +465,8 @@ async fn shared_terms_and_biometric_snapshots_preserve_signed_bytes() {
         let text = amount["text"].as_str().unwrap();
         assert_eq!(sats(msat), text);
         // Both native consent paths retain main's exact prompt bytes.
-        assert_eq!(device::intent_reason("Maya", msat, msat).as_bytes(),
-            format!("approve paying up to {text} in total for up to 24 hours, at most {text} per message, to Maya").as_bytes());
+        assert_eq!(device::intent_reason("Robin", msat, msat).as_bytes(),
+            format!("approve paying up to {text} in total for up to 24 hours, at most {text} per message, to Robin").as_bytes());
         let mut v = view();
         v["client_pubkey"] = json!("ab".repeat(32));
         v["request"] = json!({"kind":"first_contact", "terms":{"recipient":"a".repeat(64), "max_total_msat":msat, "budget_msat":msat}});

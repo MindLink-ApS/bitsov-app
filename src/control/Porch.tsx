@@ -5,7 +5,7 @@ import { t as tr } from '../i18n';
 import { createEffect, createSignal, For, Match, on, onMount, Show, Switch, type JSX } from 'solid-js';
 import type { PaymentQuote, Peer, PorchCard, PorchRead, SpendView } from './types';
 import type { Source } from './source';
-import { amount as fmtAmount, shortId } from './format';
+import { amount as fmtAmount, shownTotal, shortId } from './format';
 import { asActionError, spendLine } from './state';
 import { FrontDoorCardView } from './Discover';
 import { SoftError } from './SoftError';
@@ -34,6 +34,7 @@ export function PorchPanel(props: Props) {
   const readable = () => props.peers.filter((p) => p.porch === true);
   const offers = (peer: string) => props.nodeReads && readable().some((p) => p.node_id.toLowerCase() === peer.toLowerCase());
   const [quotes, setQuotes] = createSignal<Record<string, PaymentQuote>>({});
+  const [unquoted, setUnquoted] = createSignal<Record<string, boolean>>({});
   const [held, setHeld] = createSignal<PorchCard[]>([]);
   const [review, setReview] = createSignal<Review | null>(null);
   const [shown, setShown] = createSignal<Shown | null>(null);
@@ -59,7 +60,7 @@ export function PorchPanel(props: Props) {
           if (quotes()[quoteKey(id, PORCH_CARD_PATH)]) continue;
           props.source.porchQuote(id, PORCH_CARD_PATH).then(
             (q) => setQuotes((all) => ({ ...all, [quoteKey(id, PORCH_CARD_PATH)]: q })),
-            () => {},
+            () => setUnquoted((all) => ({ ...all, [quoteKey(id, PORCH_CARD_PATH)]: true })),
           );
         }
       },
@@ -73,7 +74,9 @@ export function PorchPanel(props: Props) {
 
   const cost = (peer: string, path = PORCH_CARD_PATH) => {
     const q = quotes()[quoteKey(peer, path)];
-    return q ? fmtAmount(q.principal_msat) : '…';
+    if (q) return fmtAmount(q.principal_msat, 'up');
+    // A card's price is read up front; a page's only when it is tapped, so it has no figure to wait for yet.
+    return path !== PORCH_CARD_PATH || unquoted()[quoteKey(peer, path)] ? tr('uiUnknown') : '…';
   };
   const heldFor = (peer: string) => held().find((c) => c.node_id.toLowerCase() === peer.toLowerCase()) ?? null;
 
@@ -187,11 +190,11 @@ export function PorchPanel(props: Props) {
             <p class="hint">{tr('caPaidToTheirNodeOnceNothingIsRetriedReading')}</p>
             <dl>
               <dt>{tr('caRead')}</dt>
-              <dd data-review-amount>{fmtAmount(rv().quote.principal_msat)}</dd>
+              <dd data-review-amount>{fmtAmount(rv().quote.principal_msat, 'up')}</dd>
               <dt>{tr('uiNetworkFee')}</dt>
-              <dd data-review-fee>{tr('uiUpTo178')}{' '}{fmtAmount(rv().quote.max_routing_fee_msat)}</dd>
+              <dd data-review-fee>{tr('uiUpTo178')}{' '}{fmtAmount(rv().quote.max_routing_fee_msat, 'up')}</dd>
               <dt>{tr('uiTotalAtMost')}</dt>
-              <dd data-review-total>{fmtAmount(rv().quote.total_msat)}</dd>
+              <dd data-review-total>{shownTotal(rv().quote.total_msat, [rv().quote.principal_msat, rv().quote.max_routing_fee_msat])}</dd>
             </dl>
             <div class="composer-bar">
               <button type="button" class="link" data-porch-back disabled={busy()} onClick={() => setReview(null)}>{tr('uiBack')}</button>
@@ -293,7 +296,7 @@ function PorchPageView(props: { page: PorchRead }) {
   return (
     <article class="porch-page" data-porch-page={p().path} data-porch-kind={p().kind}>
       <p class="meta">
-        {p().path}{' '}{tr('caPaid')}{' '}{fmtAmount(p().amount_msat)}
+        {p().path}{' '}{tr('caPaid')}{' '}{fmtAmount(p().amount_msat, 'up')}
       </p>
       <Switch>
         <Match when={p().status === 'not_found'}>

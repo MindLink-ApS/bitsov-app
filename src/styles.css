@@ -240,6 +240,8 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .node-pill .peers { font-family: var(--font-mono); color: var(--muted); }
 .track-group { display: flex; flex-direction: column; gap: 2px; }
 .track-group h2 { font-family: var(--font-sans); font-size: var(--t-xs); font-weight: 500; color: var(--faint); padding: var(--s-2) var(--s-2) var(--s-1); }
+.rail-advanced > summary { font-family: var(--font-sans); font-size: var(--t-xs); font-weight: 500; color: var(--faint); padding: var(--s-2); cursor: pointer; border-radius: var(--r-control, 6px); }
+.rail-advanced > summary:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 1px; }
 .track-link { display: flex; align-items: center; gap: var(--s-2); width: 100%; text-align: left; background: none; border: none; padding: 7px var(--s-2); border-radius: var(--r-control); color: var(--muted); transition: background var(--d-fast) var(--ease), color var(--d-fast) var(--ease); }
 .track-link:hover:not(:disabled) { background: var(--surface); color: var(--ink); }
 .track-link[aria-current='true'] { background: var(--raised); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
@@ -248,6 +250,9 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .track-link .meta { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--faint); }
 /* In the desktop rail the hint gives way first: the entry's name stays whole. */
 .rail .track-link .name { flex: 1 1 auto; }
+/* A name the contact claims: a marked second line, never the name itself. */
+.track-claimed { display: block; overflow: hidden; text-overflow: ellipsis; font-size: var(--t-xs); color: var(--muted); }
+[data-add-name] p { margin: 0; }
 .rail .track-link .meta { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-empty { font-size: var(--t-sm); color: var(--faint); padding: 2px var(--s-2); }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: var(--s-2); }
@@ -321,6 +326,11 @@ label.field input {
 @keyframes arrive { from { opacity: 0; transform: translateY(6px); } }
 .stamp { display: flex; align-items: center; gap: var(--s-2); font-size: var(--t-xs); color: var(--faint); margin-top: 2px; font-variant-numeric: tabular-nums; }
 .stamp :is(.sats, .money-text) { color: var(--accent); }
+.exact-amount { display: inline; }
+.exact-amount > summary { display: inline; cursor: pointer; list-style: none; }
+.exact-amount > summary::-webkit-details-marker { display: none; }
+.exact-amount[open] > summary::after { content: " · "; }
+.stamp .cost-toggle { background: none; border: 0; padding: 0 2px; margin: 0; min-height: 0; color: inherit; font: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
 .stamp .bolt { width: 9px; height: 12px; fill: var(--accent); }
 .artifact { border: 1px solid var(--ember-line); background: var(--ember); border-radius: var(--r-panel); padding: var(--s-3) var(--s-4); display: flex; flex-direction: column; gap: var(--s-1); }
 .artifact .kind { font-size: var(--t-xs); color: var(--accent); }
@@ -328,7 +338,7 @@ label.field input {
 .empty-track { animation: arrive var(--d-mid) var(--ease-out); margin: auto; max-width: 420px; text-align: center; display: flex; flex-direction: column; gap: var(--s-3); align-items: center; }
 .empty-track h2 { font-family: var(--font-display); font-weight: 400; font-size: var(--t-3xl); }
 
-/* composer: Claude-like single bar */
+/* composer: single bar */
 .composer { border-top: 1px solid var(--line); padding: var(--s-3) var(--s-4) var(--s-4); display: flex; flex-direction: column; align-items: center; gap: var(--s-2); background: var(--bg); width: 100%; flex: none; z-index: 2; }
 .composer textarea { resize: none; min-height: 40px; max-height: 160px; border-radius: 18px; overflow-y: auto; }
 .composer-plus-wrap { position: relative; flex: none; display: flex; }
@@ -447,6 +457,7 @@ select { font: inherit; font-size: max(var(--input-font-min, 0px), var(--t-sm));
 /* The door card's local-address OK: box and words together, left-aligned. */
 .door-allow { display: flex; align-items: center; justify-content: flex-start; gap: var(--s-2); font-size: var(--t-sm); cursor: pointer; }
 .intro-notice { flex: none; margin: 0; padding: var(--s-2) var(--s-6); border-bottom: 1px solid var(--line); }
+.thread-read-status { flex: none; margin: 0; max-width: none; padding: var(--s-2) var(--s-6); border-bottom: 1px solid var(--line); }
 .door-allow input { width: auto; flex: none; margin: 0; padding: 0; accent-color: var(--accent); }
 .track > .spend .spend-line { display: block; }
 .track > .spend .spend-line .dot { display: inline-block; vertical-align: middle; margin-right: var(--s-1); }
@@ -537,6 +548,11 @@ select { font: inherit; font-size: max(var(--input-font-min, 0px), var(--t-sm));
 /* context — profile / settings modal (body, node, wallet, budget) */
 .settings-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 20; opacity: 0; pointer-events: none; transition: opacity var(--d-mid) var(--ease); }
 .settings-scrim.open { opacity: 1; pointer-events: auto; }
+.quit-confirm { position: fixed; z-index: 220; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(420px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-panel); padding: var(--s-4); box-shadow: 0 18px 40px rgba(0, 0, 0, .32); }
+.settings-scrim[data-quit-scrim] { z-index: 219; }
+/* The native dialog only lifts the question into the top layer; its scrim and panel keep their own look. */
+.quit-layer { margin: 0; padding: 0; border: 0; background: transparent; width: 100%; height: 100%; max-width: none; max-height: none; overflow: visible; }
+.quit-layer::backdrop { background: transparent; }
 .context.settings-modal:not(.open) { visibility: hidden; opacity: 0; pointer-events: none; }
 .context, .settings-modal {
   position: fixed; inset: 0;
@@ -936,10 +952,12 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
   .rail-foot { margin: 0; flex-direction: row; align-items: center; }
   .profile-avatar { width: auto; padding: 4px; }
   .node-pill { width: auto; flex: none; }
-  .stream, .composer, .track-head, .track > .spend, .intro-notice { padding-left: var(--s-4); padding-right: var(--s-4); }
+  .stream, .composer, .track-head, .track > .spend, .intro-notice, .thread-read-status { padding-left: var(--s-4); padding-right: var(--s-4); }
   .msg { max-width: 92%; }
   .cost { flex-wrap: wrap; row-gap: 0; }
   .cost .basis { flex-basis: 100%; }
+  /* A room's can't-send reason wraps instead of being cut off (UX-10). */
+  [data-room-composer] .cost .basis { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
   .ai-providers { padding-left: var(--s-4); padding-right: var(--s-4); flex-wrap: nowrap; overflow-x: auto; }
   .ai-provider { flex: none; }
   .ai-answer { max-width: 100%; }
@@ -963,6 +981,9 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .refusal-counts thead th { font-weight: 500; }
 
 .money-notice { margin: 0; padding: var(--s-3) var(--s-6); background: var(--surface); border-bottom: 1px solid var(--line); }
+/* The chain source in Settings → Node: a quiet fact, readable on the panel in both themes. */
+.chain-source { display: grid; gap: var(--s-1); margin: var(--s-3) 0; }
+.chain-source h3, .chain-source .hint, .chain-source summary { margin: 0; color: var(--ink); }
 /* Above the app: payments coming and going must not push the whole window down and back. */
 header > .money-notice { position: fixed; top: max(var(--s-2), env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(560px, calc(100vw - 32px)); z-index: 40; border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
 /* Desktop: the same card, floating over the top of the message list only. StreamFrame puts the
@@ -1068,6 +1089,19 @@ header > .money-notice { position: fixed; top: max(var(--s-2), env(safe-area-ins
 .call-panel .duration { font-variant-numeric: tabular-nums; color: var(--accent); }
 .call-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); }
 .call-actions button { flex: 1; }
+/* Answer is the one big, green thing on a ringing card: easy to find at a glance, for anyone. */
+.call-actions .call-answer { background: var(--ok); border-color: var(--ok); color: var(--bg); font-size: var(--t-lg, 1.125rem); font-weight: 650; min-height: 48px; }
+.call-actions .call-answer:hover:not(:disabled) { background: color-mix(in srgb, var(--ok) 88%, var(--bg)); }
+.call-actions .call-answer:disabled { opacity: 0.55; }
+/* Decline and hang up are the red ones, as big as Answer; colour is never the only cue (each says what it does). */
+.call-actions :is(.call-decline, [data-call-hangup]) { font-size: var(--t-lg, 1.125rem); font-weight: 650; min-height: 48px; }
+/* A call reads like a phone call: who it is, what is happening, then the choices. */
+.call-panel .call-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 2px; padding-top: var(--s-1, 4px); }
+.call-panel .call-head .call-avatar { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; flex: none; margin-bottom: var(--s-2); background: var(--raised); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-strong); font-size: 1.375rem; font-weight: 650; }
+.call-panel .call-head .call-name { margin: 0; flex: none; max-width: 100%; color: var(--ink); font-size: var(--t-xl); font-weight: 650; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
+.call-panel .call-head .call-status { margin: 0; color: var(--muted); font-size: var(--t-sm); line-height: 1.4; overflow-wrap: anywhere; }
+/* While the call is under way the head steps back for the call itself. */
+.call-panel:is([data-call-panel="live"], [data-call-panel="reconnecting"], [data-call-panel="ended"]) .call-head .call-avatar { width: 40px; height: 40px; font-size: var(--t-lg); margin-bottom: var(--s-1, 4px); }
 button.danger { background: var(--err); color: var(--err-ink); border: none; }
 .call-videos { position: relative; border-radius: 10px; overflow: hidden; background: #000; aspect-ratio: 4 / 3; }
 .call-video.remote { width: 100%; height: 100%; object-fit: cover; }
@@ -1081,6 +1115,32 @@ button.danger { background: var(--err); color: var(--err-ink); border: none; }
 /* Camera off: the words are the tile, so it grows with them (large text included) within the video area. */
 .call-self[data-camera-off] { width: max-content; min-width: min(30%, calc(100% - 16px)); aspect-ratio: auto; overflow: auto; }
 .call-self[data-camera-off] .call-self-label { position: static; display: block; max-width: none; font-size: .8rem; padding: var(--s-2); background: none; text-align: center; }
+/* Your picture moves between the four corners (drag, click or arrow keys). */
+.call-self { cursor: grab; touch-action: none; }
+.call-self:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.call-self[data-corner="bl"] { right: auto; left: 8px; }
+.call-self[data-corner="tr"] { bottom: auto; top: 8px; }
+.call-self[data-corner="tl"] { right: auto; left: 8px; bottom: auto; top: 8px; }
+/* Full screen, move and size: small controls over their picture, top left (your picture starts bottom right). */
+.call-stage-controls { position: absolute; top: 6px; left: 6px; display: flex; gap: 4px; z-index: 1; }
+.call-stage-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px; padding: 0; border: none; border-radius: 8px; background: rgba(0, 0, 0, .55); color: #fff; cursor: pointer; }
+.call-stage-btn:hover { background: rgba(0, 0, 0, .75); }
+.call-stage-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.call-stage-btn[hidden] { display: none; }
+[data-call-move] { cursor: move; touch-action: none; }
+[data-call-resize] { cursor: ew-resize; touch-action: none; }
+.call-self[data-corner^="t"] ~ .call-stage-controls { top: auto; bottom: 6px; }
+/* Full screen (the DOM API) or, where the webview refuses it, the whole window. */
+.call-videos:fullscreen { border-radius: 0; aspect-ratio: auto; width: 100%; height: 100%; }
+.call-videos[data-call-fullscreen="window"] { position: fixed; inset: 0; z-index: 60; border-radius: 0; aspect-ratio: auto; }
+.call-videos:is(:fullscreen, [data-call-fullscreen]) .call-video.remote { object-fit: contain; }
+.call-videos:is(:fullscreen, [data-call-fullscreen]) .call-self { width: min(22%, 280px); }
+/* A moved or resized call window: its place and width are inline, kept within the window by the app. */
+.call-panel[data-call-window-moved] { max-width: min(960px, 70vw); }
+/* The microphone or camera was refused: what to do, plainly. */
+.call-permission { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3); border-radius: var(--r-control, 8px); background: var(--surface); border-left: 3px solid var(--warn, var(--accent)); }
+.call-permission strong { font-size: 1.05rem; }
+.call-permission .hint { margin: 0; }
 .meeting-panel .meeting-legs { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-2); }
 .meeting-panel .meeting-legs label { display: flex; align-items: center; gap: var(--s-2); }
 .meeting-panel .muted { color: var(--muted); }
@@ -1248,7 +1308,7 @@ button.danger.soft { border-radius: var(--r-chip); padding: 7px 14px; font-weigh
 .call-panel header strong { font-weight: 600; }
 .call-panel [data-call-paid] { color: var(--muted); }
 /* An ended call that never started (e.g. above the grant ceiling): read it, nothing moved. */
-.call-panel [data-call-ended] { color: var(--ink); background: var(--raised); border-left: 3px solid var(--money); border-radius: var(--r-control); padding: var(--s-2) var(--s-3); max-width: none; line-height: 1.5; }
+.call-panel .call-status:has([data-call-ended]) { color: var(--ink); background: var(--raised); border-left: 3px solid var(--money); border-radius: var(--r-control); padding: var(--s-2) var(--s-3); max-width: none; line-height: 1.5; }
 .call-panel .duration { color: var(--muted); }
 .meeting-panel .meeting-legs label { font-size: var(--t-sm); }
 
@@ -1479,7 +1539,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .send-btn.primary, .primary.soft.send-btn, .send-btn, .composer .attach { height: 44px; min-height: 44px; border-radius: 22px; }
   .node-target-section.compact .node-target-card { min-height: 44px; }
   /* `.track-head > .track-title-btn` sets min-width: 0 so a long name can ellipsize.
-     That beats a bare `.track-title-btn` rule, so a short name ("Maya", "Josh") stayed under 44 px. */
+     That beats a bare `.track-title-btn` rule, so a short name ("Robin", "Kim") stayed under 44 px. */
   .track-head > .track-title-btn { min-width: 44px; }
   .composer-info > summary { min-width: 44px; }
   /* nowrap + flex: 1 let "Accept · 12,345 sats" and "Decline · …" overflow a phone call card. */
@@ -1487,6 +1547,15 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .call-repairs .call-actions { flex-direction: column; align-items: stretch; }
   .call-panel .call-actions button,
   .call-repairs .call-actions button { flex: none; width: 100%; white-space: normal; text-align: center; }
+  /* On a phone-sized window a ringing or calling card fills the screen, like a phone call: the person at the top, the choices at the bottom. */
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) {
+    top: max(var(--s-4), env(safe-area-inset-top, 0px)); bottom: max(var(--s-4), env(safe-area-inset-bottom, 0px));
+    left: max(var(--s-4), env(safe-area-inset-left, 0px)); right: max(var(--s-4), env(safe-area-inset-right, 0px));
+    width: auto; max-height: none; padding: var(--s-6) var(--s-4) var(--s-4);
+  }
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) .call-head { padding-top: 8dvh; padding-bottom: var(--s-4); }
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) .call-head .call-avatar { width: 96px; height: 96px; font-size: 2rem; }
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) .call-actions { margin-top: auto; }
   /* Message bar: the text gets its own full row; emoji, voice, + and Send sit under it. */
   .signal-bar { flex-wrap: wrap; row-gap: var(--s-2); }
   .signal-bar > textarea { order: -1; flex: 1 1 100%; }
@@ -1963,3 +2032,32 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
 .approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; list-style: decimal; }
 .approval-steps > li + li { margin-top: var(--s-2); }
 .approval-steps code { display: block; margin: var(--s-1) 0; overflow-wrap: anywhere; }
+
+/* The Ring confirmation on phones: a sheet at the bottom of the screen, inside the safe area, never taller than it.
+   With large text it scrolls up and down only: every word wraps inside it, and Cancel and Ring stay pinned at its foot,
+   each on its own row when they do not fit side by side. Margins and padding are in px so large text keeps its width. */
+@media (max-width: 480px) {
+  .call-confirm {
+    position: fixed; top: auto; left: max(12px, var(--safe-area-left, 0px)); right: max(12px, var(--safe-area-right, 0px));
+    bottom: max(12px, var(--safe-area-bottom, 0px)); width: auto; max-width: none; z-index: 55; padding: 12px;
+    max-height: calc(100dvh - max(12px, var(--safe-area-top, 0px)) - max(12px, var(--safe-area-bottom, 0px)));
+    overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
+  }
+  .call-confirm > * { min-width: 0; max-width: 100%; }
+  .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; max-width: none; }
+  .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+}
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm {
+  position: fixed; top: auto; left: max(12px, var(--safe-area-left)); right: max(12px, var(--safe-area-right));
+  bottom: max(12px, var(--safe-area-bottom)); width: auto; max-width: none; z-index: 55; padding: 12px;
+  max-height: calc(100dvh - max(12px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+  overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
+}
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm > * { min-width: 0; max-width: 100%; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; max-width: none; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* iOS keeps the full layout height under the keyboard: sit on the keyboard and fit the visible area, like .call-panel and .toast. */
+html[data-platform='ios'] .call-confirm {
+  bottom: calc(var(--keyboard-inset) + max(12px, var(--safe-area-bottom)));
+  max-height: calc(var(--visible-height, 100dvh) - max(12px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+}
