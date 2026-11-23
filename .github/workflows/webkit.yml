@@ -26,12 +26,20 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
-    # The browser and Linux package install alone has taken up to 10 minutes,
-    # and the suite takes 5-6, so the old 10-minute limit cancelled healthy runs.
+    # Playwright's own image for the locked @playwright/test version (1.65.1):
+    # WebKit and every Linux package it needs are already in it, so no apt or
+    # browser download runs here (those alone took up to 12 minutes).
+    # Pinned by digest; bump it together with @playwright/test.
+    container:
+      image: mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
+      # Change detection needs git history; the image may not ship git.
+      - name: Make sure git is present
+        timeout-minutes: 4
+        run: command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends git)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -82,23 +90,13 @@ jobs:
       - name: Install locked frontend dependencies
         if: steps.changes.outputs.run != 'false'
         run: npm ci --ignore-scripts --no-audit --no-fund
-      # The browser build is keyed on the locked Playwright version; the Linux
-      # packages it needs are still installed on every run.
-      - name: Cache the Playwright WebKit browser
-        id: browser-cache
+      # The image's browsers must be the locked version; a mismatch fails here,
+      # in seconds, instead of downloading anything.
+      - name: Check the image matches the locked Playwright
         if: steps.changes.outputs.run != 'false'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-webkit-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-      - name: Install WebKit and Linux dependencies
-        if: steps.changes.outputs.run != 'false' && steps.browser-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 12
-        run: npx playwright install --with-deps webkit
-      - name: Install WebKit's Linux dependencies (cached browser)
-        if: steps.changes.outputs.run != 'false' && steps.browser-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 12
-        run: npx playwright install-deps webkit
+        run: |
+          test "$(node -p "require('@playwright/test/package.json').version")" = "1.65.1"
+          ls -d /ms-playwright/webkit-* >/dev/null
       - name: Safe areas, Dynamic Type, keyboard and inputs
         if: steps.changes.outputs.run != 'false'
         run: npm run test:webkit
