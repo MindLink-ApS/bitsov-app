@@ -239,7 +239,9 @@ fn widened_access_lists_are_refused_and_left_unchanged() {
             }
             assert_refused(result, *why);
         }
-        if *why != Refusal::EmptyDacl {
+        // The OS also denies the owner's own read of these two; their content
+        // was never opened for writing above.
+        if *why != Refusal::EmptyDacl && *why != Refusal::DenyAce {
             assert_eq!(std::fs::read(&path).unwrap(), b"fixture", "{sddl}");
         }
     }
