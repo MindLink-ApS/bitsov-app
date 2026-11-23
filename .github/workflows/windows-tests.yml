@@ -170,8 +170,22 @@ jobs:
             $code = Run-Limited (Join-Path $dir ([IO.Path]::GetFileName($e))) '--test-threads=1' $name
             if ($code -ne 0) { $failed++ }
           }
-          $filters = '--test-threads=1 budget::tests::windows_store spend_journal::windows_journal_tests ' +
-                     'pairing::windows_store_tests trust::windows_store_tests app::windows_ai_storage_tests'
+          # Every Windows-only store suite in the app library (libtest filters
+          # match test paths by substring), plus the DPAPI sealer.
+          $suites = @(
+            'budget::tests::windows_store', 'spend_journal::windows_journal_tests',
+            'pairing::windows_store_tests', 'pairing::key::windows_store::tests',
+            'trust::windows_store_tests', 'app::windows_ai_storage_tests',
+            'app::device::windows_store_tests', 'app::home_keychain_windows::tests',
+            'remote_access::windows_store::tests', 'at_rest::dpapi')
+          # The list must not drift: any test under a Windows-named module that
+          # none of the suites covers fails the job (listing reads no storage).
+          foreach ($e in $app) {
+            $listed = & $e --list --format terse 2>$null | ForEach-Object { ($_ -split ': ')[0] }
+            $missed = @($listed | Where-Object { $path = $_; ($path -match '(^|::)[a-z_]*windows[a-z_]*::') -and -not ($suites | Where-Object { $path.Contains($_) }) })
+            if ($missed.Count -gt 0) { throw "Windows store tests not in the suite list: $($missed -join ', ')" }
+          }
+          $filters = '--test-threads=1 ' + ($suites -join ' ')
           foreach ($e in $app) {
             $name = 'app-' + [IO.Path]::GetFileNameWithoutExtension($e)
             $code = Run-Limited (Join-Path $dir ([IO.Path]::GetFileName($e))) $filters $name
