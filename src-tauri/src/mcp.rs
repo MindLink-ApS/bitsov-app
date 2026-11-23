@@ -1,7 +1,8 @@
 //! MCP client grants: contract types and a pure, fail-closed checker.
 //!
 //! **Not wired.** This module is the first slice of the design in
-//! `docs/AI-MCP-DESIGN.md` ("MCP clients bound by sats and scopes"). Nothing
+//! `docs/AI-MCP-DESIGN.md` ("MCP clients bound by sats and scopes"), which is
+//! added by the design pull request (#392); merge that first. Nothing
 //! here is registered as a Tauri command, reaches the node, the spend journal,
 //! the payment path or any listener. It compiles only under `cfg(test)` or the
 //! off-by-default `mcp-grant` feature, so the shipped app does not contain it.
