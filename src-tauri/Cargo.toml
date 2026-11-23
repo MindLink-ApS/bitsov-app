@@ -97,6 +97,9 @@ sit-mock = ["dep:mock-node"]
 # `konsensus` via BITSOV_DEV_SIDECAR instead of the signature-verified sidecar.
 # A compile error in release builds. Never add this to `default`.
 dev-node = []
+# Not wired (src/mcp.rs, docs/AI-MCP-DESIGN.md): MCP client grant checker only.
+# No command, listener or payment path uses it. Off by default.
+mcp-grant = []
 # Sealed call audio, a test build only (src/control/call_seal.rs). Off by default.
 # Build with VITE_CALL_SEAL=sealed as well: build.rs refuses one without the other.
 # Without it, no seal command, permission, capability or direct dependency exists.
