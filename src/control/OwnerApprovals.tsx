@@ -1,9 +1,9 @@
 import { t as tr } from '../i18n';
-import { t } from '../i18n';
+import { language, t } from '../i18n';
 import { deviceWord, isMobilePlatform } from '../platform';
 import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
 import type { ActionError } from './types';
-import { refusalText, secondsLeft, shortKey, termLines, type ApprovalView } from './ownerApproval';
+import { approvalReason, refusalText, secondsLeft, shortKey, termLines, type ApprovalView } from './ownerApproval';
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
@@ -97,6 +97,13 @@ export function OwnerApprovals(props: OwnerApprovalsProps) {
                 <ul class="owner-approval-terms" data-approval-terms role="list">
                   <For each={termLines(v, props.nameOf)}>{(line, i) => <li classList={{ lead: i() === 0 }}>{line}</li>}</For>
                 </ul>
+                {/* Approving here (a phone, no review sheet): the same exact terms the sheet shows and the
+                    system prompt states, verbatim and in English, so what is read is what is signed. */}
+                <Show when={!props.onReview}>
+                  <p class="hint">{t('ownerApprovalExactTerms', device())}</p>
+                  <p class="owner-sheet-terms" lang="en" data-approval-terms-exact>{approvalReason(v)}</p>
+                  <Show when={language() === 'da'}><p class="hint" data-approval-terms-language>{t('ownerApprovalTermsLanguageDevice', device())}</p></Show>
+                </Show>
                 <p class="hint" data-approval-client>
                   {t('ownerApprovalRequester', shortKey(v.client_pubkey))}
                 </p>

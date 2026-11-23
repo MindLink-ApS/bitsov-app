@@ -24,7 +24,7 @@ it('retains the payment, on-chain and fee meanings in Danish copy', () => {
   expect(t('uiOnChainFundsHeldForAnchorChannelClosing')).toContain('tilbageholdt til gebyrer ved lukning');
   expect(t('uiLocalOKMoneyReady')).toBe('Forbundet · Klar til at betale');
   expect(t('extraLocalOKMoneyReady', 'x')).toBe('Lokalt OK · Betalinger klar · x');
-  expect(t('moneyNotReady')).toBe('Betalinger er ikke klar endnu. Din node prøver automatisk igen.');
+  expect(t('moneyNotReady')).toBe('Betalinger er ikke klar endnu. Din boks prøver automatisk igen.');
 });
 it('changes every provider card and the dismiss accessible name with the language', () => {
   setLanguagePref('en');

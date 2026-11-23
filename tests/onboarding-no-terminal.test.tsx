@@ -78,8 +78,8 @@ describe.each(['en', 'da'] as const)('onboarding without terminal commands (%s)'
     document.body.append(root);
     dispose = render(() => <LockedNode state="not-enrolled" onUnlock={noop} />, root);
     expect(root.textContent).toContain(lang === 'en'
-      ? 'Your node is locked. Open BitSov on a device that is already approved as an owner, or ask whoever set up the box to unlock it.'
-      : 'Din node er låst. Åbn BitSov på en enhed, der allerede er godkendt som ejer, eller bed den, der satte boksen op, om at låse den op.');
+      ? 'Your box is locked. Open BitSov on a device that is already approved as an owner, or ask whoever set up the box to unlock it.'
+      : 'Din boks er låst. Åbn BitSov på en enhed, der allerede er godkendt som ejer, eller bed den, der satte boksen op, om at låse den op.');
     const detail = root.querySelector('details')!;
     expect(detail.querySelector('summary')?.textContent).toBe(lang === 'en' ? 'What does this mean?' : 'Hvad betyder det?');
     detail.open = true;
@@ -97,7 +97,7 @@ describe.each(['en', 'da'] as const)('onboarding without terminal commands (%s)'
     expect(root.textContent).toContain(lang === 'en' ? 'backup' : 'sikkerhedskopi');
     expect(root.textContent).toContain(lang === 'en' ? 'ask whoever set up the box' : 'den, der satte boksen op');
     expect(root.querySelector('[data-repair-consent]')?.textContent).toBe(lang === 'en'
-      ? 'I agree — update and start my node' : 'Jeg accepterer — opdater og start min node');
+      ? 'I agree — update and start my box' : 'Jeg accepterer — opdater og start min boks');
     root.querySelector<HTMLButtonElement>('[data-repair-decline]')!.click();
     expect(root.querySelector('[data-repair-consent]')).toBeNull();
     expect(confirm).not.toHaveBeenCalled();

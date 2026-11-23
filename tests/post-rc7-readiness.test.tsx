@@ -87,7 +87,7 @@ it('asks separately for the page price after marker repair, and sends no price c
   expect(mount.textContent).not.toContain('node sidecar terminated');
   expect(invoke.mock.calls.filter(([cmd]) => cmd === 'node_repair_price_floor')).toHaveLength(0);
   mount.querySelector<HTMLButtonElement>('[data-repair-decline]')!.click();
-  expect(mount.textContent).toContain('Your node remains stopped');
+  expect(mount.textContent).toContain('Your box remains stopped');
   expect(invoke.mock.calls.filter(([cmd]) => cmd === 'node_repair_price_floor')).toHaveLength(0);
   mount.querySelector<HTMLButtonElement>('[data-repair-review]')!.click();
   mount.querySelector<HTMLButtonElement>('[data-repair-consent]')!.click();

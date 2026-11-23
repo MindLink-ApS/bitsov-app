@@ -80,16 +80,50 @@ impl Drop for LocalBox {
     }
 }
 
+/// The NUL-terminated wide path handed to the raw Win32 calls, in long-path
+/// (`\\?\`) form. Without it those calls stop at MAX_PATH (260 characters):
+/// a store path under a user profile plus the spend journal's hashed folders
+/// is longer than that, and the call fails as "path not found". `std::fs`
+/// adds this prefix itself; the raw calls here do not.
 fn wide(path: &Path) -> io::Result<Vec<u16>> {
-    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-    if wide.contains(&0) {
+    if path.as_os_str().encode_wide().any(|unit| unit == 0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "path contains a NUL character",
         ));
     }
+    let mut wide = long_path(path)?;
     wide.push(0);
     Ok(wide)
+}
+
+/// `path` made absolute (`.` and `..` resolved, as the plain form would be)
+/// and written in verbatim form: `C:\…` → `\\?\C:\…`, `\\server\share\…` →
+/// `\\?\UNC\server\share\…`. Paths already verbatim or device paths are kept.
+fn long_path(path: &Path) -> io::Result<Vec<u16>> {
+    use std::path::{Component, Prefix};
+    let absolute = std::path::absolute(path)?;
+    let units: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    let utf16 = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    let mut out = match absolute.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(_) => {
+                let mut out = utf16(r"\\?\");
+                out.extend_from_slice(&units);
+                out
+            }
+            Prefix::UNC(_, _) => {
+                // Drop the leading `\\` of `\\server\share`.
+                let mut out = utf16(r"\\?\UNC\");
+                out.extend_from_slice(&units[2..]);
+                out
+            }
+            _ => units,
+        },
+        _ => units,
+    };
+    out.shrink_to_fit();
+    Ok(out)
 }
 
 /// The current user's SID, copied out of the process token.

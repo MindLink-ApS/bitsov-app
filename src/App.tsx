@@ -317,7 +317,7 @@ function AppScreen() {
     onDone={() => { setPhoneDone(true); void poll(); }} />;
   const firstRun = (
     <Show when={!phoneFlow() && !phoneTrustFlow() && (!onPhone || phoneSetup() !== null)}>
-    <div class="first-run" data-first-run>
+    <div class="first-run" data-first-run classList={{ 'phone-first-run': onPhone }}>
       {/* While the setup steps are hidden, the offline card is the page: its title is the page's h1. */}
       {offlineScreen(() => (setupHidden() ? 1 : 2))}
       <Show when={setupHidden()}>
