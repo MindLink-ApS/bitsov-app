@@ -173,7 +173,13 @@ test.describe('phone shell', () => {
       await expect(page.locator(SEND)).toBeVisible();
       await ringFromHeader(page);
       await expect(page.locator('[data-call-panel="calling"]')).toBeVisible({ timeout: 10_000 });
-      await composerClear(page, 'calling');
+      // On a phone-sized window "Calling…" is the full-screen call sheet (like a phone call), over
+      // the composer by design: it fills the screen and its own choices are whole. (Its ringing
+      // motion scales it slightly, so no exact edges here.) The floating card that must clear the
+      // composer is the live one, below.
+      const sheet = await boxOf(page, '[data-call-panel="calling"]');
+      expect(sheet.left >= 0 && sheet.right <= 360, 'calling: inside the window').toBe(true);
+      expect(sheet.bottom - sheet.top, 'calling: fills the screen').toBeGreaterThan(740 * 0.8);
       await hangUpReachable(page, 'calling');
       await makeLive(page);
       await composerClear(page, 'live');

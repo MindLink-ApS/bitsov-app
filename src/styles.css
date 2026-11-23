@@ -2039,6 +2039,14 @@ html[data-platform='ios'] .call-panel[data-call-panel]:not(.waiting-calls .call-
   --call-bottom: max(calc(var(--keyboard-inset) + max(var(--s-6), var(--safe-area-bottom))), calc(var(--call-composer-clear, 0px) + var(--s-3)));
   max-height: calc(var(--visible-height, 100dvh) + var(--keyboard-inset) - max(var(--s-4), var(--safe-area-top)) - var(--call-bottom));
 }
+/* On a phone-sized window a ringing or calling card already fills the screen over the composer:
+   keep that full-screen sheet (see the max-width: 680px rules) instead of lifting it. */
+@media (max-width: 680px) {
+  html .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]):not(.waiting-calls .call-panel) {
+    bottom: max(var(--s-4), env(safe-area-inset-bottom, 0px));
+    max-height: none;
+  }
+}
 /* Only the floating card: a waiting-call card in the stack keeps its actions in place. */
 .call-panel[data-call-panel]:not(.waiting-calls .call-panel) > .call-actions { position: sticky; bottom: 0; z-index: 1; margin-block: calc(-1 * var(--s-2)); padding-block: var(--s-2); background: inherit; }
 
