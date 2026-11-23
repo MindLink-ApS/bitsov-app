@@ -396,6 +396,45 @@ fn sync_dir_refuses_files_and_reports_errors() {
 }
 
 #[test]
+fn paths_are_handed_to_win32_in_long_form() {
+    let text = |path: &str| String::from_utf16(&long_path(Path::new(path)).unwrap()).unwrap();
+    assert_eq!(text(r"C:\data\a\store"), r"\\?\C:\data\a\store");
+    // `.` and `..` are resolved before the verbatim prefix turns them literal.
+    assert_eq!(text(r"C:\data\a\.\x\..\store"), r"\\?\C:\data\a\store");
+    assert_eq!(text(r"\\server\share\store"), r"\\?\UNC\server\share\store");
+    assert_eq!(text(r"\\?\C:\already"), r"\\?\C:\already");
+    // A relative path becomes absolute against the current folder.
+    assert!(text("relative").starts_with(r"\\?\"));
+    let wide = wide(Path::new(r"C:\x")).unwrap();
+    assert_eq!(wide.last(), Some(&0));
+    assert!(wide(Path::new("a\0b")).is_err());
+}
+
+#[test]
+fn a_store_deeper_than_max_path_works_end_to_end() {
+    unelevated!();
+    // The spend journal nests three 64-character hashed folders under the
+    // store, so its call records sit well past 260 characters.
+    let scratch = Scratch::new("deep");
+    let mut dir = scratch.private();
+    for part in ["a", "b", "c"] {
+        dir = dir.join(part.repeat(64));
+        create_dir_private(&dir).unwrap();
+        sync_dir(dir.parent().unwrap()).unwrap();
+    }
+    let dest = dir.join(format!("{}.json", "d".repeat(36)));
+    assert!(dest.as_os_str().len() > 260, "{}", dest.as_os_str().len());
+    let mut file = create_new_private(&dest.with_extension("json.next")).unwrap();
+    file.replace_contents(b"deep").unwrap();
+    assert_eq!(&*file.read_bounded(4).unwrap(), b"deep");
+    publish(file, &dest, b"deep", false).unwrap();
+    let mut read = open_verified(&dest, ObjectKind::File, Access::Read).unwrap();
+    assert_eq!(&*read.read_bounded(4).unwrap(), b"deep");
+    open_verified(&dir, ObjectKind::Dir, Access::Read).unwrap();
+    sync_dir(&dir).unwrap();
+}
+
+#[test]
 fn publish_without_replace_keeps_an_existing_target() {
     unelevated!();
     let scratch = Scratch::new("noclobber");

@@ -154,9 +154,9 @@ describe('Decline and Accept with free replies (A4)', () => {
     expect(authorize).not.toHaveBeenCalled();
     expect(t.spendRequests).toEqual([]);
     expect(t.last()).toMatchObject({ phase: 'ended', reason: 'declined', paidMsat: 0, pendingCount: 0, unknownCount: 0, freeDecline: 'delivered' });
-    expect(callEndLine(t.last(), 'Maya').text).toBe('Declined. They were told, and it cost nothing.');
+    expect(callEndLine(t.last(), 'Robin').text).toBe('Declined. They were told, and it cost nothing.');
     setLanguagePref('da');
-    expect(callEndLine(t.last(), 'Maya').text).toBe('Afvist. Den anden fik besked, og det kostede intet.');
+    expect(callEndLine(t.last(), 'Robin').text).toBe('Afvist. Den anden fik besked, og det kostede intet.');
   });
 
   it.each([
@@ -180,9 +180,9 @@ describe('Decline and Accept with free replies (A4)', () => {
     expect(t.freeSent).toHaveLength(1);
     expect(t.sent).toEqual([]);
     expect(t.last()).toMatchObject({ phase: 'ended', reason: 'declined', paidMsat: 0, unknownCount: 0, freeDecline: state });
-    expect(callEndLine(t.last(), 'Maya').text).toBe(en);
+    expect(callEndLine(t.last(), 'Robin').text).toBe(en);
     setLanguagePref('da');
-    expect(callEndLine(t.last(), 'Maya').text).toBe(da);
+    expect(callEndLine(t.last(), 'Robin').text).toBe(da);
   });
 
   it('a free Decline whose host call never returns is unknown, never paid', async () => {
@@ -261,9 +261,9 @@ describe('Decline and Accept with free replies (A4)', () => {
     await ending;
     expect(t.sent).toEqual([]);
     expect(t.last()).toMatchObject({ phase: 'ended', reason: 'hangup', hangupUnsent: true, paidMsat: 0 });
-    expect(callEndLine(t.last(), 'Maya').text).toBe('Hung up here, but they could not be told: their call price could not be read. They may still be on the line until the call ends by itself. Nothing was paid for it.');
+    expect(callEndLine(t.last(), 'Robin').text).toBe('Hung up here, but they could not be told: their call price could not be read. They may still be on the line until the call ends by itself. Nothing was paid for it.');
     setLanguagePref('da');
-    expect(callEndLine(t.last(), 'Maya').text).toMatch(/^Lagt på her/);
+    expect(callEndLine(t.last(), 'Robin').text).toMatch(/^Lagt på her/);
   });
 
   it.each([
@@ -738,8 +738,8 @@ describe('a call the box approval cut off (A7)', () => {
     t.e.mediaClosed(ID, { refused: true });
     setLanguagePref(lang);
     expect(t.last().budgetEnded).toBe(true);
-    expect(callEndLine(t.last(), 'Maya').text).toBe(said);
-    expect(callEndLine(t.last(), 'Maya').text).not.toMatch(/minute|minut/i);
+    expect(callEndLine(t.last(), 'Robin').text).toBe(said);
+    expect(callEndLine(t.last(), 'Robin').text).not.toMatch(/minute|minut/i);
   });
   it('a refusal before the approval ended, or on a continuity node, keeps the plain link-closed line', async () => {
     for (const [continuity, at] of [[false, 30_000], [true, 120_000]] as const) {
@@ -750,7 +750,7 @@ describe('a call the box approval cut off (A7)', () => {
       now.t = at;
       t.e.mediaClosed(ID, { refused: true });
       expect(t.last().budgetEnded).toBe(false);
-      expect(callEndLine(t.last(), 'Maya').text).not.toMatch(/budget/i);
+      expect(callEndLine(t.last(), 'Robin').text).not.toMatch(/budget/i);
     }
   });
 });
@@ -764,7 +764,7 @@ describe('no terminal text on the new call lines (P23)', () => {
         : { ok: false, error: { code: outcome === 'refused' ? 'call_reply_not_sent' : 'call_reply_unknown', message: 'x' } as ActionError } });
       await t.e.receive(offer(), OWN);
       await t.e.refuse();
-      lines.push(callEndLine(t.last(), 'Maya').text);
+      lines.push(callEndLine(t.last(), 'Robin').text);
     }
     expect(lines.every((l) => l.length > 0 && !CLI.test(l))).toBe(true);
   });

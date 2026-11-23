@@ -37,7 +37,7 @@ const directErrors = () => rust('src-tauri/src').flatMap((f) => {
     .map((m) => m[1].replace(/\\\s*\n\s*/g, '').replace(/\{[A-Za-z_]*\}/g, '{}'));
 });
 // Not read as they stand: the renderer words these itself (`asActionError`), or they aren't refusals a person sees.
-const NOT_SENTENCES = /^(Hanging up this call|Money is not ready|This permission covers|Send a message first|No pending spend)|konsensus /;
+const NOT_SENTENCES = /^(Hanging up this call|Money is not ready|This permission covers|Send a message first|No pending spend|Synthetic fault for this test only)|konsensus /;
 
 afterEach(() => setLanguagePref('en'));
 

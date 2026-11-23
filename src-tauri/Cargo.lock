@@ -426,6 +426,7 @@ dependencies = [
  "libc",
  "lightning-invoice",
  "mock-node",
+ "poly1305",
  "reqwest 0.12.28",
  "rfd",
  "ring",
@@ -3326,6 +3327,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]

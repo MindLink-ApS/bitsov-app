@@ -1068,7 +1068,7 @@ describe('node-routed calls carry audio only, and a dead media session stops the
     expect(e.last().phase).toBe('live');
     e.link({ link: 'ended', detail: `the node refused the media socket (${code})` });
     expect(e.last()).toMatchObject({ phase: 'ended', budgetEnded: budget });
-    expect(callEndLine(e.last(), 'Maya').text === 'The budget ran out during the call, so it ended.').toBe(budget);
+    expect(callEndLine(e.last(), 'Robin').text === 'The budget ran out during the call, so it ended.').toBe(budget);
   });
 
   it('frozen media: a node link down for 3 s shows Reconnecting, back to Live when it returns, and ends after its grace; nothing extra is sent', async () => {
@@ -1805,7 +1805,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
       quote: () => { if (priced) return QUOTE; throw { code: 'call_price_unknown', message: 'Their node gave no live call price.' }; },
       replies: {
         node_overview: OVERVIEW(['call_reply_free_v1']),
-        peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true, free_replies: true }],
+        peers_list: () => [{ node_id: A, addr: null, label: 'Robin', connected: true, fingerprint: null, meetings: true, free_replies: true }],
         call_free_reply: (args) => ({ message_id: 'r1', kind: (args as { kind: number }).kind, amount_msat: 0, total_msat: 0, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: Date.now() }),
       } });
     await openShell();

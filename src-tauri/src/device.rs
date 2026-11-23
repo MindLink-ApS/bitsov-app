@@ -326,14 +326,43 @@ pub fn read_private(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     std::fs::read(path).map(Some)
 }
 
-// Unix file modes and no-follow semantics have no implemented equivalent here.
-#[cfg(not(unix))]
+/// Largest private device file read on Windows. Records, approvals and
+/// markers are a few hundred bytes; a larger file is refused, never read.
+#[cfg(windows)]
+pub const PRIVATE_MAX_BYTES: u64 = 64 * 1024;
+
+/// Windows: the same owner-only store as the budget book and the pairing
+/// files. The folder and file must verify (owner, access list, no reparse
+/// point, one link) before any byte is read or replaced; the bytes are
+/// published only after a read-back through the same handle matches.
+#[cfg(windows)]
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        crate::private_fs::ensure_dir(dir)?;
+    }
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    crate::private_fs::write_replacing_verified(&tmp, path, bytes, |e| e, |readback| {
+        if readback == bytes { Ok(()) } else { Err(std::io::Error::other("read-back did not match")) }
+    })
+}
+
+/// Windows: `None` only when nothing is at `path`; anything there that does
+/// not verify as this user's private file is an error, not an absence.
+#[cfg(windows)]
+pub fn read_private(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    crate::private_fs::read_optional(path, PRIVATE_MAX_BYTES).map(|bytes| bytes.map(|b| b.to_vec()))
+}
+
+// Neither Unix modes nor a verified Windows store: refuse.
+#[cfg(not(any(unix, windows)))]
 pub fn write_private(_path: &Path, _bytes: &[u8]) -> std::io::Result<()> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
         "private device storage is not supported on this platform"))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn read_private(_path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
         "private device storage is not supported on this platform"))
@@ -677,7 +706,52 @@ mod node_off_tests {
     }
 }
 
-#[cfg(all(test, not(unix)))]
+#[cfg(all(test, windows))]
+mod windows_store_tests {
+    use super::*;
+    use crate::private_fs::fixtures::{elevated, grant_everyone_read, temp_root};
+
+    #[test]
+    fn a_record_round_trips_and_every_object_is_private() {
+        if elevated() { return; }
+        let store = temp_root("device-w01").join("pairing");
+        let record = Record { public_key: "04ab".into(), ..Default::default() };
+        save_record(&store, &record).unwrap();
+        assert_eq!(load_record(&store), Some(record.clone()));
+        crate::private_fs::verify_dir(&store).unwrap();
+        crate::private_fs::verify_file(&store.join(RECORD_FILE)).unwrap();
+        assert!(!store.join("device-key.json.tmp").exists());
+        // A second save replaces the verified record.
+        let next = Record { public_key: "04cd".into(), ..record };
+        save_record(&store, &next).unwrap();
+        assert_eq!(load_record(&store), Some(next));
+    }
+
+    #[test]
+    fn nothing_there_is_none_and_a_widened_file_is_refused_and_kept() {
+        if elevated() { return; }
+        let store = temp_root("device-w02").join("pairing");
+        let path = store.join("approval-ab.json");
+        assert_eq!(read_private(&path).unwrap(), None);
+        write_private(&path, b"{}").unwrap();
+        grant_everyone_read(&path);
+        assert!(read_private(&path).is_err(), "a file others can read is not loaded");
+        assert!(write_private(&path, b"[]").is_err(), "a file others can read is not replaced");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn an_oversized_file_is_refused() {
+        if elevated() { return; }
+        let store = temp_root("device-w03").join("pairing");
+        let path = store.join(RECORD_FILE);
+        write_private(&path, &vec![b' '; PRIVATE_MAX_BYTES as usize + 1]).unwrap();
+        assert!(read_private(&path).is_err());
+        assert_eq!(load_record(&store), None);
+    }
+}
+
+#[cfg(all(test, not(any(unix, windows))))]
 mod unsupported_platform_tests {
     use super::*;
 
