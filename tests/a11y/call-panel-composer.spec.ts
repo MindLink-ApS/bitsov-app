@@ -150,6 +150,33 @@ test.describe('desktop', () => {
   });
 });
 
+test.describe('phone shell, landscape', () => {
+  test.use({ userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1' });
+  // Wider than the full-screen sheet's 480 px: the calling card floats, so it must clear the composer.
+  test('en 667x375: the floating calling card stays clear of Send, + and the microphone', async ({ page }) => {
+    await page.route('**/src/control/sample.ts*', async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, body: await response.text() + `
+        const originalSampleSource = sampleSource;
+        sampleSource = (opts) => {
+          const source = originalSampleSource(opts);
+          const pairing = source.pairingStatus;
+          source.pairingStatus = async () => ({ ...await pairing(), scopes: ['read', 'receive', 'spend'] });
+          return source;
+        };
+      ` });
+    });
+    await page.setViewportSize({ width: 667, height: 375 });
+    await page.goto(`${PHONE_SHELL_PREVIEW}?scene=spend-open&lang=en`);
+    await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
+    await expect(page.locator(SEND)).toBeVisible();
+    await ringFromHeader(page);
+    await expect(page.locator('[data-call-panel="calling"]')).toBeVisible({ timeout: 10_000 });
+    await composerClear(page, 'calling');
+    await hangUpReachable(page, 'calling');
+  });
+});
+
 test.describe('phone shell', () => {
   test.use({ userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1' });
   for (const lang of ['en', 'da'] as const) {

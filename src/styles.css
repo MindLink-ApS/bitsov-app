@@ -2040,8 +2040,9 @@ html[data-platform='ios'] .call-panel[data-call-panel]:not(.waiting-calls .call-
   max-height: calc(var(--visible-height, 100dvh) + var(--keyboard-inset) - max(var(--s-4), var(--safe-area-top)) - var(--call-bottom));
 }
 /* On a phone-sized window a ringing or calling card already fills the screen over the composer:
-   keep that full-screen sheet (see the max-width: 680px rules) instead of lifting it. */
-@media (max-width: 680px) {
+   keep that full-screen sheet (the max-width: 480px rules) instead of lifting it. Wider windows
+   keep the floating card, which is lifted above the composer like any other. */
+@media (max-width: 480px) {
   html .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]):not(.waiting-calls .call-panel) {
     bottom: max(var(--s-4), env(safe-area-inset-bottom, 0px));
     max-height: none;
