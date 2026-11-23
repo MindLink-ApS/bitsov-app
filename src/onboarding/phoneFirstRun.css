@@ -1,0 +1,39 @@
+/* Phones: the general first run wears the phone setup flow's face (phoneOnboarding.css).
+   Same column, type, progress bars and a primary action in the thumb's reach. Layout only. */
+.first-run.phone-first-run { align-items: stretch; gap: 24px; padding: max(28px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); font: -apple-system-body; font-family: var(--font-sans, inherit); }
+.first-run.phone-first-run::before { display: none; }
+.phone-first-run > *, .phone-first-run > .setup-steps > * { max-width: 440px; margin-inline: auto; }
+.phone-first-run .onboarding { gap: 20px; }
+
+/* Progress: equal bars with the label underneath, as in the phone flow. */
+.phone-first-run .stepper { flex-wrap: nowrap; align-items: stretch; gap: 8px; }
+.phone-first-run .stepper .step { flex: 1; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; font-size: 0.8em; color: var(--muted); }
+.phone-first-run .stepper .step[data-step='node'] { display: none; }
+.phone-first-run .stepper .pip { width: auto; height: 4px; border-radius: 4px; }
+.phone-first-run .stepper .step.done .pip, .phone-first-run .stepper .step.active .pip { background: var(--ink); }
+.phone-first-run .stepper .step.failed .pip { background: var(--err); }
+.phone-first-run .stepper .step.active { color: var(--ink); font-weight: 600; }
+.phone-first-run .step-optional { display: none; }
+
+/* Words first, in the app face; no hero art and no one-option choice. */
+.phone-first-run .ob-head { padding-top: 4vh; gap: 12px; }
+.phone-first-run .ob-head .box-illustration { display: none; }
+.phone-first-run .ob-head h1 { font-family: inherit; font-weight: 700; font-size: max(1.75em, 26px); line-height: 1.15; letter-spacing: 0; }
+.phone-first-run .ob-head .lede { font-size: max(1em, 17px); line-height: 1.5; color: var(--ink); }
+.phone-first-run .node-target-section { display: none; }
+
+/* Panels read as plain sections; controls are thumb-sized. */
+.first-run.phone-first-run .remote-form { display: flex; flex-direction: column; gap: 12px; background: none; border: 0; padding: 0; box-shadow: none; }
+.phone-first-run .remote-form h2 { font-size: 1.15em; margin: 0; }
+.phone-first-run .remote-form .hint { margin: 0; line-height: 1.45; }
+.phone-first-run button, .phone-first-run input { min-height: 48px; box-sizing: border-box; font-size: max(1em, 17px); }
+.phone-first-run summary { min-height: 44px; display: flex; align-items: center; font-size: 15px; color: var(--muted); }
+.phone-first-run .primary { width: 100%; white-space: normal; }
+.phone-first-run .form-actions { flex-direction: column; align-items: stretch; gap: 8px; }
+.phone-first-run .form-actions button { width: 100%; }
+/* Scan sits under the paste field, last, where the thumb is. */
+.phone-first-run [data-scan-pairing-qr].primary { order: 10; }
+.phone-first-run .remote-form > .hint:last-of-type, .phone-first-run [data-import-result] { order: 11; }
+/* Short screens: the page fills the phone and the primary action sits at the bottom. */
+.phone-first-run .onboarding, .first-run.phone-first-run .remote-form { flex: 1 0 auto; }
+.phone-first-run [data-scan-pairing-qr].primary { margin-top: auto; }

@@ -226,6 +226,7 @@ describe('control center shell', () => {
     start();
     await waitFor(() => expect(mount.querySelector('[data-gate="g6-local-trust"]')).not.toBeNull());
     expect(mount.querySelector('[data-first-run]')).not.toBeNull();
+    expect(mount.querySelector('[data-first-run]')!.classList.contains('phone-first-run')).toBe(false);
     expect(mount.querySelector('.rail')).not.toBeNull();
     expect(mount.querySelector('[data-panel="wallet"]')).toBeNull();
     expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status', 'device_key_status']));

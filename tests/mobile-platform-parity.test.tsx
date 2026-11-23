@@ -142,6 +142,8 @@ describe.each([
       : message;
     await vi.waitFor(() => expect($('.state.error [role="status"]')?.textContent).toBe(shown));
     expect($('[data-phone-onboarding]')).toBeNull();
+    // Same routing, phone face: the general first run takes the phone flow's style.
+    expect($('[data-first-run]')?.classList.contains('phone-first-run')).toBe(true);
     if (device === 'iPad') expect(mount.textContent).not.toContain('this phone');
     expect(mount.textContent).not.toContain('Your node is unavailable');
     expect(Array.from(mount.querySelectorAll('button')).some(b => b.textContent === 'Reconnect')).toBe(false);
