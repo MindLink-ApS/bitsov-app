@@ -1769,6 +1769,8 @@ mod windows_journal_tests {
         drop(journal);
         let next = Journal::open(&dir).unwrap();
         assert!(next.begin("node", "/messages/compose", &json!({}), 2000).is_err());
+        // The open journal holds its lock files exclusively; verify them once it is closed.
+        drop(next);
         crate::private_fs::verify_file(&dir.join("spend.lock")).unwrap();
         crate::private_fs::verify_file(&dir.join("history.lock")).unwrap();
     }
@@ -1975,7 +1977,9 @@ mod windows_journal_tests {
                 _ => dir.join(case),
             };
             std::fs::rename(&moved, dir.join(format!("{case}-moved"))).unwrap();
-            let empty = temp_root(&format!("redirected-{case}-empty"));
+            // A fresh private folder: the temp root itself inherits the temp
+            // folder's access list, which the private store rightly refuses.
+            let empty = temp_root(&format!("redirected-{case}-empty")).join("empty");
             crate::private_fs::ensure_dir(&empty).unwrap();
             junction(&moved, &empty);
             match case {
