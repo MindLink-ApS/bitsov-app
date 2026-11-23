@@ -48,9 +48,22 @@ jobs:
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/bin
           : > "src-tauri/bin/konsensus-${TRIPLE}.exe"
+      # Tests that need an unelevated process return early when elevated, so
+      # record the integrity level the tests run at.
+      - name: Process integrity level
+        shell: pwsh
+        run: |
+          $groups = whoami /groups
+          if ($groups -match 'S-1-16-12288') { 'integrity: high (elevated)' } elseif ($groups -match 'S-1-16-8192') { 'integrity: medium (not elevated)' } else { 'integrity: unknown' }
+      # Test executables need the Common Controls v6 manifest that tauri_build
+      # embeds only into the app executable. Applied to this job's links only.
       - name: Private-file layer and DPAPI (bitsov-ffi)
         working-directory: src-tauri
+        env:
+          RUSTFLAGS: -C link-arg=/MANIFEST:EMBED -C link-arg=/MANIFESTINPUT:${{ github.workspace }}\scripts\ci\windows-test.manifest
         run: cargo test --locked -p bitsov-ffi
       - name: App library tests
         working-directory: src-tauri
+        env:
+          RUSTFLAGS: -C link-arg=/MANIFEST:EMBED -C link-arg=/MANIFESTINPUT:${{ github.workspace }}\scripts\ci\windows-test.manifest
         run: cargo test --locked -p bitsov-app --lib
