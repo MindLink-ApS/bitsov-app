@@ -2,8 +2,11 @@
 
 This builds the existing remote-only signet profile on a native arm64 Mac.
 It creates an app ZIP and a checksum manifest on the local disk. The script
-does not sign, notarize, upload, install or launch the app. The platform linker
-may supply its usual ad-hoc executable signature; this is not a signed release.
+seals the app bundle ad-hoc (`codesign --sign -`, no signing identity) and
+requires `codesign --verify --deep --strict` to pass before archiving. Without
+that seal only the executable carries the linker's signature, and macOS can
+report a downloaded copy as damaged. The script does not sign with an identity,
+notarize, upload, install or launch the app; this is not a signed release.
 
 Commit the source changes first. Choose separate target and artifact directories
 outside the checkout, and an artifact directory that does not already exist:
@@ -32,6 +35,9 @@ interruption or termination. Dependency installation, compilation and archiving
 share one 60-minute budget. Run other local build tools separately.
 
 Source state is checked before and after compilation and before finalization.
+The check ignores user and system Git settings and the default user excludes
+file, so a global or per-user ignore list or hidden untracked files cannot make
+a changed checkout look clean.
 The wrapper uses a limited build environment and refuses local frontend
 environment files or external Cargo configuration without reading their contents.
 Remove the previous target bundle before every packaging invocation, including

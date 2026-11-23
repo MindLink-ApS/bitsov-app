@@ -184,8 +184,8 @@ class LocalArmBuild(unittest.TestCase):
         commands = []
         def external(command, root, env, deadline, gate=True):
             commands.append(command)
-            # Only the post-compile archive may skip the load and build gates.
-            self.assertEqual(gate, command[0] != "ditto")
+            # Only post-compile steps (seal, archive) may skip the load and build gates.
+            self.assertEqual(gate, command[0] not in ("ditto", "codesign"))
             self.assertEqual(env["CARGO_BUILD_JOBS"], "2")
             self.assertEqual(env["CARGO_TARGET_DIR"], str(target))
             self.assertLessEqual(deadline, time.monotonic() + 3600)
@@ -204,15 +204,25 @@ class LocalArmBuild(unittest.TestCase):
         def probe(command, **kwargs):
             if command[:3] == ["git", "rev-parse", "HEAD"]:
                 return "a" * 40 + "\n"
-            if command[:2] == ["git", "status"]:
+            if command[0] == "git" and "status" in command:
                 return ""
             if command[0] == "lipo":
                 return "arm64\n"
+            if command[0] == "codesign":
+                probes.append(command)
+                return ""
             return "version fixture\n"
+        probes = []
         with self.resources(), patch.object(subprocess, "check_output", side_effect=probe), \
              patch.object(self.builder, "run", side_effect=external):
             self.builder.build(source, target, output)
         self.assertEqual(commands[0], ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"])
+        app = str(target / "aarch64-apple-darwin/release/bundle/macos/BitSov Remote Test.app")
+        # The bundle is sealed ad-hoc (no identity) and must verify strictly before it is archived.
+        self.assertEqual(commands[2], ["codesign", "--force", "--deep", "--sign", "-", app])
+        self.assertEqual(probes, [["codesign", "--verify", "--deep", "--strict", app]])
+        self.assertEqual(commands[3][0], "ditto")
+        self.assertEqual(json.loads((output / "build.json").read_text())["signing"], "ad-hoc")
         self.assertEqual(commands[1], ["npm", "run", "tauri", "--", "build", "--bundles", "app",
                                       "--no-sign", "--ci", "--target", "aarch64-apple-darwin",
                                       "--config", "src-tauri/tauri.remote-only.conf.json", "--", "--locked"])
@@ -222,6 +232,14 @@ class LocalArmBuild(unittest.TestCase):
             digest, filename = line.split("  ")
             self.assertEqual(hashlib.sha256((output / filename).read_bytes()).hexdigest(), digest)
         self.assertEqual(json.loads((output / "build.json").read_text())["commit"], "a" * 40)
+
+    def test_a_bundle_that_does_not_verify_strictly_is_never_archived(self):
+        app = self.root / "BitSov Remote Test.app"
+        def failing(command, **kwargs):
+            raise subprocess.CalledProcessError(1, command, "code has no resources but signature indicates they must be present")
+        with patch.object(subprocess, "check_output", side_effect=failing), \
+             self.assertRaisesRegex(RuntimeError, "does not verify"):
+            self.builder.verify_seal(app)
 
     def test_dirty_source_and_stale_output_are_refused(self):
         source = self.root / "source"
@@ -367,6 +385,39 @@ class LocalArmBuild(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "Commit source changes"):
                         self.builder.build(source, self.root / "target", self.root / "output")
                     run.assert_not_called()
+
+    def test_user_git_configuration_does_not_hide_new_source_files(self):
+        source, _ = self.source_repository("user-config/source")
+        home = self.root / "user-config/home"
+        home.mkdir(parents=True)
+        (home / "hidden-by-user").write_text("new-source.rs\n")
+        (home / ".gitconfig").write_text(
+            "[status]\n\tshowUntrackedFiles = no\n[core]\n\texcludesFile = " + str(home / "hidden-by-user") + "\n")
+        (source / "new-source.rs").write_text("compiled but never committed")
+        env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        env["HOME"] = str(home)
+        self.assertEqual(subprocess.check_output(["git", "status", "--porcelain"], cwd=source, env=env,
+                                                 text=True).strip(), "", "the fixture must hide the file from plain git")
+        with self.assertRaisesRegex(RuntimeError, "Commit source changes"):
+            self.builder.check_source(source, env=env)
+
+    def test_default_user_excludes_file_does_not_hide_new_source_files(self):
+        source, _ = self.source_repository("xdg-ignore/source")
+        home = self.root / "xdg-ignore/home"
+        (home / ".config/git").mkdir(parents=True)
+        # No core.excludesFile set anywhere: Git falls back to $HOME/.config/git/ignore.
+        (home / ".config/git/ignore").write_text("new-source.rs\n")
+        (source / "new-source.rs").write_text("compiled but never committed")
+        env = {name: value for name, value in os.environ.items()
+               if not name.startswith("GIT_") and name != "XDG_CONFIG_HOME"}
+        env["HOME"] = str(home)
+        self.assertEqual(subprocess.check_output(["git", "status", "--porcelain"], cwd=source, env=env,
+                                                 text=True).strip(), "", "the fixture must hide the file from plain git")
+        with self.assertRaisesRegex(RuntimeError, "Commit source changes"):
+            self.builder.check_source(source, env=env)
+        env["XDG_CONFIG_HOME"] = str(home / ".config")
+        with self.assertRaisesRegex(RuntimeError, "Commit source changes"):
+            self.builder.check_source(source, env=env)
 
     def test_git_overrides_do_not_hide_source_commit_changes(self):
         for phase in ("compile", "archive"):
