@@ -230,9 +230,9 @@ fn widened_access_lists_are_refused_and_left_unchanged() {
         for access in [Access::Read, Access::ReadWrite] {
             let result = open_verified(&path, ObjectKind::File, access);
             // The OS itself already denies some of these opens; either way
-            // nothing is returned.
-            let os_denied = *why == Refusal::EmptyDacl
-                || (*why == Refusal::DenyAce && access == Access::ReadWrite);
+            // nothing is returned. A deny entry for Everyone also covers the
+            // file's owner when not elevated, so both opens stop at the OS.
+            let os_denied = *why == Refusal::EmptyDacl || *why == Refusal::DenyAce;
             if os_denied {
                 assert!(result.is_err(), "{sddl}");
                 continue;
@@ -305,9 +305,12 @@ fn junctions_are_refused_and_their_targets_untouched() {
         Refusal::Reparse,
     );
     assert_refused(create_dir_private(&link), Refusal::Reparse);
-    assert_eq!(
-        create_new_private(&link).unwrap_err().kind(),
-        io::ErrorKind::AlreadyExists
+    // Refused either way: an elevated process sees the existing name, a
+    // standard user is denied by the junction target's private access list.
+    let kind = create_new_private(&link).unwrap_err().kind();
+    assert!(
+        matches!(kind, io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied),
+        "{kind:?}"
     );
     assert!(sync_dir(&link).is_err());
     assert_eq!(std::fs::read(target.join("canary")).unwrap(), b"canary");
