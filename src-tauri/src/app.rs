@@ -1986,6 +1986,8 @@ fn record_permanent_refusal(state: &NodeState, error: &PairError) {
 }
 
 /// A startup read of the stored pairing that failed: a missing Secure Enclave keeps its kind.
+/// Its callers are desktop startup paths only.
+#[cfg_attr(any(mobile, feature = "mobile"), allow(dead_code))]
 fn startup_storage_refused(state: &NodeState, error: remote_access::RemoteError) {
     if let remote_access::RemoteError::SecureStorageUnavailable { identity_kept } = error {
         // Permanent, as in client_key_refused: pairing reads as failed, so the shell offers no retry.
