@@ -292,7 +292,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const errorCopy = () => {
     const t = c();
     switch (error()?.kind) {
-      case 'unsupported': return [t.update, t.updateLine, t.newQr];
+      // The box cannot enrol this phone: an update problem, not an approval step.
+      case 'unsupported': return [t.pairFailed, t.unsupported, t.newQr];
       case 'unclaimed': return [t.unclaimed, t.unclaimedLine, t.unclaimedAction];
       case 'local_network': return [t.localNetwork, (props.platform ?? appPlatform()) === 'android' ? t.nearbyLine : t.localNetworkLine, t.settings];
       case 'tailscale': return [t.unreachable, t.tailscaleLine, t.tailscale];

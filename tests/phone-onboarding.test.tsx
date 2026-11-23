@@ -312,6 +312,10 @@ it('still refuses a fresh second-device link the box cannot enrol', async () => 
   button('Scan the code with the camera').click(); await tick();
   await vi.waitFor(() => expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('error'));
   expect(props.beginJoin).not.toHaveBeenCalled();
+  // Said as a box that needs an update, not as an approval to give on the computer.
+  expect(document.querySelector('[data-phone-face] [tabindex="-1"]')?.textContent).toBe("Pairing didn't finish");
+  expect(document.body.textContent).toContain('This box needs an update before it can add this phone.');
+  expect(document.body.textContent).not.toContain('Approve this phone on your computer');
 });
 it('offers Paste new link beside Try again when connecting timed out', async () => {
   vi.useFakeTimers();
