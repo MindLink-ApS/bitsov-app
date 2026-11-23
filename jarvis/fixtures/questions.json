@@ -95,7 +95,7 @@
     },
     {
       "id": "q11",
-      "question": "How many end-to-end encrypted sessions are open?",
+      "question": "How many encrypted node-to-node sessions are open?",
       "expected": "11",
       "unit": "sessions",
       "sources": ["health.e2ee_sessions", "status.e2ee_sessions"],
@@ -340,7 +340,7 @@
     },
     {
       "id": "q37",
-      "question": "How many end-to-end encrypted sessions are open?",
+      "question": "How many encrypted node-to-node sessions are open?",
       "expected": "unavailable",
       "unit": "sessions",
       "sources": ["health.e2ee_sessions", "status.e2ee_sessions"],

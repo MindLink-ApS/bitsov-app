@@ -693,7 +693,7 @@ function IdentityGate(props: {
         dropTrustError();
         const attempt = trustAttempt;
         try { await props.onContinue(); }
-        catch (e) { if (attempt === trustAttempt) setTrustError(String(e)); }
+        catch (e) { if (attempt === trustAttempt) setTrustError(hostText(String(e))); }
         finally { setSavingTrust(false); }
       }}>
         {t('obTrustContinue')}

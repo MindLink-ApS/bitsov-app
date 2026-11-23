@@ -30,7 +30,7 @@ import { spendLine } from './state';
 import {
   activityTotals, bitcoinUri, channelWords, filterActivity, loggedActivity, mergeActivity, messageActivity, openInvoices, readRecipient,
   sortedChannels, splitBalance, statusWords, updateInvoice,
-  type Activity, type DirectionFilter, type KindFilter,
+  type Activity, type DirectionFilter, type KindFilter, type LoggedActivity,
 } from './wallet';
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } };
@@ -167,19 +167,28 @@ export function WalletPage(props: {
   const [starterOpen, setStarterOpen] = createSignal(false);
 
   // Invoices we issued: read whether they were paid while this page is open.
+  // Each invoice keeps its own last read: one that could not be read, or that the node
+  // could not place, says so on that invoice only, never on another.
   let reading = false;
+  const [invoiceChecks, setInvoiceChecks] = createSignal<Record<string, InvoiceCheck>>({});
   const readInvoices = async () => {
     if (reading) return;
     reading = true;
     try {
-      for (const a of openInvoices(loggedActivity(), Date.now()).slice(0, 10)) {
+      const open = openInvoices(loggedActivity(), Date.now()).slice(0, 10);
+      const checks: Record<string, InvoiceCheck> = {};
+      for (const a of open) {
         const status = await props.reads.invoiceStatus(a.bolt11!).catch(() => null);
-        if (status) updateInvoice(a.id, status);
+        if (!status) checks[a.bolt11!] = 'unread';
+        else if (status.state === 'unknown') checks[a.bolt11!] = 'unknown';
+        else updateInvoice(a.id, status);
       }
+      setInvoiceChecks(checks);
     } finally {
       reading = false;
     }
   };
+  const invoiceCheck = (bolt11: string | undefined): InvoiceCheck | undefined => (bolt11 ? invoiceChecks()[bolt11] : undefined);
   createEffect(() => {
     void readInvoices();
     const timer = window.setInterval(() => void readInvoices(), 4000);
@@ -312,6 +321,7 @@ export function WalletPage(props: {
               nameOf={props.nameOf}
               messages={props.reads.messages}
               now={props.now}
+              invoiceCheck={invoiceCheck}
               onReceive={() => props.onTab('receive')}
             />
           </Match>
@@ -319,7 +329,7 @@ export function WalletPage(props: {
             <ChannelsView wallet={props.wallet} nameOf={props.nameOf} error={props.walletError} onReconnect={props.onReconnect} />
           </Match>
           <Match when={props.tab === 'receive'}>
-            <ReceiveView moneyBlocked={props.moneyBlocked} actions={props.actions} reads={props.reads} now={props.now} />
+            <ReceiveView moneyBlocked={props.moneyBlocked} actions={props.actions} reads={props.reads} now={props.now} invoiceCheck={invoiceCheck} />
           </Match>
           <Match when={props.tab === 'send'}>
             <SendView moneyBlocked={props.moneyBlocked} spend={props.spend} spendGate={props.spendGate} now={props.now} actions={props.actions} />
@@ -362,6 +372,7 @@ function ActivityView(props: {
   nameOf: (id: string) => string;
   messages: (id: string) => Promise<Message[]>;
   now: number;
+  invoiceCheck?: (bolt11: string | undefined) => InvoiceCheck | undefined;
 }) {
   const [kind, setKind] = createSignal<KindFilter>('all');
   const [direction, setDirection] = createSignal<DirectionFilter>('all');
@@ -423,7 +434,7 @@ function ActivityView(props: {
           }>
             {(a, i) => {
               const newDay = () => i() === 0 || day(shown()[i() - 1].at) !== day(a.at);
-              const status = () => statusWords(a, props.now);
+              const status = () => invoiceWords(a, props.now, props.invoiceCheck?.((a as LoggedActivity).bolt11));
               return (
                 <>
                   <Show when={newDay()}><li class="wallet-day">{day(a.at)}</li></Show>
@@ -503,7 +514,16 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
 
 // ---- receive -----------------------------------------------------------------
 
-function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; reads: WalletReads; now: number }) {
+/** An open invoice's last read: it could not be read, or the node could not say whether it was paid. */
+type InvoiceCheck = 'unread' | 'unknown';
+
+/** An invoice the node could not place is neither paid nor unpaid: it says it is unknown. */
+function invoiceWords(a: Activity, now: number, check: InvoiceCheck | undefined): string | null {
+  if (a.kind === 'invoice' && a.status === 'waiting' && check === 'unknown') return tr('caInvoiceStateUnknown');
+  return statusWords(a, now);
+}
+
+function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; reads: WalletReads; now: number; invoiceCheck?: (bolt11: string | undefined) => InvoiceCheck | undefined }) {
   const [how, setHow] = createSignal<'lightning' | 'onchain'>('lightning');
   const [amount, setAmount, amountCleared] = createAmountDraft();
   const [note, setNote] = createSignal('');
@@ -513,11 +533,13 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
   const [invoice, setInvoice] = createSignal<InvoiceView | null>(null);
   const [address, setAddress] = createSignal<FundingAddress | null>(null);
   const [addressError, setAddressError] = createSignal<string | null>(null);
+  const [addressRetry, setAddressRetry] = createSignal(0);
   const msat = () => typedMsat(amount());
 
   // A new amount or note is a new request: the shown invoice was for the old one.
   createEffect(on([amount, note, how], () => { setInvoice(null); setError(null); }, { defer: true }));
   createEffect(() => {
+    addressRetry();
     if (how() !== 'onchain' || address() || props.moneyBlocked) return;
     void props.reads.fundingAddress().then(
       (a) => { setAddress(a); setAddressError(null); },
@@ -537,10 +559,13 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
     else setError(r.error.message);
   };
   const received = () => loggedActivity().find(a => a.kind === 'invoice' && a.bolt11 === invoice()?.bolt11);
+  // This invoice's own last read: not read just now, or read but the node could not say.
+  const check = () => (received()?.status === 'waiting' ? props.invoiceCheck?.(invoice()?.bolt11) : undefined);
   const status = () => {
     const inv = invoice();
     if (!inv) return null;
     const logged = received();
+    if (check() === 'unknown') return tr('caInvoiceStateUnknown');
     return logged ? statusWords(logged, props.now) : t('extraWaitingToBePaid');
   };
   const uri = () => {
@@ -570,7 +595,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
               fallback={
                 <Show when={!props.moneyBlocked} fallback={<p class="hint">{t('receiveNotReady')}</p>}>
                   <Show when={addressError()} fallback={<DelayedSpinner />}>
-                    <div data-receive-error><SoftError message={addressError()!} summary={t('receiveNoAddress')} /></div>
+                    <div data-receive-error><SoftError message={addressError()!} summary={t('receiveNoAddress')} onReconnect={() => { setAddressError(null); setAddressRetry(n => n + 1); }} /></div>
                   </Show>
                 </Show>
               }
@@ -610,6 +635,8 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
                 <SettledPayment direction="received" msat={received()?.msat ?? null} />
               </Show>
               <span class="wallet-status" classList={{ ok: received()?.status === 'paid' }} data-receive-state>{status()}</span>
+              <Show when={check() === 'unread'}><p class="hint" role="status" data-receive-unread>{tr('caInvoiceNotChecked')}</p></Show>
+              <Show when={check() === 'unknown'}><p class="hint" role="status" data-receive-unknown>{tr('caInvoiceUnknownHint')}</p></Show>
               <code class="address" data-bolt11>{inv().bolt11}</code>
               <div class="row wallet-request-actions">
                 <CopyButton text={inv().bolt11} label={t('receiveCopyInvoice')} />
