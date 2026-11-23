@@ -72,14 +72,14 @@ to the BitSov project.
   calls, and the microphone for voice notes or calls. Desktop message/call
   notifications are local and can show a sender's name, without message
   content. Opening this policy from the app (once the in-app link is added) launches
-  your browser and contacts the project website, which receives the normal
+  your browser and contacts the project web page, which receives the normal
   web request, including your IP address. Sending us email shares what you put in that email.
 
 ### Analytics, retention and contact
 
 The app includes no analytics SDKs, advertising trackers or automatic
 crash-report uploads. It does not send usage telemetry to the BitSov project.
-Optional AI requests, calls and website visits described above are
+Optional AI requests, calls and web page visits described above are
 separate from analytics.
 
 Local settings and operation records remain until removed from device
@@ -191,7 +191,7 @@ privatliv. Politikken opdateres, når appens databehandling ændres.
 
 ## Maintainer verification / Kontrol for vedligeholdere
 
-These are source references, not claims that the website is already deployed.
+These are source references, not claims that the web page is already deployed.
 Disse kildehenvisninger betyder ikke, at hjemmesiden allerede er udgivet.
 
 | Claim / Oplysning | Source / Kilde |
@@ -207,7 +207,7 @@ Disse kildehenvisninger betyder ikke, at hjemmesiden allerede er udgivet.
 | Local notifications / Lokale notifikationer | `src/control/messageNotifications.tsx`, `src-tauri/capabilities/default-approval-notification.json` |
 | Windows protected files / Beskyttede filer på Windows | `src-tauri/src/private_fs.rs`, `src-tauri/ffi/src/win_private.rs`, `src-tauri/src/at_rest/` |
 
-TODO(website): publish the English and Danish policy text above at a stable
+TODO(web page): publish the English and Danish policy text above at a stable
 project URL before App Review submission, and set the contact address. The in-app
 link to that URL is a separate change. Keep this verification section out of the
 published policy.
