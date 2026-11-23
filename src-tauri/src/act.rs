@@ -1649,6 +1649,19 @@ pub fn write_file_bytes(path: &std::path::Path, data_b64: &str) -> Result<(), St
     std::fs::write(path, bytes).map_err(|e| format!("could not save: {e}"))
 }
 
+/// Longest file name, in bytes, most file systems accept (APFS, ext4, NTFS in UTF-16 units).
+const SAVE_NAME_MAX_BYTES: usize = 255;
+/// Longest extension kept apart from the stem when a name is shortened.
+const SAVE_EXT_MAX_BYTES: usize = 16;
+
+/// The longest prefix of `text` within `max` bytes, ending on a character boundary.
+fn byte_prefix(text: &str, max: usize) -> &str {
+    if text.len() <= max { return text; }
+    let mut end = max;
+    while !text.is_char_boundary(end) { end -= 1; }
+    &text[..end]
+}
+
 /// Save into a folder the app owns (a phone's Files folder), with no dialog:
 /// decode, then create `name` or the first free `name (2)`, `name (3)`, …
 /// there. An existing file is never opened or replaced. Returns the path.
@@ -1661,11 +1674,22 @@ pub fn save_new_file(dir: &std::path::Path, name: &str, data_b64: &str) -> Resul
     if bytes.len() > FILE_MAX_BYTES {
         return Err(FILE_TOO_LARGE.into());
     }
-    let name = safe_save_name(name);
-    let (stem, ext) = match name.rfind('.') {
-        Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
-        _ => (name.as_str(), ""),
+    // Split the extension off the last path segment before any shortening, so a
+    // long name keeps its type. A long "extension" is not one: it stays in the stem.
+    let last = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let (raw_stem, raw_ext) = match last.rfind('.') {
+        Some(dot) if dot > 0 && last.len() - dot <= SAVE_EXT_MAX_BYTES => (&last[..dot], &last[dot + 1..]),
+        _ => (last, ""),
     };
+    let ext = if raw_ext.is_empty() { String::new() } else {
+        let clean = safe_save_name(raw_ext);
+        if clean == "file" { String::new() } else { format!(".{clean}") }
+    };
+    // File systems cap a name in bytes (255 on APFS and ext4), not characters:
+    // leave room for the widest suffix, " (99)", and cut only on a character boundary.
+    let stem_full = safe_save_name(raw_stem);
+    let stem = byte_prefix(&stem_full, SAVE_NAME_MAX_BYTES - ext.len() - " (99)".len());
+    let name = format!("{stem}{ext}");
     for n in 1..=99u32 {
         let candidate = if n == 1 { name.clone() } else { format!("{stem} ({n}){ext}") };
         let path = dir.join(candidate);
@@ -1775,6 +1799,28 @@ mod save_new_file_tests {
             assert_eq!(path.parent().unwrap(), dir.path(), "{name}");
             assert!(!path.file_name().unwrap().to_string_lossy().starts_with('.'), "{name}");
         }
+    }
+
+    #[test]
+    fn long_multibyte_names_fit_the_byte_limit_even_when_numbered() {
+        let dir = tempfile::tempdir().unwrap();
+        // 180 four-byte characters: 720 bytes, well over a 255-byte name.
+        let wide = format!("{}.pdf", "\u{1F600}".repeat(180));
+        let first = save_new_file(dir.path(), &wide, &b64(b"1")).unwrap();
+        let second = save_new_file(dir.path(), &wide, &b64(b"2")).unwrap();
+        for path in [&first, &second] {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(name.len() <= SAVE_NAME_MAX_BYTES, "{} bytes", name.len());
+            assert!(name.ends_with(".pdf"), "{name}");
+        }
+        assert!(second.file_name().unwrap().to_str().unwrap().ends_with(" (2).pdf"));
+        // Three-byte characters cut on a boundary, and an over-long "extension"
+        // is cut as part of the name rather than kept whole.
+        let cjk = format!("{}.{}", "\u{6587}".repeat(120), "x".repeat(200));
+        let path = save_new_file(dir.path(), &cjk, &b64(b"3")).unwrap();
+        assert!(path.file_name().unwrap().to_str().unwrap().len() <= SAVE_NAME_MAX_BYTES);
+        assert_eq!(byte_prefix("a\u{6587}b", 2), "a");
+        assert_eq!(byte_prefix("abc", 10), "abc");
     }
 
     #[test]
