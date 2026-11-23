@@ -88,3 +88,9 @@ bash scripts/build-windows-remote.sh --out /path/to/out --check-only
 
 `scripts/test-build-windows-remote.sh` tests the script's refusals without
 building.
+
+The manual **Windows Package Remote** workflow
+(`.github/workflows/windows-package-remote.yml`) runs the same script with the
+native runner on a hosted Windows machine and uploads the installer,
+`build-info.txt` and `SHA256SUMS` as an artifact. It signs nothing and publishes
+nothing.
