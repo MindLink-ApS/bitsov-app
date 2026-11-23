@@ -405,8 +405,8 @@ fn paths_are_handed_to_win32_in_long_form() {
     assert_eq!(text(r"\\?\C:\already"), r"\\?\C:\already");
     // A relative path becomes absolute against the current folder.
     assert!(text("relative").starts_with(r"\\?\"));
-    let wide = wide(Path::new(r"C:\x")).unwrap();
-    assert_eq!(wide.last(), Some(&0));
+    let units = wide(Path::new(r"C:\x")).unwrap();
+    assert_eq!(units.last(), Some(&0));
     assert!(wide(Path::new("a\0b")).is_err());
 }
 
