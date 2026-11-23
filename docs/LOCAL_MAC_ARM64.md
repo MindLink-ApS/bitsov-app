@@ -32,6 +32,8 @@ interruption or termination. Dependency installation, compilation and archiving
 share one 60-minute budget. Run other local build tools separately.
 
 Source state is checked before and after compilation and before finalization.
+The check ignores user and system Git settings, so a global excludes file or
+hidden untracked files cannot make a changed checkout look clean.
 The wrapper uses a limited build environment and refuses local frontend
 environment files or external Cargo configuration without reading their contents.
 Remove the previous target bundle before every packaging invocation, including

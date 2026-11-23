@@ -368,6 +368,21 @@ class LocalArmBuild(unittest.TestCase):
                         self.builder.build(source, self.root / "target", self.root / "output")
                     run.assert_not_called()
 
+    def test_user_git_configuration_does_not_hide_new_source_files(self):
+        source, _ = self.source_repository("user-config/source")
+        home = self.root / "user-config/home"
+        home.mkdir(parents=True)
+        (home / "hidden-by-user").write_text("new-source.rs\n")
+        (home / ".gitconfig").write_text(
+            "[status]\n\tshowUntrackedFiles = no\n[core]\n\texcludesFile = " + str(home / "hidden-by-user") + "\n")
+        (source / "new-source.rs").write_text("compiled but never committed")
+        env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        env["HOME"] = str(home)
+        self.assertEqual(subprocess.check_output(["git", "status", "--porcelain"], cwd=source, env=env,
+                                                 text=True).strip(), "", "the fixture must hide the file from plain git")
+        with self.assertRaisesRegex(RuntimeError, "Commit source changes"):
+            self.builder.check_source(source, env=env)
+
     def test_git_overrides_do_not_hide_source_commit_changes(self):
         for phase in ("compile", "archive"):
             with self.subTest(phase=phase):
