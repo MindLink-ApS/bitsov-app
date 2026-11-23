@@ -885,6 +885,8 @@ mod tests {
     /// Plant a book file as the platform store would hold it: plain on Unix,
     /// through the private-file layer on Windows (a plain file there is not
     /// private and is refused before its contents are read).
+    /// The private-file layer refuses an elevated process, so tests that
+    /// plant through it return early there, like the Windows store tests.
     fn plant(path: &Path, bytes: &[u8]) {
         #[cfg(windows)]
         crate::private_fs::write_replacing_verified(&path.with_extension("plant"), path, bytes, |e| e, |_| Ok(())).unwrap();
@@ -1044,6 +1046,8 @@ mod tests {
 
     #[test]
     fn legacy_book_without_payment_identities_keeps_existing_charges() {
+        #[cfg(windows)]
+        if crate::private_fs::fixtures::elevated() { return; }
         let dir = tempfile::tempdir().unwrap();
         let mut book = book_with_robin(50_000);
         book.reserve("settled", ROBIN, false, 2000, T);
@@ -1060,6 +1064,8 @@ mod tests {
 
     #[test]
     fn a_damaged_or_foreign_book_fails_closed() {
+        #[cfg(windows)]
+        if crate::private_fs::fixtures::elevated() { return; }
         let dir = tempfile::tempdir().unwrap();
         plant(&book_path(dir.path(), ME), b"{not json");
         assert_eq!(load(dir.path(), ME).unwrap_err().code, "budget_unreadable");
