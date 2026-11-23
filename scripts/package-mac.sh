@@ -275,7 +275,25 @@ if [ "$WANT_DMG" = 1 ]; then
   VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
   DMG="$DMG_DIR/BitSov_${VERSION}_${DMG_ARCH}.dmg"
   mkdir -p "$DMG_DIR"
-  hdiutil create -srcfolder "$APP" -volname BitSov -format UDZO "$DMG"
+  # Hosted runners sometimes report a transient busy device. Retry that one
+  # error once, from a clean path; every other failure stops at once.
+  for attempt in 1 2; do
+    rm -f "$DMG"
+    if hdiutil_out="$(hdiutil create -srcfolder "$APP" -volname BitSov -format UDZO "$DMG" 2>&1)"; then
+      printf '%s\n' "$hdiutil_out"
+      break
+    else
+      hdiutil_status=$?
+    fi
+    printf '%s\n' "$hdiutil_out" >&2
+    rm -f "$DMG"
+    if [ "$attempt" = 1 ] && printf '%s' "$hdiutil_out" | grep -q 'Resource busy'; then
+      echo "hdiutil reported Resource busy; retrying once in 15 s" >&2
+      sleep 15
+      continue
+    fi
+    exit "$hdiutil_status"
+  done
   if [ "$SIGNING_IDENTITY" != - ]; then
     codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$DMG"
   fi

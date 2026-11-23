@@ -79,10 +79,21 @@ elif name == "codesign":
         if scenario == "invalid-signature":
             sys.exit(41)
         pathlib.Path("verified-app").touch()
+elif name == "sleep":
+    pass
 elif name == "hdiutil":
     if args[0] == "create":
         assert args == ["create", "-srcfolder", str(app), "-volname", "BitSov", "-format", "UDZO", str(dmg)], args
         assert pathlib.Path("verified-app").exists()
+        assert not dmg.exists(), "a stale or partial image must be removed before create"
+        tries = pathlib.Path("hdiutil-creates")
+        count = int(tries.read_text()) + 1 if tries.exists() else 1
+        tries.write_text(str(count))
+        if scenario == "dmg-busy-always" or (scenario == "dmg-busy-once" and count == 1):
+            dmg.write_text("partial image")
+            sys.exit("hdiutil: create failed - Resource busy")
+        if scenario == "dmg-other-error":
+            sys.exit("hdiutil: create failed - No space left on device")
         dmg.write_text("verified image")
     else:
         assert args == ["verify", str(dmg)] and dmg.read_text() == "verified image", args
@@ -138,7 +149,7 @@ class NativePackagingTests(unittest.TestCase):
             other.parent.mkdir(parents=True)
             other.write_text("other build")
             for name in ("uname", "sysctl", "npm", "file", "codesign", "hdiutil", "plutil", "spctl", "otool",
-                         "open", "curl", "cargo", "xcrun", "security"):
+                         "open", "curl", "cargo", "xcrun", "security", "sleep"):
                 tool = root / "fakebin" / name
                 tool.write_text(TOOLS)
                 tool.chmod(0o755)
@@ -285,6 +296,21 @@ class NativePackagingTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertFalse(any(e[0] == "hdiutil" for e in events))
 
+
+    def test_image_create_retries_once_only_on_a_busy_device(self):
+        creates = lambda events: sum(1 for e in events if e[0] == "hdiutil" and e[1][0] == "create")
+        result, events, image, _ = self.run_package(scenario="dmg-busy-once")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(creates(events), 2)
+        self.assertEqual(image, "verified image")
+        self.assertIn("retrying once", result.stdout)
+        for scenario, attempts in (("dmg-busy-always", 2), ("dmg-other-error", 1)):
+            with self.subTest(scenario=scenario):
+                result, events, _, _ = self.run_package(scenario=scenario)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(creates(events), attempts)
+                self.assertFalse(any(e[0] == "hdiutil" and e[1][0] == "verify" for e in events))
+                self.assertNotIn("PACKAGE: PASS", result.stdout)
 
 LOCAL_TOOLS = r'''#!/usr/bin/env python3
 import json, os, pathlib, plistlib, subprocess, sys, zipfile
