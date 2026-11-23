@@ -184,8 +184,8 @@ class LocalArmBuild(unittest.TestCase):
         commands = []
         def external(command, root, env, deadline, gate=True):
             commands.append(command)
-            # Only the post-compile archive may skip the load and build gates.
-            self.assertEqual(gate, command[0] != "ditto")
+            # Only post-compile steps (seal, archive) may skip the load and build gates.
+            self.assertEqual(gate, command[0] not in ("ditto", "codesign"))
             self.assertEqual(env["CARGO_BUILD_JOBS"], "2")
             self.assertEqual(env["CARGO_TARGET_DIR"], str(target))
             self.assertLessEqual(deadline, time.monotonic() + 3600)
@@ -208,11 +208,21 @@ class LocalArmBuild(unittest.TestCase):
                 return ""
             if command[0] == "lipo":
                 return "arm64\n"
+            if command[0] == "codesign":
+                probes.append(command)
+                return ""
             return "version fixture\n"
+        probes = []
         with self.resources(), patch.object(subprocess, "check_output", side_effect=probe), \
              patch.object(self.builder, "run", side_effect=external):
             self.builder.build(source, target, output)
         self.assertEqual(commands[0], ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"])
+        app = str(target / "aarch64-apple-darwin/release/bundle/macos/BitSov Remote Test.app")
+        # The bundle is sealed ad-hoc (no identity) and must verify strictly before it is archived.
+        self.assertEqual(commands[2], ["codesign", "--force", "--deep", "--sign", "-", app])
+        self.assertEqual(probes, [["codesign", "--verify", "--deep", "--strict", app]])
+        self.assertEqual(commands[3][0], "ditto")
+        self.assertEqual(json.loads((output / "build.json").read_text())["signing"], "ad-hoc")
         self.assertEqual(commands[1], ["npm", "run", "tauri", "--", "build", "--bundles", "app",
                                       "--no-sign", "--ci", "--target", "aarch64-apple-darwin",
                                       "--config", "src-tauri/tauri.remote-only.conf.json", "--", "--locked"])
@@ -222,6 +232,14 @@ class LocalArmBuild(unittest.TestCase):
             digest, filename = line.split("  ")
             self.assertEqual(hashlib.sha256((output / filename).read_bytes()).hexdigest(), digest)
         self.assertEqual(json.loads((output / "build.json").read_text())["commit"], "a" * 40)
+
+    def test_a_bundle_that_does_not_verify_strictly_is_never_archived(self):
+        app = self.root / "BitSov Remote Test.app"
+        def failing(command, **kwargs):
+            raise subprocess.CalledProcessError(1, command, "code has no resources but signature indicates they must be present")
+        with patch.object(subprocess, "check_output", side_effect=failing), \
+             self.assertRaisesRegex(RuntimeError, "does not verify"):
+            self.builder.verify_seal(app)
 
     def test_dirty_source_and_stale_output_are_refused(self):
         source = self.root / "source"
