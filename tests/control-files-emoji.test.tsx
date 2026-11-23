@@ -133,6 +133,29 @@ describe('received files and emoji in the thread', () => {
     expect($(`[data-received-file="${BIG_ID}"] [data-file-save]`)).toBeNull();
   });
 
+  it.each([
+    ['an iPad', 'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1', true],
+    ['a computer', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15', false],
+  ] as const)('on %s, a saved file says where it went only when there was no save dialog', async (_device, userAgent, says) => {
+    const ua = vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(userAgent);
+    try {
+    stubHost({
+      messages_list: () => [
+        { id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 500, plaintext: '[file: brief.txt]', payment_amount_msat: 3000 },
+      ],
+      file_save: () => ({ saved: true, filename: 'brief.txt', mime_type: 'text/plain', size_bytes: 2 }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-received-file="${IN_ID}"] [data-file-save]`)).not.toBeNull());
+    expect($(`[data-received-file="${IN_ID}"] [data-file-saved-where]`)).toBeNull();
+    $<HTMLButtonElement>(`[data-received-file="${IN_ID}"] [data-file-save]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-received-file="${IN_ID}"] [data-file-save]`)).toBe('Saved'));
+    const where = $(`[data-received-file="${IN_ID}"] [data-file-saved-where]`);
+    if (says) expect(where?.textContent).toBe('In the Files app, under BitSov.');
+    else expect(where).toBeNull();
+    } finally { ua.mockRestore(); }
+  });
+
   it('shows size and type, saves via the host, and previews only safe image mimes as data URLs', async () => {
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
     const host = stubHost({

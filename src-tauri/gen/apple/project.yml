@@ -63,6 +63,9 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: 0.0.1
         CFBundleVersion: "0.0.1"
+        # Saved received files show in the Files app (mirrors Info.ios.plist).
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         # Mirrors Info.ios.plist so an xcodegen regeneration keeps the scheme.
         CFBundleURLTypes:
           - CFBundleURLName: tech.mindlink.bitsov.pair
