@@ -12726,6 +12726,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
                 // Installing the sealer reads no identity. Do it only once,
                 // before cleanup/marker publication and any deferred bootstrap.
                 bitsov_app::at_rest::install_ios()?;
+                // The phone-alert sound iOS plays by name (alert_sound.rs).
+                crate::alert_sound::install_ios();
                 let mut startup = crate::ios_install::Startup::default();
                 // A locked/background launch may have no later suspension event
                 // before its first real foreground. Initial active-launch focus
