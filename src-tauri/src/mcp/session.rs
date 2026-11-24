@@ -420,7 +420,9 @@ mod tests {
         assert!(args.contains("abc"), "{args:?}");
 
         sessions.handle("desk", &call(2, "read_node"), 0, &registry(), &reads, &mut audit);
-        assert!(!format!("{:?}", audit[1]).contains("ok"), "the read result is not logged");
+        // The successful read's own row (found by tool and outcome, not position) holds nothing it read.
+        let read = audit.iter().find(|row| row.tool == "read_node" && row.outcome == Outcome::Read).expect("the read_node row");
+        assert!(!format!("{read:?}").contains("ok"), "the read result is not logged");
     }
 
     #[test]
