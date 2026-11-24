@@ -130,15 +130,95 @@ pub fn save(io: &dyn FileIo, sealer: Option<&dyn Sealer>, clients: &[StoredClien
     io.write(&sealed).map_err(|error| StoreError::Io(error.to_string()))
 }
 
+/// The clients file on disk, through the app's private-file layer: written
+/// atomically (temp file, then rename), owner-only, never through a link.
+pub struct PrivateFile {
+    pub path: std::path::PathBuf,
+}
+
+impl FileIo for PrivateFile {
+    #[cfg(unix)]
+    fn read(&self, max_bytes: usize) -> std::io::Result<Option<Vec<u8>>> {
+        use std::io::Read;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let mut file = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        // Checked on the open handle: a regular file of this user, readable by no one else.
+        let meta = file.metadata()?;
+        if !meta.file_type().is_file() || meta.uid() != bitsov_ffi::effective_uid() || meta.mode() & 0o077 != 0 {
+            return Err(std::io::Error::other("the clients file is not private to this user"));
+        }
+        let mut bytes = Vec::new();
+        file.by_ref().take(max_bytes as u64).read_to_end(&mut bytes)?;
+        Ok(Some(bytes))
+    }
+
+    #[cfg(windows)]
+    fn read(&self, max_bytes: usize) -> std::io::Result<Option<Vec<u8>>> {
+        crate::private_fs::read_optional(&self.path, max_bytes as u64).map(|bytes| bytes.map(|b| b.to_vec()))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn read(&self, _max_bytes: usize) -> std::io::Result<Option<Vec<u8>>> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no private storage on this platform"))
+    }
+
+    /// A temp file beside the target (new, 0600, never through a link),
+    /// synced, then renamed over it; the directory is made 0700.
+    #[cfg(unix)]
+    fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let dir = self.path.parent().ok_or_else(|| std::io::Error::other("no directory"))?;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        let mut tmp_name = self.path.file_name().unwrap_or_default().to_os_string();
+        tmp_name.push(".tmp");
+        let tmp = self.path.with_file_name(tmp_name);
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW).open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &self.path)?;
+        std::fs::File::open(dir)?.sync_all()
+    }
+
+    /// The app's verified private store: the folder and file must verify
+    /// before anything is replaced, and the bytes are published only after a
+    /// read-back matches.
+    #[cfg(windows)]
+    fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+        let dir = self.path.parent().ok_or_else(|| std::io::Error::other("no directory"))?;
+        crate::private_fs::ensure_dir(dir)?;
+        let mut tmp_name = self.path.file_name().unwrap_or_default().to_os_string();
+        tmp_name.push(".tmp");
+        let tmp = self.path.with_file_name(tmp_name);
+        crate::private_fs::write_replacing_verified(&tmp, &self.path, bytes, |e| e, |readback| {
+            if readback == bytes { Ok(()) } else { Err(std::io::Error::other("read-back did not match")) }
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no private storage on this platform"))
+    }
+}
+
+/// Test doubles for the store, shared with the endpoint's tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testing {
     use std::cell::RefCell;
+
     use zeroize::Zeroizing;
 
-    /// A test sealer with integrity: a keyed BLAKE3 tag over purpose and body.
+    use super::FileIo;
+    use crate::at_rest::Sealer;
+
     /// Not secret (the body is plain); it only lets tests prove tamper refusal.
-    struct TagSealer;
+    pub(crate) struct TagSealer;
     impl TagSealer {
         fn tag(purpose: &str, body: &[u8]) -> [u8; 32] {
             let mut hasher = blake3::Hasher::new_keyed(&[9u8; 32]);
@@ -164,10 +244,10 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MemFile {
-        bytes: RefCell<Option<Vec<u8>>>,
-        fail_write: bool,
-        asked: std::cell::Cell<Option<usize>>,
+    pub(crate) struct MemFile {
+        pub(crate) bytes: RefCell<Option<Vec<u8>>>,
+        pub(crate) fail_write: bool,
+        pub(crate) asked: std::cell::Cell<Option<usize>>,
     }
     impl FileIo for MemFile {
         fn read(&self, max_bytes: usize) -> std::io::Result<Option<Vec<u8>>> {
@@ -181,6 +261,36 @@ mod tests {
             *self.bytes.borrow_mut() = Some(bytes.to_vec());
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::testing::{MemFile, TagSealer};
+    use std::cell::RefCell;
+
+    /// A test sealer with integrity: a keyed BLAKE3 tag over purpose and body.
+    #[cfg(unix)]
+    #[test]
+    fn the_private_file_round_trips_and_refuses_widened_or_linked_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let file = PrivateFile { path: temp.path().join("mcp").join("clients.sealed") };
+        assert_eq!(file.read(16).unwrap(), None, "nothing there yet");
+        let clients = vec![client("mcp-01", Preset::Counts)];
+        save(&file, Some(&TagSealer), &clients).unwrap();
+        assert_eq!(std::fs::metadata(&file.path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load(&file, Some(&TagSealer)), Ok(clients));
+        assert_eq!(file.read(4).unwrap().unwrap().len(), 4, "never more than asked for");
+
+        std::fs::set_permissions(&file.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(file.read(64).is_err(), "a widened file is refused");
+        assert!(matches!(load(&file, Some(&TagSealer)), Err(StoreError::Io(_))), "and loads no clients");
+
+        std::fs::remove_file(&file.path).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("elsewhere"), &file.path).unwrap();
+        assert!(file.read(64).is_err(), "a link is not followed");
     }
 
     fn client(id: &str, preset: Preset) -> StoredClient {

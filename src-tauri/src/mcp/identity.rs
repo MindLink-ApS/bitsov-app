@@ -79,6 +79,24 @@ impl Identities {
         Ok(Issued { secret })
     }
 
+    /// Restores a stored client's public key (from the sealed store, after a
+    /// restart). Refused for a malformed id or a key that is not a valid
+    /// Ed25519 point.
+    pub fn insert(&mut self, client: &str, public_key: &[u8; 32]) -> Result<(), IdentityError> {
+        if !plain_id(client) {
+            return Err(IdentityError::BadClientId);
+        }
+        let key = VerifyingKey::from_bytes(public_key).map_err(|_| IdentityError::UnknownClient)?;
+        self.keys.insert(client.to_owned(), key);
+        self.pending.remove(client);
+        Ok(())
+    }
+
+    /// The public key the host holds for `client`, to store it.
+    pub fn public_key(&self, client: &str) -> Option<[u8; 32]> {
+        self.keys.get(client).map(VerifyingKey::to_bytes)
+    }
+
     /// A new challenge for `client`, valid until `now_ms + CHALLENGE_TTL_MS`.
     /// It replaces any challenge the client had not answered yet.
     pub fn challenge(&mut self, client: &str, now_ms: u64) -> Result<[u8; 32], IdentityError> {
