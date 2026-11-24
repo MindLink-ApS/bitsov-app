@@ -8442,10 +8442,11 @@ async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSa
 async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSaveResult, String> {
     let blob = do_file_fetch(state, message_id).await?;
     let request = crate::file_save_android::request(&blob.filename, &blob.mime_type, &blob.data_b64)?;
-    crate::file_save_android::save(request).await?;
+    let returned = crate::file_save_android::save(request).await?;
     Ok(act::FileSaveResult {
         saved: true,
-        filename: blob.filename,
+        // The name Downloads gave the file, which may differ from the one sent.
+        filename: crate::file_save_android::saved_name(&returned, &blob.filename),
         mime_type: blob.mime_type,
         size_bytes: blob.size_bytes,
     })
