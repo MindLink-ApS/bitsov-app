@@ -42,6 +42,21 @@ pub fn effective_uid() -> u32 {
     unsafe { libc::getuid() as u32 }
 }
 
+/// The user id of the process at the other end of a connected Unix socket
+/// (macOS `getpeereid`). The MCP endpoint refuses any peer but this user.
+#[cfg(target_os = "macos")]
+pub fn peer_uid(socket: &std::os::unix::net::UnixStream) -> std::io::Result<u32> {
+    use std::os::fd::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: a valid connected socket descriptor owned by `socket` for the
+    // call, and two out-pointers to locals; nothing is retained.
+    if unsafe { libc::getpeereid(socket.as_raw_fd(), &mut uid, &mut gid) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(uid as u32)
+}
+
 #[cfg(target_os = "ios")]
 pub mod phone_recovery;
 

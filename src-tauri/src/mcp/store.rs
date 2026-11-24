@@ -70,15 +70,21 @@ pub enum StoreError {
 
 /// File access, backed by the private-file layer when wired.
 pub trait FileIo {
-    /// The file's bytes, or `None` when nothing is there.
-    fn read(&self) -> std::io::Result<Option<Vec<u8>>>;
+    /// The file's bytes, or `None` when nothing is there. Implementations
+    /// must never read more than `max_bytes` (for example `Read::take`), so a
+    /// damaged or inflated file cannot make the host allocate without bound.
+    fn read(&self, max_bytes: usize) -> std::io::Result<Option<Vec<u8>>>;
     /// Replace the file atomically (write a temp file, then rename).
     fn write(&self, bytes: &[u8]) -> std::io::Result<()>;
 }
 
-/// Whether an R2 client may have `preset`: anything but `exact`.
+/// Whether an R2 client may have `preset`. Exhaustive on purpose: a new,
+/// wider preset must be decided here, never allowed by default.
 pub fn r2_preset_allowed(preset: Preset) -> bool {
-    preset != Preset::Exact
+    match preset {
+        Preset::Counts | Preset::Rounded => true,
+        Preset::Exact => false,
+    }
 }
 
 fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
@@ -88,11 +94,13 @@ fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
     }
 }
 
-/// Load the approved clients. A missing file is no clients; anything that
-/// does not open and check is [`StoreError::Unreadable`] (fail closed).
+/// Load the stored client records. A missing file is no records; anything
+/// that does not open and check is [`StoreError::Unreadable`] (fail closed).
+/// **Revoked records are returned too** (kept for the owner's history):
+/// a caller that authorizes anything must skip records with `revoked: true`.
 pub fn load(io: &dyn FileIo, sealer: Option<&dyn Sealer>) -> Result<Vec<StoredClient>, StoreError> {
     let sealer = sealer.ok_or(StoreError::NoSealer)?;
-    let Some(sealed) = io.read().map_err(|error| StoreError::Io(error.to_string()))? else {
+    let Some(sealed) = io.read(MAX_FILE_BYTES + 1).map_err(|error| StoreError::Io(error.to_string()))? else {
         return Ok(Vec::new());
     };
     if sealed.len() > MAX_FILE_BYTES {
@@ -159,10 +167,12 @@ mod tests {
     struct MemFile {
         bytes: RefCell<Option<Vec<u8>>>,
         fail_write: bool,
+        asked: std::cell::Cell<Option<usize>>,
     }
     impl FileIo for MemFile {
-        fn read(&self) -> std::io::Result<Option<Vec<u8>>> {
-            Ok(self.bytes.borrow().clone())
+        fn read(&self, max_bytes: usize) -> std::io::Result<Option<Vec<u8>>> {
+            self.asked.set(Some(max_bytes));
+            Ok(self.bytes.borrow().as_ref().map(|b| b[..b.len().min(max_bytes)].to_vec()))
         }
         fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
             if self.fail_write {
@@ -211,8 +221,9 @@ mod tests {
         let plain = serde_json::to_vec(&Contents { version: VERSION, clients: vec![] }).unwrap();
         *file.bytes.borrow_mut() = Some(sealer.seal("client-ed25519-seed-v1", &plain).unwrap());
         assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable));
-        *file.bytes.borrow_mut() = Some(vec![0u8; MAX_FILE_BYTES + 1]);
+        *file.bytes.borrow_mut() = Some(vec![0u8; MAX_FILE_BYTES * 4]);
         assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable));
+        assert_eq!(file.asked.get(), Some(MAX_FILE_BYTES + 1), "the read itself is capped");
     }
 
     #[test]
@@ -243,7 +254,7 @@ mod tests {
         let file = MemFile::default();
         save(&file, Some(&sealer), &[client("mcp-01", Preset::Counts)]).unwrap();
         let before = file.bytes.borrow().clone();
-        let failing = MemFile { bytes: RefCell::new(before.clone()), fail_write: true };
+        let failing = MemFile { bytes: RefCell::new(before.clone()), fail_write: true, ..MemFile::default() };
         assert!(matches!(save(&failing, Some(&sealer), &[]), Err(StoreError::Io(_))));
         assert_eq!(*failing.bytes.borrow(), before);
     }

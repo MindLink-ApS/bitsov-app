@@ -338,6 +338,8 @@ pub mod identity;
 pub mod pairing;
 /// Phase 1, slice A1.1: the sealed approved-clients file, fail closed (not wired).
 pub mod store;
+/// Phase 1, slice A1.2: the local endpoint (framing, handshake, pairing, macOS listener; not wired).
+pub mod endpoint;
 
 #[cfg(test)]
 mod tests;
