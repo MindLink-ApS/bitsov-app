@@ -21,14 +21,15 @@
 //! [`MAX_CONNECTIONS`] connections are open at once.
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 use super::identity::Identities;
 use super::pairing::{PairError, Pairing};
-use super::server::{Reads, MAX_FRAME_BYTES};
-use super::session::{clean, AuditRow, Outcome, Registry, Sessions, MAX_CLIENT_NAME};
+use super::server::{ReadFailed, Reads, MAX_FRAME_BYTES};
+use super::session::{clean, AuditRow, Begun, Outcome, Registry, Sessions, MAX_CLIENT_NAME};
 use super::store::{self, r2_preset_allowed, FileIo, StoreError, StoredClient, R2_PAIRING_OPEN};
 use crate::ai::{Preset, Topic};
 use crate::at_rest::Sealer;
@@ -75,9 +76,73 @@ impl Step {
 }
 
 fn line(value: Value) -> Vec<u8> {
-    let mut out = value.to_string().into_bytes();
+    with_newline(value.to_string().into_bytes())
+}
+
+fn with_newline(mut out: Vec<u8>) -> Vec<u8> {
     out.push(b'\n');
     out
+}
+
+/// The first phase of one frame ([`Host::begin_frame`]).
+#[derive(Debug)]
+pub enum Begin {
+    /// Fully handled under the host: send this step.
+    Done(Step),
+    /// A ready client's frame that may read: run [`Pending::read`] without
+    /// the host, then [`Host::finish_frame`].
+    Read(Pending),
+}
+
+/// A ready client's frame between [`Host::begin_frame`] and
+/// [`Host::finish_frame`]. It keeps the frame it was begun with, so the read
+/// and the audit row always describe the same call.
+#[derive(Debug)]
+pub struct Pending {
+    begun: Begun,
+    preset: Preset,
+    frame: Vec<u8>,
+}
+
+/// What a [`Pending::read`] produced.
+#[derive(Debug)]
+pub struct ReadDone {
+    reply: Option<Vec<u8>>,
+    outcome: Outcome,
+}
+
+impl Pending {
+    /// Run the frame with reads narrowed to the client's preset. Touches no
+    /// host state, so no lock is held while the node is read. A read source
+    /// that panics counts as a failed read: the client gets the usual
+    /// failed-read reply and the call is audited as [`Outcome::ReadFailed`].
+    pub fn read(&self, source: &dyn ReadSource) -> ReadDone {
+        let reads = catch_unwind(AssertUnwindSafe(|| source.reads_for(self.preset)));
+        let reads: Box<dyn Reads + '_> = match reads {
+            Ok(reads) => Box::new(NoPanic(reads)),
+            Err(_) => Box::new(Failing),
+        };
+        let (reply, outcome) = self.begun.read(&self.frame, reads.as_ref());
+        ReadDone { reply, outcome }
+    }
+}
+
+/// Reads whose panics become a failed read.
+struct NoPanic<'a>(Box<dyn Reads + 'a>);
+
+impl Reads for NoPanic<'_> {
+    fn read(&self, topic: Topic, since_ms: Option<u64>) -> Result<Value, ReadFailed> {
+        catch_unwind(AssertUnwindSafe(|| self.0.read(topic, since_ms))).unwrap_or(Err(ReadFailed))
+    }
+}
+
+/// Reads from a source that could not even be opened.
+struct Failing;
+
+impl Reads for Failing {
+    fn read(&self, _topic: Topic, _since_ms: Option<u64>) -> Result<Value, ReadFailed> {
+        Err(ReadFailed)
+    }
 }
 
 struct Delivery {
@@ -115,7 +180,7 @@ pub trait ReadSource {
 struct Fixed<'a>(&'a dyn Reads);
 
 impl Reads for Fixed<'_> {
-    fn read(&self, topic: Topic, since_ms: Option<u64>) -> Result<Value, super::server::ReadFailed> {
+    fn read(&self, topic: Topic, since_ms: Option<u64>) -> Result<Value, ReadFailed> {
         self.0.read(topic, since_ms)
     }
 }
@@ -303,24 +368,64 @@ impl Host {
     }
 
     /// Handle one frame (one line, without its newline) from `conn`; a ready
-    /// client reads through `source`, narrowed to its own preset.
+    /// client reads through `source`, narrowed to its own preset. The same
+    /// as [`Host::begin_frame`], [`Pending::read`] and [`Host::finish_frame`]
+    /// in a row; a caller sharing the host between connections uses those
+    /// three so the read runs without the host's lock.
     pub fn on_frame_from(&mut self, conn: &mut Conn, frame: &[u8], now_ms: u64, source: &dyn ReadSource) -> Step {
+        match self.begin_frame(conn, frame, now_ms) {
+            Begin::Done(step) => step,
+            Begin::Read(pending) => {
+                let read = pending.read(source);
+                self.finish_frame(conn, pending, read)
+            }
+        }
+    }
+
+    /// The part of one frame that needs the host: the whole handshake, or for
+    /// a ready client the authorisation and rate limit. Does no I/O and runs
+    /// no read. [`Begin::Read`] means the frame's read is still to run
+    /// ([`Pending::read`], without the host) and [`Host::finish_frame`] after.
+    pub fn begin_frame(&mut self, conn: &mut Conn, frame: &[u8], now_ms: u64) -> Begin {
         self.deliveries.retain(|_, delivery| now_ms < delivery.expires_ms);
         if frame.len() > MAX_FRAME_BYTES {
             *conn = Conn::Closed;
-            return Step::refuse("frame too large");
+            return Begin::Done(Step::refuse("frame too large"));
         }
         let state = std::mem::replace(conn, Conn::Closed);
         if let Conn::Ready { client } = &state {
             // A client revoked while connected loses the connection on its next frame.
             if self.registry.active(client).is_none() {
-                return self.refuse_audited(client, "client not authorised", now_ms);
+                return Begin::Done(self.refuse_audited(client, "client not authorised", now_ms));
             }
-            let reads = source.reads_for(self.preset(client));
-            let reply = self.sessions.handle(client, frame, now_ms, &self.registry, reads.as_ref(), &mut self.audit);
-            *conn = state.clone();
-            return Step { reply: reply.map(|mut out| { out.push(b'\n'); out }), close: false };
+            let preset = self.preset(client);
+            let begun = self.sessions.begin(client, frame, now_ms, &self.registry, &mut self.audit);
+            *conn = state;
+            return match begun {
+                Ok(begun) => Begin::Read(Pending { begun, preset, frame: frame.to_vec() }),
+                Err(reply) => Begin::Done(Step { reply: reply.map(with_newline), close: false }),
+            };
         }
+        Begin::Done(self.handshake(conn, state, frame, now_ms))
+    }
+
+    /// The audit row for a read that ran, and the reply. A client revoked
+    /// while its read ran gets no reply and loses the connection. The check
+    /// is made here, under the host: a revoke landing after this call and
+    /// before the caller writes the reply still lets that one reply out.
+    pub fn finish_frame(&mut self, conn: &mut Conn, pending: Pending, read: ReadDone) -> Step {
+        let still_active = self.registry.active(pending.begun.client()).is_some();
+        self.sessions.finish(pending.begun, read.outcome, &mut self.audit);
+        if !still_active {
+            *conn = Conn::Closed;
+            return Step::refuse("client not authorised");
+        }
+        Step { reply: read.reply.map(with_newline), close: false }
+    }
+
+    /// A frame of a connection that is not ready yet. Under the host only;
+    /// no read and no I/O.
+    fn handshake(&mut self, conn: &mut Conn, state: Conn, frame: &[u8], now_ms: u64) -> Step {
         let Ok(Value::Object(message)) = serde_json::from_slice::<Value>(frame) else {
             return Step::refuse("expected a handshake message");
         };
@@ -751,6 +856,34 @@ mod tests {
         assert!(step.close, "the connection is cut, not only the frame refused");
         assert_eq!(conn, Conn::Closed);
         assert_eq!(host.audit.last().unwrap().outcome, Outcome::NotAuthorised);
+    }
+
+    #[test]
+    fn a_split_frame_reads_outside_the_host_and_a_revoke_during_the_read_withholds_the_reply() {
+        let mut host = Host::default();
+        let (id, secret) = paired(&mut host, &[Topic::Node]);
+        let mut conn = ready(&mut host, &id, &secret);
+        let call = br#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_node"}}"#;
+
+        // Handshake frames never leave the host.
+        let mut fresh = Conn::Start;
+        assert!(matches!(host.begin_frame(&mut fresh, &frame(json!({"hello": id})), 12), Begin::Done(_)));
+
+        let Begin::Read(pending) = host.begin_frame(&mut conn, call, 13) else { panic!("a read to run") };
+        assert!(host.audit.is_empty(), "the row is written when the read is done");
+        let done = pending.read(&Fixed(&Fake));
+        let step = host.finish_frame(&mut conn, pending, done);
+        assert_eq!(reply(&step)["result"]["isError"], false);
+        assert_eq!(host.audit.last().unwrap().outcome, Outcome::Read);
+
+        let Begin::Read(pending) = host.begin_frame(&mut conn, call, 14) else { panic!("a read to run") };
+        let done = pending.read(&Fixed(&Fake));
+        host.revoke_saved(&MemFile::default(), Some(&TagSealer), &id).unwrap();
+        let step = host.finish_frame(&mut conn, pending, done);
+        assert_eq!(reply(&step)["error"], "client not authorised", "the read's result is not sent");
+        assert!(step.close);
+        assert_eq!(conn, Conn::Closed);
+        assert_eq!(host.audit.last().unwrap().outcome, Outcome::Read, "the read that ran is still audited");
     }
 
     #[test]

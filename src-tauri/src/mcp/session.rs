@@ -120,9 +120,42 @@ pub struct Sessions {
     calls: HashMap<String, VecDeque<u64>>,
 }
 
+/// A frame that passed [`Sessions::begin`]: the client is known and within
+/// its limit. It holds everything the read and [`Sessions::finish`] need, so
+/// the caller can drop its lock on the registry while the read runs.
+#[derive(Debug)]
+pub struct Begun {
+    client: String,
+    allowed: Vec<Topic>,
+    now_ms: u64,
+    peek: Peek,
+}
+
+impl Begun {
+    /// The client this frame came from.
+    pub fn client(&self) -> &str {
+        &self.client
+    }
+
+    /// Run the frame through the protocol skeleton with this client's
+    /// allowlist. Needs no shared state: call it without any lock held.
+    /// Returns the reply (`None` for a notification) and what to audit.
+    pub fn read(&self, frame: &[u8], reads: &dyn Reads) -> (Option<Vec<u8>>, Outcome) {
+        let observed = Observed { reads, ran: Cell::new(None) };
+        let reply = server::handle(frame, &self.allowed, &observed);
+        let outcome = match observed.ran.get() {
+            None => Outcome::Refused,
+            Some(true) => Outcome::Read,
+            Some(false) => Outcome::ReadFailed,
+        };
+        (reply, outcome)
+    }
+}
+
 impl Sessions {
     /// Handles one frame from `client`. `None` when no reply is sent (a
-    /// notification).
+    /// notification). The same as [`Sessions::begin`], [`Begun::read`] and
+    /// [`Sessions::finish`] in a row.
     pub fn handle(
         &mut self,
         client: &str,
@@ -132,23 +165,32 @@ impl Sessions {
         reads: &dyn Reads,
         audit: &mut dyn Audit,
     ) -> Option<Vec<u8>> {
-        let peek = Peek::of(frame);
-        let mut record = |outcome| {
-            if let Some(call) = &peek.call {
-                audit.append(AuditRow {
-                    at_ms: now_ms,
-                    client: clean(client, MAX_CLIENT_NAME),
-                    tool: call.tool.clone(),
-                    arguments: call.arguments.clone(),
-                    outcome,
-                });
+        match self.begin(client, frame, now_ms, registry, audit) {
+            Err(reply) => reply,
+            Ok(begun) => {
+                let (reply, outcome) = begun.read(frame, reads);
+                self.finish(begun, outcome, audit);
+                reply
             }
-        };
+        }
+    }
 
+    /// The first phase of one frame: is the client known, and is a tool call
+    /// within its limit? A refusal is audited here and its reply (if any) is
+    /// in `Err`; nothing is read. `Ok` means the frame may go to the read.
+    pub fn begin(
+        &mut self,
+        client: &str,
+        frame: &[u8],
+        now_ms: u64,
+        registry: &Registry,
+        audit: &mut dyn Audit,
+    ) -> Result<Begun, Option<Vec<u8>>> {
+        let peek = Peek::of(frame);
         let Some(known) = registry.active(client) else {
             self.calls.remove(client);
-            record(Outcome::NotAuthorised);
-            return peek.replies.then(|| error(peek.id.clone(), NOT_AUTHORISED, "client not authorised"));
+            record(audit, client, now_ms, &peek, Outcome::NotAuthorised);
+            return Err(peek.replies.then(|| error(peek.id.clone(), NOT_AUTHORISED, "client not authorised")));
         };
 
         // Only a tool call that would run counts towards the limit.
@@ -158,20 +200,30 @@ impl Sessions {
                 window.pop_front();
             }
             if window.len() >= CALLS_PER_MINUTE {
-                record(Outcome::RateLimited);
-                return Some(error(peek.id.clone(), RATE_LIMITED, "rate limited"));
+                record(audit, client, now_ms, &peek, Outcome::RateLimited);
+                return Err(Some(error(peek.id.clone(), RATE_LIMITED, "rate limited")));
             }
             window.push_back(now_ms);
         }
+        Ok(Begun { client: client.to_owned(), allowed: known.allowed.clone(), now_ms, peek })
+    }
 
-        let observed = Observed { reads, ran: Cell::new(None) };
-        let reply = server::handle(frame, &known.allowed, &observed);
-        record(match observed.ran.get() {
-            None => Outcome::Refused,
-            Some(true) => Outcome::Read,
-            Some(false) => Outcome::ReadFailed,
+    /// The last phase: the audit row for a tool call (other frames leave none).
+    pub fn finish(&mut self, begun: Begun, outcome: Outcome, audit: &mut dyn Audit) {
+        record(audit, &begun.client, begun.now_ms, &begun.peek, outcome);
+    }
+}
+
+/// One audit row for a tool call frame; nothing for any other frame.
+fn record(audit: &mut dyn Audit, client: &str, now_ms: u64, peek: &Peek, outcome: Outcome) {
+    if let Some(call) = &peek.call {
+        audit.append(AuditRow {
+            at_ms: now_ms,
+            client: clean(client, MAX_CLIENT_NAME),
+            tool: call.tool.clone(),
+            arguments: call.arguments.clone(),
+            outcome,
         });
-        reply
     }
 }
 
@@ -190,6 +242,7 @@ impl Reads for Observed<'_> {
 }
 
 /// What the session needs to know about a frame before the skeleton sees it.
+#[derive(Debug)]
 struct Peek {
     id: Value,
     /// A request (with an id) gets a reply; a notification does not.
@@ -197,6 +250,7 @@ struct Peek {
     call: Option<Call>,
 }
 
+#[derive(Debug)]
 struct Call {
     tool: String,
     arguments: String,
