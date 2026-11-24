@@ -21,13 +21,14 @@
 //! [`MAX_CONNECTIONS`] connections are open at once.
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 use super::identity::Identities;
 use super::pairing::{PairError, Pairing};
-use super::server::{Reads, MAX_FRAME_BYTES};
+use super::server::{ReadFailed, Reads, MAX_FRAME_BYTES};
 use super::session::{clean, AuditRow, Begun, Outcome, Registry, Sessions, MAX_CLIENT_NAME};
 use super::store::{self, r2_preset_allowed, FileIo, StoreError, StoredClient, R2_PAIRING_OPEN};
 use crate::ai::{Preset, Topic};
@@ -94,11 +95,13 @@ pub enum Begin {
 }
 
 /// A ready client's frame between [`Host::begin_frame`] and
-/// [`Host::finish_frame`].
+/// [`Host::finish_frame`]. It keeps the frame it was begun with, so the read
+/// and the audit row always describe the same call.
 #[derive(Debug)]
 pub struct Pending {
     begun: Begun,
     preset: Preset,
+    frame: Vec<u8>,
 }
 
 /// What a [`Pending::read`] produced.
@@ -110,11 +113,35 @@ pub struct ReadDone {
 
 impl Pending {
     /// Run the frame with reads narrowed to the client's preset. Touches no
-    /// host state, so no lock is held while the node is read.
-    pub fn read(&self, frame: &[u8], source: &dyn ReadSource) -> ReadDone {
-        let reads = source.reads_for(self.preset);
-        let (reply, outcome) = self.begun.read(frame, reads.as_ref());
+    /// host state, so no lock is held while the node is read. A read source
+    /// that panics counts as a failed read: the client gets the usual
+    /// failed-read reply and the call is audited as [`Outcome::ReadFailed`].
+    pub fn read(&self, source: &dyn ReadSource) -> ReadDone {
+        let reads = catch_unwind(AssertUnwindSafe(|| source.reads_for(self.preset)));
+        let reads: Box<dyn Reads + '_> = match reads {
+            Ok(reads) => Box::new(NoPanic(reads)),
+            Err(_) => Box::new(Failing),
+        };
+        let (reply, outcome) = self.begun.read(&self.frame, reads.as_ref());
         ReadDone { reply, outcome }
+    }
+}
+
+/// Reads whose panics become a failed read.
+struct NoPanic<'a>(Box<dyn Reads + 'a>);
+
+impl Reads for NoPanic<'_> {
+    fn read(&self, topic: Topic, since_ms: Option<u64>) -> Result<Value, ReadFailed> {
+        catch_unwind(AssertUnwindSafe(|| self.0.read(topic, since_ms))).unwrap_or(Err(ReadFailed))
+    }
+}
+
+/// Reads from a source that could not even be opened.
+struct Failing;
+
+impl Reads for Failing {
+    fn read(&self, _topic: Topic, _since_ms: Option<u64>) -> Result<Value, ReadFailed> {
+        Err(ReadFailed)
     }
 }
 
@@ -153,7 +180,7 @@ pub trait ReadSource {
 struct Fixed<'a>(&'a dyn Reads);
 
 impl Reads for Fixed<'_> {
-    fn read(&self, topic: Topic, since_ms: Option<u64>) -> Result<Value, super::server::ReadFailed> {
+    fn read(&self, topic: Topic, since_ms: Option<u64>) -> Result<Value, ReadFailed> {
         self.0.read(topic, since_ms)
     }
 }
@@ -349,7 +376,7 @@ impl Host {
         match self.begin_frame(conn, frame, now_ms) {
             Begin::Done(step) => step,
             Begin::Read(pending) => {
-                let read = pending.read(frame, source);
+                let read = pending.read(source);
                 self.finish_frame(conn, pending, read)
             }
         }
@@ -375,7 +402,7 @@ impl Host {
             let begun = self.sessions.begin(client, frame, now_ms, &self.registry, &mut self.audit);
             *conn = state;
             return match begun {
-                Ok(begun) => Begin::Read(Pending { begun, preset }),
+                Ok(begun) => Begin::Read(Pending { begun, preset, frame: frame.to_vec() }),
                 Err(reply) => Begin::Done(Step { reply: reply.map(with_newline), close: false }),
             };
         }
@@ -383,8 +410,9 @@ impl Host {
     }
 
     /// The audit row for a read that ran, and the reply. A client revoked
-    /// while its read ran gets no reply and loses the connection: nothing
-    /// reaches a client after its revoke.
+    /// while its read ran gets no reply and loses the connection. The check
+    /// is made here, under the host: a revoke landing after this call and
+    /// before the caller writes the reply still lets that one reply out.
     pub fn finish_frame(&mut self, conn: &mut Conn, pending: Pending, read: ReadDone) -> Step {
         let still_active = self.registry.active(pending.begun.client()).is_some();
         self.sessions.finish(pending.begun, read.outcome, &mut self.audit);
@@ -843,13 +871,13 @@ mod tests {
 
         let Begin::Read(pending) = host.begin_frame(&mut conn, call, 13) else { panic!("a read to run") };
         assert!(host.audit.is_empty(), "the row is written when the read is done");
-        let done = pending.read(call, &Fixed(&Fake));
+        let done = pending.read(&Fixed(&Fake));
         let step = host.finish_frame(&mut conn, pending, done);
         assert_eq!(reply(&step)["result"]["isError"], false);
         assert_eq!(host.audit.last().unwrap().outcome, Outcome::Read);
 
         let Begin::Read(pending) = host.begin_frame(&mut conn, call, 14) else { panic!("a read to run") };
-        let done = pending.read(call, &Fixed(&Fake));
+        let done = pending.read(&Fixed(&Fake));
         host.revoke_saved(&MemFile::default(), Some(&TagSealer), &id).unwrap();
         let step = host.finish_frame(&mut conn, pending, done);
         assert_eq!(reply(&step)["error"], "client not authorised", "the read's result is not sent");
