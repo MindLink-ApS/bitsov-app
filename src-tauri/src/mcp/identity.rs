@@ -42,13 +42,14 @@ pub enum IdentityError {
     UnknownClient,
 }
 
+#[derive(Clone)]
 struct Pending {
     challenge: [u8; 32],
     expires_ms: u64,
 }
 
 /// The host's per-client public keys and open challenges.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Identities {
     keys: HashMap<String, VerifyingKey>,
     pending: HashMap<String, Pending>,

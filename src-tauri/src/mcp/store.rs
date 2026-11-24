@@ -64,6 +64,8 @@ pub enum StoreError {
     Unreadable,
     /// A client asks for more than R2 allows (`exact`).
     PresetTooWide { id: String },
+    /// Two records for one client id.
+    DuplicateClient { id: String },
     /// The file could not be read or written.
     Io(String),
 }
@@ -88,6 +90,11 @@ pub fn r2_preset_allowed(preset: Preset) -> bool {
 }
 
 fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
+    let mut ids = std::collections::HashSet::new();
+    if let Some(client) = clients.iter().find(|client| !ids.insert(client.id.as_str())) {
+        // Two records for one id: which one holds is undefined, so neither is trusted.
+        return Err(StoreError::DuplicateClient { id: client.id.clone() });
+    }
     match clients.iter().find(|client| !r2_preset_allowed(client.preset)) {
         Some(client) => Err(StoreError::PresetTooWide { id: client.id.clone() }),
         None => Ok(()),
@@ -130,6 +137,16 @@ pub fn save(io: &dyn FileIo, sealer: Option<&dyn Sealer>, clients: &[StoredClien
     io.write(&sealed).map_err(|error| StoreError::Io(error.to_string()))
 }
 
+/// A fresh scratch name beside `path`: `<name>.<random>.tmp`.
+#[cfg(any(all(unix, not(target_os = "android")), windows))]
+fn scratch_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let mut random = [0u8; 8];
+    getrandom::fill(&mut random).map_err(|_| std::io::Error::other("no randomness"))?;
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.tmp", hex::encode(random)));
+    Ok(path.with_file_name(name))
+}
+
 /// The clients file on disk, through the app's private-file layer: written
 /// atomically (temp file, then rename), owner-only, never through a link.
 pub struct PrivateFile {
@@ -141,7 +158,9 @@ impl FileIo for PrivateFile {
     fn read(&self, max_bytes: usize) -> std::io::Result<Option<Vec<u8>>> {
         use std::io::Read;
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let mut file = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&self.path) {
+        // O_NONBLOCK: a FIFO planted at the path cannot hang the host; it is
+        // then refused as not a regular file.
+        let mut file = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
@@ -174,16 +193,22 @@ impl FileIo for PrivateFile {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let dir = self.path.parent().ok_or_else(|| std::io::Error::other("no directory"))?;
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-        let mut tmp_name = self.path.file_name().unwrap_or_default().to_os_string();
-        tmp_name.push(".tmp");
-        let tmp = self.path.with_file_name(tmp_name);
-        let _ = std::fs::remove_file(&tmp);
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW).open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, &self.path)?;
-        std::fs::File::open(dir)?.sync_all()
+        let tmp = scratch_path(&self.path)?;
+        let written = (|| {
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW).open(&tmp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, &self.path)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return written;
+        }
+        // The new file is in place. A failed directory sync after the rename
+        // does not make the save a failure: memory and disk already agree.
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+        Ok(())
     }
 
     /// The app's verified private store: the folder and file must verify
@@ -193,9 +218,9 @@ impl FileIo for PrivateFile {
     fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
         let dir = self.path.parent().ok_or_else(|| std::io::Error::other("no directory"))?;
         crate::private_fs::ensure_dir(dir)?;
-        let mut tmp_name = self.path.file_name().unwrap_or_default().to_os_string();
-        tmp_name.push(".tmp");
-        let tmp = self.path.with_file_name(tmp_name);
+        // A scratch name of its own each time: one left behind by a crash never
+        // blocks a later save.
+        let tmp = scratch_path(&self.path)?;
         crate::private_fs::write_replacing_verified(&tmp, &self.path, bytes, |e| e, |readback| {
             if readback == bytes { Ok(()) } else { Err(std::io::Error::other("read-back did not match")) }
         })
@@ -291,6 +316,34 @@ mod tests {
         std::fs::remove_file(&file.path).unwrap();
         std::os::unix::fs::symlink(temp.path().join("elsewhere"), &file.path).unwrap();
         assert!(file.read(64).is_err(), "a link is not followed");
+    }
+
+    #[test]
+    fn two_records_for_one_client_are_refused_on_save_and_on_load() {
+        let (file, sealer) = (MemFile::default(), TagSealer);
+        let twice = vec![client("mcp-01", Preset::Counts), client("mcp-01", Preset::Rounded)];
+        assert_eq!(save(&file, Some(&sealer), &twice), Err(StoreError::DuplicateClient { id: "mcp-01".into() }));
+        let body = serde_json::to_vec(&Contents { version: VERSION, clients: twice }).unwrap();
+        *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, &body).unwrap());
+        assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable));
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn a_fifo_at_the_path_is_refused_without_hanging_and_scratch_names_never_collide() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("clients.sealed");
+        let status = std::process::Command::new("mkfifo").arg(&path).status().unwrap();
+        assert!(status.success());
+        let file = PrivateFile { path: path.clone() };
+        assert!(file.read(64).is_err(), "a FIFO is not a regular file, and the read does not block");
+        std::fs::remove_file(&path).unwrap();
+        // A scratch file left behind by a crash does not block the next save.
+        std::fs::write(temp.path().join("clients.sealed.tmp"), b"left over").unwrap();
+        file.write(b"one").unwrap();
+        file.write(b"two").unwrap();
+        assert_eq!(file.read(64).unwrap().unwrap(), b"two");
+        assert_ne!(scratch_path(&path).unwrap(), scratch_path(&path).unwrap());
     }
 
     fn client(id: &str, preset: Preset) -> StoredClient {

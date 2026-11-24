@@ -137,6 +137,9 @@ pub struct Host {
     pub audit: Vec<AuditRow>,
     deliveries: HashMap<String, Delivery>,
     stored: Vec<StoredClient>,
+    /// Set when the clients file was there but did not load: nothing is saved
+    /// over it until the owner chooses to start over ([`Host::start_over`]).
+    blocked: Option<StoreError>,
 }
 
 /// Where a ready client's reads come from, narrowed to that client's preset
@@ -170,6 +173,13 @@ pub enum ChangeError {
     UnknownClient,
     /// Saving failed; nothing changed.
     Store(StoreError),
+    /// The clients file did not load, so nothing is saved over it until the
+    /// owner starts over; nothing changed.
+    StoreBlocked(StoreError),
+    /// The client **is** revoked now (no session, no key), but the record
+    /// could not be saved: after a restart it would be back until a later
+    /// save succeeds. Revocation never waits for the disk.
+    RevokedNotSaved(StoreError),
 }
 
 fn hex32(value: &Value) -> Option<[u8; 32]> {
@@ -194,6 +204,27 @@ impl Host {
     /// A host for the clients on file. Revoked records are kept for the
     /// owner's history and never authorised; a record whose key does not load
     /// is kept but not authorised either.
+    /// A host from the result of [`store::load`]. A file that is there but
+    /// does not load (unreadable, tampered, the wrong mode) gives no clients
+    /// **and** blocks saving, so it is never overwritten by accident.
+    pub fn from_load(loaded: Result<Vec<StoredClient>, StoreError>) -> Self {
+        match loaded {
+            Ok(records) => Self::from_stored(records),
+            Err(error) => Host { blocked: Some(error), ..Host::default() },
+        }
+    }
+
+    /// Why saving is blocked, if it is (the app shows it and offers to start over).
+    pub fn blocked(&self) -> Option<&StoreError> {
+        self.blocked.as_ref()
+    }
+
+    /// The owner chose to start over after the old file was moved aside: saves
+    /// are allowed again, starting from no clients.
+    pub fn start_over(&mut self) {
+        self.blocked = None;
+    }
+
     pub fn from_stored(records: Vec<StoredClient>) -> Self {
         let mut host = Host::default();
         for record in &records {
@@ -234,9 +265,22 @@ impl Host {
         Ok(())
     }
 
-    /// The owner revokes a client: no new session, no further frame on a live
-    /// one, and its key is dropped. The record stays, marked revoked.
-    pub fn revoke(&mut self, id: &str) -> Result<(), ChangeError> {
+    /// The owner revokes a client and the record is saved. The revocation
+    /// holds in memory **even when saving fails** (then
+    /// [`ChangeError::RevokedNotSaved`]): cutting access never waits for the
+    /// disk, and the next successful save carries it.
+    pub fn revoke_saved(&mut self, io: &dyn FileIo, sealer: Option<&dyn Sealer>, id: &str) -> Result<(), ChangeError> {
+        self.revoke(id)?;
+        if let Some(error) = &self.blocked {
+            return Err(ChangeError::RevokedNotSaved(error.clone()));
+        }
+        store::save(io, sealer, &self.stored).map_err(ChangeError::RevokedNotSaved)
+    }
+
+    /// Revoke in memory only: no new session, no further frame on a live one,
+    /// and its key is dropped. The record stays, marked revoked. Use
+    /// [`Host::revoke_saved`].
+    fn revoke(&mut self, id: &str) -> Result<(), ChangeError> {
         let record = self.stored.iter_mut().find(|record| record.id == id && !record.revoked).ok_or(ChangeError::UnknownClient)?;
         record.revoked = true;
         self.registry.revoke(id);
@@ -245,22 +289,31 @@ impl Host {
         Ok(())
     }
 
-    /// Apply one owner change and save the records sealed. If the change or
-    /// the save fails, the host is exactly as before: the records, the keys,
-    /// the registry, and any secret waiting for collection.
+    /// Apply one owner change (an approval) and save the records sealed. If
+    /// the change or the save fails, the host is as before: the records, the
+    /// keys and open challenges, the registry, the waiting pairing requests,
+    /// and no new secret waiting for collection. While saving is blocked
+    /// ([`Host::from_load`]) nothing is changed. Revocation does not go
+    /// through here: see [`Host::revoke_saved`].
     pub fn commit<R>(
         &mut self,
         io: &dyn FileIo,
         sealer: Option<&dyn Sealer>,
         change: impl FnOnce(&mut Host) -> Result<R, ChangeError>,
     ) -> Result<R, ChangeError> {
-        let before = self.stored.clone();
+        if let Some(error) = &self.blocked {
+            return Err(ChangeError::StoreBlocked(error.clone()));
+        }
+        // Snapshots of the real state, not a rebuild: a rebuild would drop
+        // open challenges and undo in-memory revocations.
+        let (stored, registry, identities, pairing) =
+            (self.stored.clone(), self.registry.clone(), self.identities.clone(), self.pairing.clone());
         let waiting: Vec<String> = self.deliveries.keys().cloned().collect();
-        let undo = |host: &mut Host| {
-            let rebuilt = Host::from_stored(before.clone());
-            host.registry = rebuilt.registry;
-            host.identities = rebuilt.identities;
-            host.stored = rebuilt.stored;
+        let undo = move |host: &mut Host| {
+            host.stored = stored;
+            host.registry = registry;
+            host.identities = identities;
+            host.pairing = pairing;
             host.deliveries.retain(|id, _| waiting.contains(id));
         };
         let result = match change(self) {
@@ -583,8 +636,9 @@ mod tests {
         assert!(host.stored().is_empty());
         assert!(host.registry.active(&id).is_none());
         assert!(host.identities.public_key(&id).is_none());
-        assert_eq!(reply(&host.on_frame(&mut conn, &frame(json!({"pair_status": true})), 2, &Fake))["pair"], "gone",
-            "the secret of an approval that was not saved is never handed over");
+        let status = reply(&host.on_frame(&mut conn, &frame(json!({"pair_status": true})), 2, &Fake));
+        assert_eq!(status["pair"], "waiting", "the request is back, so the owner can approve again");
+        assert!(status.get("secret").is_none(), "the secret of an approval that was not saved is never handed over");
         // No sealer (Linux): nothing is approved either.
         assert!(matches!(Host::default().commit(&MemFile::default(), None, |_| Ok(())), Err(ChangeError::Store(StoreError::NoSealer))));
     }
@@ -603,16 +657,87 @@ mod tests {
         let secret: [u8; 32] = hex::decode(done["secret"].as_str().unwrap()).unwrap().try_into().unwrap();
         let mut live = ready(&mut host, &id, &secret);
 
-        host.commit(&file, Some(&sealer), |h| h.revoke(&id)).unwrap();
+        host.revoke_saved(&file, Some(&sealer), &id).unwrap();
         assert!(host.on_frame(&mut live, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, 30, &Fake).close, "a live session ends");
         assert!(host.identities.public_key(&id).is_none(), "the key is dropped with the registry entry");
-        assert_eq!(host.commit(&file, Some(&sealer), |h| h.revoke(&id)), Err(ChangeError::UnknownClient));
+        assert_eq!(host.revoke_saved(&file, Some(&sealer), &id), Err(ChangeError::UnknownClient));
 
         let records = crate::mcp::store::load(&file, Some(&sealer)).unwrap();
         assert!(records[0].revoked, "kept for the owner's history, marked revoked");
         let mut host = Host::from_stored(records);
         let mut conn = Conn::Start;
         assert_eq!(reply(&host.on_frame(&mut conn, &frame(json!({"hello": id})), 40, &Fake))["error"], "unknown client");
+    }
+
+    /// Pair, approve with a save, collect the secret, open a session.
+    fn approved_and_ready(host: &mut Host, file: &MemFile) -> (String, [u8; 32], Conn) {
+        let mut conn = Conn::Start;
+        let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
+        let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+        host.commit(file, Some(&TagSealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, 1)).unwrap();
+        let done = reply(&host.on_frame(&mut conn, &frame(json!({"pair_status": true})), 2, &Fake));
+        let secret: [u8; 32] = hex::decode(done["secret"].as_str().unwrap()).unwrap().try_into().unwrap();
+        let live = ready(host, &id, &secret);
+        (id, secret, live)
+    }
+
+    #[test]
+    fn a_revoke_whose_save_fails_still_cuts_the_client_off_now() {
+        let mut file = MemFile::default();
+        let mut host = Host::default();
+        let (id, _, mut live) = approved_and_ready(&mut host, &file);
+        file.fail_write = true;
+        assert!(matches!(host.revoke_saved(&file, Some(&TagSealer), &id), Err(ChangeError::RevokedNotSaved(_))));
+        assert!(host.on_frame(&mut live, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, 30, &Fake).close, "the live session ends anyway");
+        assert!(host.identities.public_key(&id).is_none());
+        // A later failing approval must not bring it back.
+        let _ = host.commit(&file, Some(&TagSealer), |h| h.approve("mcp-ffff", &[Topic::Node], Preset::Exact, 40));
+        assert!(host.registry.active(&id).is_none(), "a failed commit does not undo the revoke");
+        // The next successful save carries the revocation.
+        file.fail_write = false;
+        let mut conn = Conn::Start;
+        let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Other", "nonce": hex::encode([4u8; 32])}})), 50, &Fake));
+        let other = asked["pair"]["id"].as_str().unwrap().to_owned();
+        host.commit(&file, Some(&TagSealer), |h| h.approve(&other, &[Topic::Node], Preset::Counts, 51)).unwrap();
+        let records = crate::mcp::store::load(&file, Some(&TagSealer)).unwrap();
+        assert!(records.iter().any(|r| r.id == id && r.revoked));
+    }
+
+    #[test]
+    fn a_file_that_did_not_load_is_never_saved_over() {
+        let file = MemFile::default();
+        *file.bytes.borrow_mut() = Some(b"something that does not open".to_vec());
+        let loaded = crate::mcp::store::load(&file, Some(&TagSealer));
+        assert!(loaded.is_err());
+        let mut host = Host::from_load(loaded);
+        assert!(host.blocked().is_some());
+        let mut conn = Conn::Start;
+        let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
+        let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+        assert!(matches!(host.commit(&file, Some(&TagSealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, 1)), Err(ChangeError::StoreBlocked(_))));
+        assert_eq!(file.bytes.borrow().as_deref(), Some(&b"something that does not open"[..]), "the old file is untouched");
+        assert!(host.pairing.waiting(1).iter().any(|w| w.id == id), "the request keeps waiting");
+        host.start_over();
+        host.commit(&file, Some(&TagSealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, 2)).unwrap();
+    }
+
+    #[test]
+    fn a_failed_commit_leaves_other_clients_open_challenges_and_requests_alone() {
+        let file = MemFile::default();
+        let mut host = Host::default();
+        let (id, secret, _) = approved_and_ready(&mut host, &file);
+        // Another connection of the same client is mid-handshake.
+        let mut conn = Conn::Start;
+        let challenge = reply(&host.on_frame(&mut conn, &frame(json!({"hello": id})), 60, &Fake));
+        let challenge: [u8; 32] = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap().try_into().unwrap();
+        let mut other = Conn::Start;
+        let asked = reply(&host.on_frame(&mut other, &frame(json!({"pair": {"name": "Notes", "nonce": hex::encode([5u8; 32])}})), 61, &Fake));
+        let waiting = asked["pair"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(host.commit(&file, Some(&TagSealer), |h| h.approve(&waiting, &[Topic::Node], Preset::Exact, 62)), Err(ChangeError::PresetTooWide));
+        assert!(host.pairing.waiting(63).iter().any(|w| w.id == waiting));
+        // The open challenge survived the failed commit: answering it opens the session.
+        let ok = host.on_frame(&mut conn, &frame(json!({"signature": hex::encode(sign(&secret, &id, &challenge))})), 64, &Fake);
+        assert_eq!(reply(&ok)["ready"], true);
     }
 
     #[test]
