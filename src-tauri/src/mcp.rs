@@ -332,6 +332,8 @@ pub mod server;
 pub mod session;
 /// Phase 1, slice 3: the read broker (closed node reads, counts by default; not wired).
 pub mod broker;
+/// Phase 1, slice 4: per-client keys and a single-use session challenge (not wired).
+pub mod identity;
 
 #[cfg(test)]
 mod tests;
