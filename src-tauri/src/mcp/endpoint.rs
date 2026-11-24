@@ -14,9 +14,11 @@
 //!   words for the owner (slice 5). `{"pair_status": true}` polls it; on the
 //!   owner's approval the client's secret is handed over exactly once and the
 //!   connection closes.
-//! Anything else closes the connection. On macOS the listener is a Unix
-//! socket in an owner-only directory, and a peer of any other user is closed
-//! before a byte is read.
+//! Anything else closes the connection, and a failed handshake is audited.
+//! On macOS the listener is a Unix socket in an owner-only directory; on
+//! Windows it is a named pipe for this user only (`bitsov_ffi`). Either way a
+//! peer of any other user is closed before a byte is read, and at most
+//! [`MAX_CONNECTIONS`] connections are open at once.
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -27,9 +29,15 @@ use zeroize::Zeroizing;
 use super::identity::Identities;
 use super::pairing::{PairError, Pairing};
 use super::server::{Reads, MAX_FRAME_BYTES};
-use super::session::{AuditRow, Registry, Sessions};
+use super::session::{AuditRow, Outcome, Registry, Sessions, MAX_CLIENT_NAME};
 use super::store::R2_PAIRING_OPEN;
 use crate::ai::Topic;
+
+/// At most this many connections at once (ADR A1 §2); the listener refuses more.
+pub const MAX_CONNECTIONS: usize = 8;
+
+/// The tool name on audit rows for a refused handshake.
+pub const HANDSHAKE_AUDIT_TOOL: &str = "handshake";
 
 /// How long an approved client's secret waits to be collected.
 pub const DELIVERY_TTL_MS: u64 = 5 * 60_000;
@@ -94,6 +102,20 @@ fn hex32(value: &Value) -> Option<[u8; 32]> {
 }
 
 impl Host {
+    /// A refused hello or signature, or a revoked client's frame: audited
+    /// (ADR A1 §1.4). The client id is cleaned and capped like every row.
+    fn refuse_audited(&mut self, client: &str, reason: &str, now_ms: u64) -> Step {
+        let client: String = client.chars().filter(|c| !c.is_control()).take(MAX_CLIENT_NAME).collect();
+        self.audit.push(AuditRow {
+            at_ms: now_ms,
+            client,
+            tool: HANDSHAKE_AUDIT_TOOL.to_owned(),
+            arguments: reason.to_owned(),
+            outcome: Outcome::NotAuthorised,
+        });
+        Step::refuse(reason)
+    }
+
     /// The owner approves a waiting pairing request in the app.
     pub fn approve(&mut self, id: &str, topics: &[Topic], now_ms: u64) -> Result<(), PairError> {
         let issued = self.pairing.approve(id, topics, now_ms, &mut self.registry, &mut self.identities)?;
@@ -115,8 +137,11 @@ impl Host {
         }
         let state = std::mem::replace(conn, Conn::Closed);
         if let Conn::Ready { client } = &state {
+            // A client revoked while connected loses the connection on its next frame.
+            if self.registry.active(client).is_none() {
+                return self.refuse_audited(client, "client not authorised", now_ms);
+            }
             let reply = self.sessions.handle(client, frame, now_ms, &self.registry, reads, &mut self.audit);
-            // A client revoked while connected is refused by the session layer on every frame.
             *conn = state.clone();
             return Step { reply: reply.map(|mut out| { out.push(b'\n'); out }), close: false };
         }
@@ -127,26 +152,26 @@ impl Host {
             (Conn::Start, 1) if message.contains_key("hello") => {
                 let Some(client) = message["hello"].as_str() else { return Step::refuse("bad hello") };
                 if self.registry.active(client).is_none() {
-                    return Step::refuse("unknown client");
+                    return self.refuse_audited(client, "unknown client", now_ms);
                 }
                 match self.identities.challenge(client, now_ms) {
                     Ok(challenge) => {
                         *conn = Conn::Challenged { client: client.to_owned(), challenge };
                         Step::send(json!({ "challenge": hex::encode(challenge) }))
                     }
-                    Err(_) => Step::refuse("unknown client"),
+                    Err(_) => self.refuse_audited(client, "unknown client", now_ms),
                 }
             }
             (Conn::Challenged { client, challenge }, 1) if message.contains_key("signature") => {
                 let Some(signature) = message["signature"].as_str().and_then(|s| hex::decode(s).ok()) else {
-                    return Step::refuse("bad signature");
+                    return self.refuse_audited(&client, "bad signature", now_ms);
                 };
                 // The registry is checked again: a client revoked during the handshake gets nothing.
                 if self.registry.active(&client).is_some() && self.identities.verify(&client, &challenge, &signature, now_ms) {
                     *conn = Conn::Ready { client };
                     Step::send(json!({ "ready": true }))
                 } else {
-                    Step::refuse("not authorised")
+                    self.refuse_audited(&client, "not authorised", now_ms)
                 }
             }
             (Conn::Start, 1) if message.contains_key("pair") => {
@@ -199,6 +224,14 @@ pub fn read_frame(reader: &mut impl BufRead, max: usize) -> std::io::Result<Opti
     Ok(Some(buf))
 }
 
+/// Windows: the owner-only named pipe (ADR A1 §1.3), built in `bitsov_ffi`.
+#[cfg(windows)]
+pub mod windows {
+    pub use bitsov_ffi::win_private::pipe::{PipeConnection, PipeListener};
+
+    const _: () = assert!(bitsov_ffi::win_private::pipe::MAX_CONNECTIONS == super::MAX_CONNECTIONS);
+}
+
 /// macOS: the owner-only listener (ADR A1 §1.3).
 #[cfg(target_os = "macos")]
 pub mod unix {
@@ -231,15 +264,22 @@ pub mod unix {
         Ok(listener)
     }
 
-    /// Accept one connection, closing any peer that is not this user.
+    /// Accept one connection, closing any peer that is not this user. A peer
+    /// whose credentials cannot be read (it may already be gone) is closed
+    /// too, and the wait goes on.
     pub fn accept_owner(listener: &UnixListener) -> std::io::Result<UnixStream> {
         loop {
             let (stream, _) = listener.accept()?;
-            if bitsov_ffi::peer_uid(&stream)? == bitsov_ffi::effective_uid() {
+            if owner_peer(bitsov_ffi::peer_uid(&stream), bitsov_ffi::effective_uid()) {
                 return Ok(stream);
             }
             drop(stream);
         }
+    }
+
+    /// Only a readable peer uid equal to ours is admitted.
+    pub(super) fn owner_peer(peer: std::io::Result<u32>, own: u32) -> bool {
+        matches!(peer, Ok(uid) if uid == own)
     }
 }
 
@@ -330,7 +370,10 @@ mod tests {
         let step = host.on_frame(&mut conn, &frame(json!({"hello": "mcp-0000000000000000"})), 0, &Fake);
         assert_eq!(reply(&step)["error"], "unknown client");
         assert!(step.close);
-        assert!(host.audit.is_empty());
+        assert_eq!(host.audit.len(), 1, "a refused hello is audited");
+        assert_eq!(host.audit[0].tool, HANDSHAKE_AUDIT_TOOL);
+        assert_eq!(host.audit[0].outcome, Outcome::NotAuthorised);
+        assert_eq!(host.audit[0].client, "mcp-0000000000000000");
     }
 
     #[test]
@@ -348,6 +391,23 @@ mod tests {
         // The challenge was answered (wrongly) and is used up: replaying the good answer fails too.
         let mut again = Conn::Challenged { client: id.clone(), challenge };
         assert!(host.on_frame(&mut again, &frame(json!({"signature": good})), 12, &Fake).close);
+        assert_eq!(host.audit.len(), 2, "both refused signatures are audited");
+        assert!(host.audit.iter().all(|row| row.client == id && row.tool == HANDSHAKE_AUDIT_TOOL));
+    }
+
+    #[test]
+    fn a_client_revoked_between_hello_and_signature_is_refused() {
+        let mut host = Host::default();
+        let (id, secret) = paired(&mut host, &[Topic::Node]);
+        let mut conn = Conn::Start;
+        let challenge = reply(&host.on_frame(&mut conn, &frame(json!({"hello": id})), 10, &Fake));
+        let challenge: [u8; 32] = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap().try_into().unwrap();
+        assert!(host.registry.revoke(&id));
+        let step = host.on_frame(&mut conn, &frame(json!({"signature": hex::encode(sign(&secret, &id, &challenge))})), 11, &Fake);
+        assert!(step.close);
+        assert_eq!(reply(&step)["error"], "not authorised");
+        assert_eq!(conn, Conn::Closed);
+        assert_eq!(host.audit.len(), 1);
     }
 
     #[test]
@@ -357,8 +417,10 @@ mod tests {
         let mut conn = ready(&mut host, &id, &secret);
         assert!(host.registry.revoke(&id));
         let step = host.on_frame(&mut conn, br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_node"}}"#, 20, &Fake);
-        let out: Value = serde_json::from_slice(step.reply.as_ref().unwrap()).unwrap();
-        assert_eq!(out["error"]["message"], "client not authorised");
+        assert_eq!(reply(&step)["error"], "client not authorised");
+        assert!(step.close, "the connection is cut, not only the frame refused");
+        assert_eq!(conn, Conn::Closed);
+        assert_eq!(host.audit.last().unwrap().outcome, Outcome::NotAuthorised);
     }
 
     #[test]
@@ -385,6 +447,23 @@ mod tests {
         assert_eq!(read_frame(&mut input, 64).unwrap(), None);
         let mut long = std::io::Cursor::new(vec![b'x'; 200]);
         assert!(read_frame(&mut long, 64).is_err());
+
+        // At the real cap: exactly MAX_FRAME_BYTES before the newline is a frame, one more is not.
+        let mut exact = vec![b'y'; MAX_FRAME_BYTES];
+        exact.push(b'\n');
+        let mut input = std::io::Cursor::new(exact);
+        assert_eq!(read_frame(&mut input, MAX_FRAME_BYTES).unwrap().map(|f| f.len()), Some(MAX_FRAME_BYTES));
+        let mut over = vec![b'y'; MAX_FRAME_BYTES + 1];
+        over.push(b'\n');
+        assert!(read_frame(&mut std::io::Cursor::new(over), MAX_FRAME_BYTES).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_peer_whose_uid_cannot_be_read_or_differs_is_not_admitted() {
+        assert!(unix::owner_peer(Ok(501), 501));
+        assert!(!unix::owner_peer(Ok(502), 501));
+        assert!(!unix::owner_peer(Err(std::io::Error::other("gone")), 501));
     }
 
     #[cfg(target_os = "macos")]
