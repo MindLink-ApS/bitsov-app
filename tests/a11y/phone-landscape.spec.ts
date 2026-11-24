@@ -3,7 +3,7 @@ import { PHONE_SHELL_PREVIEW } from './phoneShellPreview';
 
 // A phone on its side, through the phone-shell preview page. When the status header wraps to
 // several lines (long text, larger fonts), the open chat must still reach Send, + and the
-// microphone. The status header is held to 30% of the height; the bottom tabs stay, except in the
+// microphone, with room to spare. The status header is held to 15% of the height (one line at least); the bottom tabs stay, except in the
 // shortest windows (360 px or less), where they step aside while a chat is open.
 const IPHONE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
@@ -65,6 +65,14 @@ for (const size of SIZES) {
       for (const sel of [SEND, PLUS, MIC, BACK]) {
         expect.soft(await reachable(page, sel), `${sel} is on screen and on top at its centre`).toBe(true);
       }
+      // Room to spare, since fonts differ by system: the whole message bar shows inside the
+      // composer (which shrinks and scrolls when short) with at least 16 px below it.
+      const spare = await page.locator('section.track .composer').first().evaluate((composer) => {
+        const bar = composer.querySelector('[data-composer-bar]')!.getBoundingClientRect();
+        const box = composer.getBoundingClientRect();
+        return Math.min(box.bottom, innerHeight) - bar.bottom;
+      });
+      expect.soft(spare, 'space below the message bar').toBeGreaterThanOrEqual(16);
       // The tabs stay where there is room for them, and are on top where they show.
       if (size.height > 360) expect.soft(await reachable(page, `${TABS} [data-phone-tab="chats"]`), 'Chats tab reachable').toBe(true);
       else await expect(page.locator(TABS)).toBeHidden();
