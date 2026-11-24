@@ -416,6 +416,8 @@ dependencies = [
  "base64 0.22.1",
  "bip39",
  "bitsov-ffi",
+ "bitsov-mcp",
+ "bitsov-mcp-wire",
  "blake3",
  "chacha20poly1305",
  "chrono",
@@ -457,6 +459,28 @@ dependencies = [
  "ring",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "bitsov-mcp"
+version = "0.0.1"
+dependencies = [
+ "bitsov-mcp-wire",
+ "getrandom 0.4.3",
+ "hex",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "bitsov-mcp-wire"
+version = "0.0.1"
+dependencies = [
+ "bip39",
+ "blake3",
+ "ed25519-dalek",
 ]
 
 [[package]]

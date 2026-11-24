@@ -15,26 +15,16 @@
 
 use std::collections::HashMap;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use zeroize::Zeroizing;
 
 /// How long a challenge may be answered.
 pub const CHALLENGE_TTL_MS: u64 = 30_000;
-/// Domain separation for what a shim signs.
-const DOMAIN: &[u8] = b"bitsov-mcp-session-v1";
 /// Longest client id accepted (bytes).
 pub const MAX_CLIENT_ID: usize = 64;
 
-/// The bytes a shim signs to open a session: domain, client id, challenge.
-/// The id's length is part of the message, so no two ids can collide.
-pub fn message(client: &str, challenge: &[u8; 32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(DOMAIN.len() + 2 + client.len() + 32);
-    out.extend_from_slice(DOMAIN);
-    out.extend_from_slice(&(client.len() as u16).to_be_bytes());
-    out.extend_from_slice(client.as_bytes());
-    out.extend_from_slice(challenge);
-    out
-}
+/// The bytes a shim signs to open a session (shared with the shim).
+pub use bitsov_mcp_wire::session_message as message;
 
 /// What the shim gets once, on approval: the secret half of its key.
 pub struct Issued {
@@ -125,11 +115,9 @@ impl Identities {
     }
 }
 
-/// What a shim does with its secret: sign the session message. For tests and
-/// for the shim; the host never holds a client's secret after issuing it.
-pub fn sign(secret: &[u8; 32], client: &str, challenge: &[u8; 32]) -> [u8; 64] {
-    SigningKey::from_bytes(secret).sign(&message(client, challenge)).to_bytes()
-}
+/// What a shim does with its secret (shared with the shim); the host never
+/// holds a client's secret after issuing it.
+pub use bitsov_mcp_wire::sign;
 
 #[cfg(test)]
 mod tests {
@@ -244,7 +232,7 @@ mod tests {
     fn the_signed_message_binds_the_client_id_unambiguously() {
         let c = [9u8; 32];
         assert_ne!(message("ab", &c), message("a", &c));
-        assert!(message("desk", &c).starts_with(DOMAIN));
+        assert!(message("desk", &c).starts_with(b"bitsov-mcp-session-v1"), "the domain bytes are pinned");
         assert!(message("desk", &c).ends_with(&c));
     }
 }

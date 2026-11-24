@@ -19,7 +19,6 @@
 //! before a byte is read.
 
 use std::collections::HashMap;
-use std::io::BufRead;
 
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
@@ -182,22 +181,8 @@ impl Host {
     }
 }
 
-/// Read one frame: bytes up to a newline, without it. `None` at end of
-/// stream. A line longer than `max` is an error, read no further than
-/// `max + 1` bytes.
-pub fn read_frame(reader: &mut impl BufRead, max: usize) -> std::io::Result<Option<Vec<u8>>> {
-    let mut buf = Vec::new();
-    let read = std::io::Read::take(&mut *reader, max as u64 + 1).read_until(b'\n', &mut buf)?;
-    if read == 0 {
-        return Ok(None);
-    }
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
-    } else if buf.len() > max {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
-    }
-    Ok(Some(buf))
-}
+/// Read one frame (shared with the shim): see [`bitsov_mcp_wire::read_frame`].
+pub use bitsov_mcp_wire::read_frame;
 
 /// macOS: the owner-only listener (ADR A1 §1.3).
 #[cfg(target_os = "macos")]
@@ -207,7 +192,7 @@ pub mod unix {
     use std::path::Path;
 
     /// The socket's file name inside the endpoint directory.
-    pub const SOCKET_NAME: &str = "mcp.sock";
+    pub use bitsov_mcp_wire::SOCKET_NAME;
 
     /// Bind in `dir`, which is created 0700 and must be a real directory owned
     /// by this user. A stale socket of ours is replaced; anything else is not.
@@ -385,6 +370,60 @@ mod tests {
         assert_eq!(read_frame(&mut input, 64).unwrap(), None);
         let mut long = std::io::Cursor::new(vec![b'x'; 200]);
         assert!(read_frame(&mut long, 64).is_err());
+    }
+
+    /// The real shim, end to end against this host over a socket pair:
+    /// pairing (with the owner's approval), the key-proving session, one call.
+    #[cfg(unix)]
+    #[test]
+    fn the_shim_pairs_opens_a_session_and_reads_through_the_real_host() {
+        use std::io::{BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        use std::sync::{Arc, Mutex};
+
+        fn serve(host: Arc<Mutex<Host>>, stream: UnixStream) -> std::thread::JoinHandle<()> {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut conn = Conn::Start;
+                let mut at = 100;
+                while let Ok(Some(frame)) = read_frame(&mut reader, MAX_FRAME_BYTES) {
+                    at += 1;
+                    let step = host.lock().unwrap().on_frame(&mut conn, &frame, at, &Fake);
+                    if let Some(reply) = step.reply { writer.write_all(&reply).unwrap(); }
+                    if step.close { break; }
+                }
+            })
+        }
+
+        let host = Arc::new(Mutex::new(Host::default()));
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let server = serve(host.clone(), theirs);
+        let mut reader = BufReader::new(ours.try_clone().unwrap());
+        let mut writer = ours;
+        let words = std::cell::Cell::new(None);
+        let approver = host.clone();
+        let outcome = bitsov_mcp::pair(&mut reader, &mut writer, "Desk assistant", &[8u8; 32], |w| words.set(Some(*w)), || {
+            let mut host = approver.lock().unwrap();
+            if let Some(shown) = host.pairing.waiting(150).first().cloned() {
+                assert_eq!(Some(shown.code), words.get(), "the app shows the words the shim computed");
+                host.approve(&shown.id, &[Topic::Node], 150).unwrap();
+            }
+            true
+        }).unwrap();
+        let bitsov_mcp::PairOutcome::Approved(key) = outcome else { panic!("approved") };
+        server.join().unwrap();
+
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let server = serve(host.clone(), theirs);
+        let mut reader = BufReader::new(ours.try_clone().unwrap());
+        let mut writer = ours;
+        bitsov_mcp::open_session(&mut reader, &mut writer, &key).unwrap();
+        writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n").unwrap();
+        let reply: Value = serde_json::from_slice(&read_frame(&mut reader, MAX_FRAME_BYTES).unwrap().unwrap()).unwrap();
+        assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 1);
+        writer.shutdown(std::net::Shutdown::Both).unwrap();
+        server.join().unwrap();
     }
 
     #[cfg(target_os = "macos")]
