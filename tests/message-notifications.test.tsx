@@ -319,7 +319,7 @@ it('on a phone, at most 10 alerts show in any minute, missed calls included', as
   n.missedCall('peer:c3'); n.message({ ...message, id: 'late', sender: 'peer-late' }, 'me', 'Robin');
   await flush();
   expect(native.sendNotification).toHaveBeenCalledTimes(11);
-  expect(native.sendNotification).toHaveBeenLastCalledWith({ title: 'BitSov', body: 'You missed a call' });
+  expect(native.sendNotification).toHaveBeenLastCalledWith({ title: 'BitSov', body: 'You missed a call', sound: 'default' });
   n.dispose();
 });
 
