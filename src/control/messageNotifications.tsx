@@ -10,6 +10,8 @@ const ASKED = 'bitsov.notifications.asked';
 const ENABLED = 'bitsov.notifications.enabled';
 const DEFERRED = 'bitsov.notifications.deferred';
 const MUTED = 'bitsov.notifications.muted';
+/** Phones: a real incoming message has arrived, so the permission offer may show (once). */
+const HEARD = 'bitsov.notifications.heard';
 const read = (key: string) => { try { return localStorage.getItem(key) === 'true'; } catch { return false; } };
 const save = (key: string, value: boolean) => { try { localStorage.setItem(key, String(value)); } catch { /* Session state remains available. */ } };
 const notificationsMuted = () => read(MUTED);
@@ -32,7 +34,8 @@ const MINUTE_MS = 60_000;
  * `mobile`: a phone's lock screen is public, so every line is generic (no names, text,
  * amounts or ids), alerts fire only while the app is in the background, a contact gets at
  * most one per `PHONE_NOTIFY_COOLDOWN_MS`, no more than `PHONE_NOTIFY_PER_MINUTE` are shown in
- * any minute, and a call that went unanswered says so once.
+ * any minute, and a call that went unanswered says so once. Phones never ask for permission at
+ * launch: the offer appears only after the first real incoming message (`offerOnPhone`).
  */
 export function createMessageNotifications(options: { mobile?: boolean; ios?: boolean; now?: () => number } = {}) {
   const mobile = options.mobile ?? false;
@@ -46,6 +49,7 @@ export function createMessageNotifications(options: { mobile?: boolean; ios?: bo
   const [permission, setPermission] = createSignal<'checking' | 'prompt' | 'granted' | 'denied' | 'error'>('checking');
   const [muted, updateMuted] = createSignal(notificationsMuted());
   const [deferred, setDeferred] = createSignal(read(DEFERRED));
+  const [heard, setHeard] = createSignal(read(HEARD));
   let asked = read(ASKED);
   let enabled = read(ENABLED);
   let disposed = false;
@@ -142,11 +146,14 @@ export function createMessageNotifications(options: { mobile?: boolean; ios?: bo
   const name = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 80) || t('notificationSomeone');
   return {
     permission, muted, deferred, checkPermission, request, calls,
+    /** Phones: offer permission only once a real message has arrived, not yet asked, not put off. */
+    offerOnPhone: () => mobile && heard() && permission() === 'prompt' && !deferred(),
     setMuted(value: boolean) { updateMuted(value); save(MUTED, value); },
     defer() { setDeferred(true); save(DEFERRED, true); },
     message(message: Message, ownId: string, senderName: string) {
       if (message.sender.toLowerCase() === ownId.toLowerCase() || !((message.payment_amount_msat ?? 0) > 0) || ![0, 200].includes(message.kind)) return;
       if (mobile) {
+        if (!heard()) { setHeard(true); save(HEARD, true); }
         const contact = message.sender.toLowerCase();
         const last = lastByContact.get(contact);
         if (last !== undefined && now() - last < PHONE_NOTIFY_COOLDOWN_MS) return;
