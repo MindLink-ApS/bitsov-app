@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
-import { createMessageNotifications, NotificationSettings } from '../src/control/messageNotifications';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createMessageNotifications, NotificationSettings, PHONE_SOUND } from '../src/control/messageNotifications';
 import { setLanguagePref } from '../src/i18n';
 const native = vi.hoisted(() => ({ isFocused: vi.fn(), isPermissionGranted: vi.fn(), requestPermission: vi.fn(), sendNotification: vi.fn(), onAction: vi.fn(), registerActionTypes: vi.fn(), show: vi.fn(), unminimize: vi.fn(), setFocus: vi.fn() }));
 vi.mock('@tauri-apps/api/core', async original => {
@@ -334,6 +336,27 @@ it('on a phone, an alert the system refused gives its slot back', async () => {
   n.message({ ...message, id: 'm-over', sender: 'peer-over' }, 'me', 'Robin'); await flush();
   expect(native.sendNotification).toHaveBeenCalledTimes(11);
   n.dispose();
+});
+
+it.each(['en', 'da'] as const)('on an iPhone (%s), alerts name the bundled sound through the plugin; on Android they name none', async lang => {
+  setLanguagePref(lang);
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  const iphone = createMessageNotifications({ mobile: true, ios: true });
+  iphone.message(message, 'me', 'Robin'); iphone.missedCall('peer:c1'); await flush();
+  expect(native.sendNotification).toHaveBeenNthCalledWith(1, { title: 'BitSov', body: lang === 'en' ? 'You have a new message' : 'Du har en ny besked', sound: 'bitsov-alert.caf' });
+  expect(native.sendNotification).toHaveBeenNthCalledWith(2, { title: 'BitSov', body: lang === 'en' ? 'You missed a call' : 'Du har et ubesvaret opkald', sound: 'bitsov-alert.caf' });
+  iphone.dispose();
+  native.sendNotification.mockClear();
+  const android = createMessageNotifications({ mobile: true, ios: false });
+  android.message({ ...message, id: 'a2' }, 'me', 'Robin'); await flush();
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: lang === 'en' ? 'You have a new message' : 'Du har en ny besked' });
+  android.dispose();
+});
+
+it('the iPhone sound name matches the file the host installs', () => {
+  const rust = readFileSync(join(__dirname, '../src-tauri/src/alert_sound.rs'), 'utf8');
+  expect(rust).toContain(`pub const FILE_NAME: &str = "${PHONE_SOUND}";`);
+  expect(existsSync(join(__dirname, '../src-tauri/resources/sounds', PHONE_SOUND))).toBe(true);
 });
 
 it('a missed call is said once on a phone, without a name; never on a computer', async () => {
