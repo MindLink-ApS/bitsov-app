@@ -10,6 +10,11 @@
 //! - A client whose process token is not this user, is elevated, or cannot be
 //!   read is disconnected before a byte is read. So is a client over the cap.
 //!
+//! The client side ([`connect_owner`], used by the `bitsov-mcp` shim) checks the
+//! server the same way: a pipe served by another user, or by an elevated
+//! process, is closed before a byte is written. It also opens the pipe at
+//! identification level only, so a server can never act as the client.
+//!
 //! Residual: the client is found by process id (`GetNamedPipeClientProcessId`).
 //! A client that exits right after connecting could have its id reused by a
 //! new process; that process passes only if it is this user, unelevated.
@@ -24,9 +29,11 @@ use windows_sys::Win32::Foundation::{
     GetLastError, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::{EqualSid, TOKEN_QUERY};
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
+};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
@@ -175,10 +182,48 @@ fn connect(pipe: &OwnedHandle) -> io::Result<bool> {
     }
 }
 
+/// The current user's MCP pipe name. Refused in an elevated process.
+pub fn current_user_pipe_name() -> io::Result<String> {
+    let user = current_user()?;
+    policy::mcp_pipe_name(user.as_str()).map_err(refused)
+}
+
+/// Client side: open the pipe `name` and keep it only if its server process is
+/// this user and not elevated. Refused in an elevated process.
+pub fn connect_owner(name: &str) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let user = current_user()?;
+    let pipe = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        // Identification level: the server can read who we are, never act as us.
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(name)?;
+    let mut pid = 0u32;
+    // SAFETY: an open pipe handle and a valid out pointer.
+    let found = unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } != 0;
+    if !found || !process_is_owner(pid, &user) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the pipe is not served by this user's BitSov app",
+        ));
+    }
+    Ok(pipe)
+}
+
 fn client_is_owner(pipe: &OwnedHandle, user: &UserSid) -> bool {
     let mut pid = 0u32;
     // SAFETY: a connected pipe handle and a valid out pointer.
-    if unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) } == 0 || pid == 0 {
+    if unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) } == 0 {
+        return false;
+    }
+    process_is_owner(pid, user)
+}
+
+/// The process `pid` runs as `user` and is not elevated. Any failure to tell
+/// is a no.
+fn process_is_owner(pid: u32, user: &UserSid) -> bool {
+    if pid == 0 {
         return false;
     }
     // SAFETY: query-only access; the handle is owned just below.
@@ -270,9 +315,23 @@ mod tests {
     }
 
     #[test]
+    fn a_client_connects_only_to_a_pipe_served_by_this_user() {
+        let name = test_name();
+        let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
+        let mut ours = connect_owner(&name).expect("served by this user");
+        let connection = listener.accept_owner().unwrap();
+        ours.write_all(b"ping\n").unwrap();
+        let mut got = [0u8; 5];
+        (&*connection.pipe()).read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"ping\n");
+        assert!(connect_owner(&test_name()).is_err(), "no such pipe");
+    }
+
+    #[test]
     fn the_pipe_name_is_per_user() {
         let user = current_user().unwrap();
         let name = policy::mcp_pipe_name(user.as_str()).unwrap();
         assert!(name.starts_with(r"\\.\pipe\bitsov-mcp-S-1-"));
+        assert_eq!(current_user_pipe_name().unwrap(), name);
     }
 }

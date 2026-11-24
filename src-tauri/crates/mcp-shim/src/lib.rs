@@ -15,7 +15,8 @@
 //!   challenge, the signature, `ready`.
 //! - **Relay** ([`relay`]): frames up to the shared cap, each way.
 //!
-//! This slice is macOS only; the Windows pipe client follows.
+//! macOS reaches the app through its owner-only socket, Windows through its
+//! owner-only named pipe; on both, the key file is private to this user.
 
 use std::io::{self, BufRead, Write};
 
@@ -265,6 +266,74 @@ pub mod key_file {
     }
 }
 
+/// The client key file on Windows: in a folder and a file whose access lists
+/// name only this user (the app's private-file layer). Refused when elevated.
+#[cfg(windows)]
+pub mod key_file {
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use bitsov_ffi::private_policy::ObjectKind;
+    use bitsov_ffi::win_private::{create_dir_private, create_new_private, open_verified, Access};
+    use serde_json::{json, Value};
+    use zeroize::Zeroizing;
+
+    use super::{hex32, valid_client_id, ClientKey};
+
+    pub const FILE_NAME: &str = "client-key.json";
+    const MAX_BYTES: u64 = 4096;
+
+    /// `%LOCALAPPDATA%\bitsov-mcp`.
+    pub fn default_dir() -> io::Result<PathBuf> {
+        let base = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "LOCALAPPDATA is not set"))?;
+        Ok(PathBuf::from(base).join("bitsov-mcp"))
+    }
+
+    /// Store a new key. An existing key is never overwritten: `forget` first.
+    pub fn save(dir: &Path, key: &ClientKey) -> io::Result<()> {
+        create_dir_private(dir)?;
+        let body = Zeroizing::new(json!({ "id": key.id, "secret": hex::encode(*key.secret) }).to_string());
+        create_new_private(&dir.join(FILE_NAME))?.replace_contents(body.as_bytes())
+    }
+
+    /// Load the key; a file that is not private to this user is refused.
+    pub fn load(dir: &Path) -> io::Result<ClientKey> {
+        let body = open_verified(&dir.join(FILE_NAME), ObjectKind::File, Access::Read)?.read_bounded(MAX_BYTES)?;
+        let bad = || io::Error::new(io::ErrorKind::InvalidData, "the key file is damaged; pair again");
+        let value: Value = serde_json::from_slice(&body).map_err(|_| bad())?;
+        let id = value.get("id").and_then(Value::as_str).filter(|id| valid_client_id(id)).ok_or_else(bad)?;
+        let secret = value.get("secret").and_then(hex32).ok_or_else(bad)?;
+        Ok(ClientKey { id: id.to_owned(), secret })
+    }
+
+    /// Delete the key (only a verified private file). True if there was one.
+    pub fn forget(dir: &Path) -> io::Result<bool> {
+        match open_verified(&dir.join(FILE_NAME), ObjectKind::File, Access::ReadWrite) {
+            Ok(file) => file.discard().map(|()| true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Reaching the app on Windows: this user's pipe, served by this user.
+#[cfg(windows)]
+pub mod windows {
+    use std::fs::File;
+    use std::io;
+
+    /// The current user's pipe name, `\\.\pipe\bitsov-mcp-<SID>`.
+    pub fn default_pipe() -> io::Result<String> {
+        bitsov_ffi::win_private::pipe::current_user_pipe_name()
+    }
+
+    /// Connect only when the pipe's server process is this user, not elevated.
+    pub fn connect(name: &str) -> io::Result<File> {
+        bitsov_ffi::win_private::pipe::connect_owner(name)
+    }
+}
+
 /// Reaching the app on macOS: its socket, checked to be this user's.
 #[cfg(target_os = "macos")]
 pub mod macos {
@@ -416,6 +485,23 @@ mod tests {
         let mut long = vec![b'x'; MAX_FRAME_BYTES + 1];
         long.push(b'\n');
         assert!(relay(BufReader::new(Cursor::new(long)), Vec::new(), BufReader::new(Cursor::new(Vec::new())), Vec::new(), |_| {}).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_key_file_is_private_and_never_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("keys");
+        let key = ClientKey { id: "mcp-0c".into(), secret: Zeroizing::new([7u8; 32]) };
+        key_file::save(&dir, &key).unwrap();
+        let loaded = key_file::load(&dir).unwrap();
+        assert_eq!((loaded.id.as_str(), *loaded.secret), ("mcp-0c", [7u8; 32]));
+        assert!(key_file::save(&dir, &key).is_err(), "never overwritten");
+        assert!(key_file::forget(&dir).unwrap());
+        assert!(!key_file::forget(&dir).unwrap());
+        // A plain file the private layer did not create is refused.
+        std::fs::write(dir.join(key_file::FILE_NAME), b"{}").unwrap();
+        assert!(key_file::load(&dir).is_err());
     }
 
     #[cfg(unix)]

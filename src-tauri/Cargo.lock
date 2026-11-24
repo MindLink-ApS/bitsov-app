@@ -465,6 +465,7 @@ dependencies = [
 name = "bitsov-mcp"
 version = "0.0.1"
 dependencies = [
+ "bitsov-ffi",
  "bitsov-mcp-wire",
  "getrandom 0.4.3",
  "hex",
