@@ -328,6 +328,8 @@ fn check_inner(grant: &ClientGrant, req: &Request<'_>, now_ms: u64, spent: Grant
 
 /// Phase 1, slice 1: the read-only MCP protocol skeleton (not wired).
 pub mod server;
+/// Phase 1, slice 2: per-client sessions (registry, revoke, rate limit, audit; not wired).
+pub mod session;
 
 #[cfg(test)]
 mod tests;

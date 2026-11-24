@@ -64,6 +64,21 @@ pub fn request(filename: &str, mime: &str, data_b64: &str) -> Result<serde_json:
     }))
 }
 
+/// The name to show for a saved file: the one Downloads gave it (the system
+/// renames a taken name, e.g. "report (1).pdf"), when that is one plain
+/// segment without control or bidi characters; otherwise the name the app
+/// asked for.
+pub fn saved_name(returned: &str, requested: &str) -> String {
+    let name = returned.trim();
+    let plain = !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name.chars().any(|c| c == '/' || c == '\\' || c.is_control()
+            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'));
+    if plain { name.to_owned() } else { download_name(requested) }
+}
+
 /// The plugin's refusal codes, said plainly.
 pub fn refusal(error: &str) -> String {
     if error.contains("unsupported") {
@@ -114,6 +129,16 @@ mod tests {
     use base64::Engine;
 
     fn b64(bytes: &[u8]) -> String { base64::engine::general_purpose::STANDARD.encode(bytes) }
+
+    #[test]
+    fn the_saved_name_is_the_one_downloads_gave_when_it_is_plain() {
+        assert_eq!(saved_name("report (1).pdf", "report.pdf"), "report (1).pdf");
+        assert_eq!(saved_name("  photo.jpg ", "photo.jpg"), "photo.jpg");
+        // Anything that is not one plain segment falls back to the requested name, cleaned.
+        for odd in ["", "   ", ".", "..", "Download/report.pdf", "a\\b.pdf", "evil\u{202e}fdp.exe", "line\nbreak.txt", &"n".repeat(300)] {
+            assert_eq!(saved_name(odd, "../report.pdf"), "report.pdf", "{odd:?}");
+        }
+    }
 
     #[test]
     fn only_a_plain_type_reaches_mediastore() {
