@@ -28,14 +28,8 @@ const MINUTE_MS = 60_000;
  * most one per `PHONE_NOTIFY_COOLDOWN_MS`, no more than `PHONE_NOTIFY_PER_MINUTE` are shown in
  * any minute, and a call that went unanswered says so once.
  */
-export function createMessageNotifications(options: { mobile?: boolean; ios?: boolean; now?: () => number } = {}) {
+export function createMessageNotifications(options: { mobile?: boolean; now?: () => number } = {}) {
   const mobile = options.mobile ?? false;
-  /**
-   * iOS posts phone alerts through the host's `phone_notify`, which asks for the system default
-   * sound: the notification plugin can only name a sound file there, and without one the alert
-   * is silent. Android uses the plugin, whose alerts take the system default sound already.
-   */
-  const ios = mobile && (options.ios ?? false);
   const now = options.now ?? (() => Date.now());
   // Calls (with their Show call action) and owner approvals stay on the Mac. Windows and
   // Linux get plain message delivery: no action types, listeners or window restoration.
@@ -98,8 +92,7 @@ export function createMessageNotifications(options: { mobile?: boolean; ios?: bo
     try {
       if (mobile) {
         if (foreground() || !await isPermissionGranted() || disposed || muted() || foreground()) return false;
-        if (ios) await invoke('phone_notify', { title: t('notificationApp'), body });
-        else await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body } });
+        await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body } });
         return true;
       }
       const window = getCurrentWindow();

@@ -2,11 +2,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { createMessageNotifications, NotificationSettings } from '../src/control/messageNotifications';
 import { setLanguagePref } from '../src/i18n';
-const native = vi.hoisted(() => ({ phoneNotify: vi.fn(), isFocused: vi.fn(), isPermissionGranted: vi.fn(), requestPermission: vi.fn(), sendNotification: vi.fn(), onAction: vi.fn(), registerActionTypes: vi.fn(), show: vi.fn(), unminimize: vi.fn(), setFocus: vi.fn() }));
+const native = vi.hoisted(() => ({ isFocused: vi.fn(), isPermissionGranted: vi.fn(), requestPermission: vi.fn(), sendNotification: vi.fn(), onAction: vi.fn(), registerActionTypes: vi.fn(), show: vi.fn(), unminimize: vi.fn(), setFocus: vi.fn() }));
 vi.mock('@tauri-apps/api/core', async original => {
   const api = await original<typeof import('@tauri-apps/api/core')>();
-  return { ...api, invoke: (command: string, args: { options: unknown }) => command === 'plugin:notification|notify' ? native.sendNotification(args.options)
-    : command === 'phone_notify' ? native.phoneNotify(args) : api.invoke(command, args) };
+  return { ...api, invoke: (command: string, args: { options: unknown }) => command === 'plugin:notification|notify' ? native.sendNotification(args.options) : api.invoke(command, args) };
 });
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => native }));
 vi.mock('@tauri-apps/plugin-notification', () => native);
@@ -296,40 +295,6 @@ it.each([
   // That one was shown: the next within 30 s is held back.
   clock += 5_000; n.message({ ...message, id: 'c' }, 'me', 'Robin'); await flush();
   expect(native.sendNotification.mock.calls.length - shownBefore).toBe(1);
-  n.dispose();
-});
-
-it.each(['en', 'da'] as const)('on an iPhone (%s), alerts go through the host with the system default sound, never the plugin', async lang => {
-  setLanguagePref(lang);
-  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
-  native.phoneNotify.mockResolvedValue(undefined);
-  const n = createMessageNotifications({ mobile: true, ios: true });
-  n.message(message, 'me', 'Robin'); n.missedCall('peer:c1'); await flush();
-  expect(native.phoneNotify).toHaveBeenNthCalledWith(1, { title: 'BitSov', body: lang === 'en' ? 'You have a new message' : 'Du har en ny besked' });
-  expect(native.phoneNotify).toHaveBeenNthCalledWith(2, { title: 'BitSov', body: lang === 'en' ? 'You missed a call' : 'Du har et ubesvaret opkald' });
-  expect(native.sendNotification).not.toHaveBeenCalled();
-  const sent = JSON.stringify(native.phoneNotify.mock.calls);
-  for (const hidden of ['Robin', 'SECRET', 'peer', '2000', 'sat']) expect(sent).not.toContain(hidden);
-  n.dispose();
-});
-
-it('on an iPhone, an alert the host could not post does not hold back the next one', async () => {
-  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
-  let clock = 1_000_000;
-  native.phoneNotify.mockRejectedValueOnce(new Error('The phone did not accept the alert.')).mockResolvedValue(undefined);
-  const n = createMessageNotifications({ mobile: true, ios: true, now: () => clock });
-  n.message({ ...message, id: 'a' }, 'me', 'Robin'); await flush();
-  clock += 5_000; n.message({ ...message, id: 'b' }, 'me', 'Robin'); await flush();
-  expect(native.phoneNotify).toHaveBeenCalledTimes(2);
-  n.dispose();
-});
-
-it('on Android, alerts use the plugin without naming a sound (the system default)', async () => {
-  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
-  const n = createMessageNotifications({ mobile: true, ios: false });
-  n.message(message, 'me', 'Robin'); await flush();
-  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'You have a new message' });
-  expect(native.phoneNotify).not.toHaveBeenCalled();
   n.dispose();
 });
 
