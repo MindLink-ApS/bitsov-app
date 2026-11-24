@@ -89,6 +89,37 @@ pub fn r2_preset_allowed(preset: Preset) -> bool {
     }
 }
 
+/// A preset an R2 client may have: counts or rounded, never exact. The read
+/// path takes only this type, so `exact` cannot reach a client's reads at
+/// all (ADR A1 §1.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum R2Preset {
+    Counts,
+    Rounded,
+}
+
+impl R2Preset {
+    /// The R2 form of `preset`, only where [`r2_preset_allowed`] says so.
+    pub fn new(preset: Preset) -> Option<Self> {
+        if !r2_preset_allowed(preset) {
+            return None;
+        }
+        match preset {
+            Preset::Counts => Some(Self::Counts),
+            Preset::Rounded => Some(Self::Rounded),
+            Preset::Exact => None,
+        }
+    }
+
+    /// The assistant preset this narrows to.
+    pub fn preset(self) -> Preset {
+        match self {
+            Self::Counts => Preset::Counts,
+            Self::Rounded => Preset::Rounded,
+        }
+    }
+}
+
 fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
     let mut ids = std::collections::HashSet::new();
     if let Some(client) = clients.iter().find(|client| !ids.insert(client.id.as_str())) {
@@ -402,6 +433,26 @@ mod tests {
         *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, &plain).unwrap());
         assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable));
         assert!(r2_preset_allowed(Preset::Rounded) && r2_preset_allowed(Preset::Counts) && !r2_preset_allowed(Preset::Exact));
+    }
+
+    #[test]
+    fn the_r2_preset_is_counts_or_rounded_and_never_exact() {
+        for preset in [Preset::Exact, Preset::Rounded, Preset::Counts] {
+            match R2Preset::new(preset) {
+                Some(r2) => {
+                    assert!(r2_preset_allowed(preset));
+                    assert_eq!(r2.preset(), preset, "converts back unchanged");
+                    assert!(matches!(r2.preset(), Preset::Counts | Preset::Rounded));
+                }
+                None => assert_eq!(preset, Preset::Exact),
+            }
+        }
+        // Exhaustive with two arms: a third (wider) variant would not compile here.
+        for r2 in [R2Preset::Counts, R2Preset::Rounded] {
+            match r2 {
+                R2Preset::Counts | R2Preset::Rounded => {}
+            }
+        }
     }
 
     #[test]

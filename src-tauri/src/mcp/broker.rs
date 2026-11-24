@@ -17,10 +17,11 @@
 use serde_json::{json, Value};
 
 use super::server::{ReadFailed, Reads};
+use super::store::R2Preset;
 use crate::ai::{narrow, Preset, Topic, TopicRead};
 
 /// What MCP clients get unless the owner chooses otherwise.
-pub const DEFAULT_PRESET: Preset = Preset::Counts;
+pub const DEFAULT_PRESET: R2Preset = R2Preset::Counts;
 
 /// The read broker for one client: a topic source and how far to narrow.
 pub struct BrokerReads<F>
@@ -37,12 +38,13 @@ where
 {
     /// Narrowed to [`DEFAULT_PRESET`] (counts).
     pub fn new(read: F) -> Self {
-        Self { read, preset: DEFAULT_PRESET }
+        Self::with_preset(read, DEFAULT_PRESET)
     }
 
-    /// Narrowed to `preset`, as the owner set it for this client.
-    pub fn with_preset(read: F, preset: Preset) -> Self {
-        Self { read, preset }
+    /// Narrowed to `preset`, as the owner set it for this client: counts or
+    /// rounded, never exact.
+    pub fn with_preset(read: F, preset: R2Preset) -> Self {
+        Self { read, preset: preset.preset() }
     }
 }
 
@@ -150,18 +152,18 @@ mod tests {
     }
 
     #[test]
-    fn the_owner_can_widen_a_client_to_exact() {
+    fn the_widest_a_client_gets_is_rounded_never_the_exact_amount() {
         let server = TestServer::start(MockNode::canonical(), TOKEN);
         let base = server.api_base();
-        let reads = BrokerReads::with_preset(|topic, since| read_topic(paired(&["read"]), &base, Arc::new(Quiet), topic, since), Preset::Exact);
+        let reads = BrokerReads::with_preset(|topic, since| read_topic(paired(&["read"]), &base, Arc::new(Quiet), topic, since), R2Preset::Rounded);
         let mut registry = Registry::default();
         registry.add("desk", "Desk assistant", &[Topic::Balance]);
         let (mut sessions, mut audit) = (Sessions::default(), Vec::new());
         let reply = ask(&mut sessions, &registry, &reads, &mut audit, "read_balance");
         let data = data(&reply);
-        assert_eq!(data["shared"], "exact");
-        assert!(reply.to_string().contains(&balance_msat().to_string()), "exact keeps the amount");
-        // Message text is never part of any projection, even exact.
+        assert_eq!(data["shared"], "rounded");
+        assert!(!reply.to_string().contains(&balance_msat().to_string()), "the exact amount stays home");
+        // Message text is never part of any projection.
         for canary in CANARIES {
             assert!(!reply.to_string().contains(canary), "{canary}");
         }
