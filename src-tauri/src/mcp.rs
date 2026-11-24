@@ -334,6 +334,8 @@ pub mod session;
 pub mod broker;
 /// Phase 1, slice 4: per-client keys and a single-use session challenge (not wired).
 pub mod identity;
+/// Phase 1, slice A1.1: the sealed approved-clients file, fail closed (not wired).
+pub mod store;
 
 #[cfg(test)]
 mod tests;
