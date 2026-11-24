@@ -17,8 +17,10 @@
 //!
 //! Both sides use overlapped I/O and hand a connection out as a read half and
 //! a write half ([`PipeHalf`]), so a read waiting on one thread never holds up
-//! a write on another. A read half can carry a timeout, and a waiting accept
-//! can be stopped from another thread ([`PipeListener::stopper`]).
+//! a write on another. A half can carry a read and a write timeout, a
+//! [`PipeCloser`] ends a connection from another thread, and
+//! [`PipeListener::stopper`] stops a waiting accept and closes every live
+//! connection, so no thread stays stuck on a client that stopped reading.
 //!
 //! Residual: the client is found by process id (`GetNamedPipeClientProcessId`).
 //! A client that exits right after connecting could have its id reused by a
@@ -27,7 +29,8 @@
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
@@ -42,7 +45,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     SECURITY_IDENTIFICATION,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
@@ -77,15 +80,44 @@ pub struct PipeListener {
     waiting: OwnedHandle,
     /// Signalled when a pending connect on `waiting` completes.
     connected: OwnedHandle,
-    /// Set once by [`PipeStopper::stop`]; never reset.
-    stop: Arc<OwnedHandle>,
+    /// Shared with every [`PipeStopper`].
+    stop: Arc<StopState>,
     /// One clone per live connection.
     live: Arc<()>,
 }
 
-/// Stops a [`PipeListener`]'s accept from another thread.
+/// What a stop reaches: the event a waiting accept also waits on, and the
+/// live connections it closes.
+struct StopState {
+    /// Set once by [`PipeStopper::stop`]; never reset.
+    event: OwnedHandle,
+    /// The accepted connections, registered under this lock; `true` once
+    /// stopped, so a connection accepted as the stop lands is closed too.
+    live: Mutex<(bool, Vec<Weak<SharedPipe>>)>,
+}
+
+impl StopState {
+    fn is_stopped(&self) -> bool {
+        // SAFETY: a valid event handle.
+        (unsafe { WaitForSingleObject(self.event.as_raw_handle(), 0) }) == WAIT_OBJECT_0
+    }
+
+    /// Track `pipe`, or close it at once if the listener was stopped.
+    fn register(&self, pipe: &Arc<SharedPipe>) -> io::Result<()> {
+        let mut live = self.live.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if live.0 {
+            pipe.close();
+            return Err(stopped());
+        }
+        live.1.retain(|weak| weak.strong_count() > 0);
+        live.1.push(Arc::downgrade(pipe));
+        Ok(())
+    }
+}
+
+/// Stops a [`PipeListener`] from another thread.
 #[derive(Clone)]
-pub struct PipeStopper(Arc<OwnedHandle>);
+pub struct PipeStopper(Arc<StopState>);
 
 impl std::fmt::Debug for PipeStopper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -96,26 +128,30 @@ impl std::fmt::Debug for PipeStopper {
 impl PipeStopper {
     /// A waiting accept has its connect cancelled and returns an error of kind
     /// [`io::ErrorKind::ConnectionAborted`]; every later accept returns the
-    /// same at once. Live connections are not touched.
+    /// same at once. Every live connection is closed as by [`PipeCloser::close`],
+    /// so a read or write blocked on one returns.
     pub fn stop(&self) {
-        // SAFETY: a valid event handle owned by the shared `Arc`.
-        unsafe { SetEvent(self.0.as_raw_handle()) };
+        let mut live = self.0.live.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        live.0 = true;
+        // SAFETY: a valid event handle owned by the shared state.
+        unsafe { SetEvent(self.0.event.as_raw_handle()) };
+        for pipe in live.1.drain(..).filter_map(|weak| weak.upgrade()) {
+            pipe.close();
+        }
     }
 }
 
 /// One accepted client. Use it through [`Self::split`]; dropping it (or both
 /// halves) closes the pipe and frees its slot.
 pub struct PipeConnection {
-    pipe: OwnedHandle,
-    slot: Arc<()>,
+    pipe: Arc<SharedPipe>,
 }
 
 impl PipeConnection {
     /// A read half and a write half, usable from two threads at once. The
     /// slot is freed when both halves are dropped.
     pub fn split(self) -> io::Result<(PipeHalf, PipeHalf)> {
-        let shared = Arc::new(SharedPipe { handle: self.pipe, _slot: Some(self.slot) });
-        Ok((PipeHalf::new(Arc::clone(&shared))?, PipeHalf::new(shared)?))
+        Ok((PipeHalf::new(Arc::clone(&self.pipe))?, PipeHalf::new(self.pipe)?))
     }
 }
 
@@ -139,7 +175,10 @@ impl PipeListener {
         let descriptor = SecurityDescriptor::private(&user, ObjectKind::File)?;
         let waiting = instance(&name, &descriptor, true)?;
         let connected = manual_reset_event()?;
-        let stop = Arc::new(manual_reset_event()?);
+        let stop = Arc::new(StopState {
+            event: manual_reset_event()?,
+            live: Mutex::new((false, Vec::new())),
+        });
         Ok(Self { name, user, descriptor, waiting, connected, stop, live: Arc::new(()) })
     }
 
@@ -147,7 +186,8 @@ impl PipeListener {
         Arc::strong_count(&self.live) - 1
     }
 
-    /// A handle that stops this listener's accepts from another thread.
+    /// A handle that stops this listener from another thread: its accepts and
+    /// its live connections.
     pub fn stopper(&self) -> PipeStopper {
         PipeStopper(Arc::clone(&self.stop))
     }
@@ -156,7 +196,20 @@ impl PipeListener {
     /// this user, elevated, over the cap, or already gone). Once stopped, an
     /// error of kind [`io::ErrorKind::ConnectionAborted`].
     pub fn accept_one(&mut self) -> io::Result<Option<PipeConnection>> {
-        let connected = connect(&self.waiting, &self.connected, &self.stop)?;
+        let connected = match connect(&self.waiting, &self.connected, &self.stop.event) {
+            Ok(connected) => connected,
+            Err(error) => {
+                // An unexpected failure may leave the waiting instance unusable,
+                // so it is replaced (new one first, so the name stays ours) and
+                // the next accept starts clean. A stopped listener keeps it.
+                if !self.stop.is_stopped() {
+                    if let Ok(next) = instance(&self.name, &self.descriptor, false) {
+                        drop(std::mem::replace(&mut self.waiting, next));
+                    }
+                }
+                return Err(error);
+            }
+        };
         let admit = connected
             && self.live_connections() < MAX_CONNECTIONS
             && client_is_owner(&self.waiting, &self.user);
@@ -169,8 +222,15 @@ impl PipeListener {
             return Ok(None);
         }
         let next = instance(&self.name, &self.descriptor, false)?;
-        let pipe = std::mem::replace(&mut self.waiting, next);
-        Ok(Some(PipeConnection { pipe, slot: Arc::clone(&self.live) }))
+        let handle = std::mem::replace(&mut self.waiting, next);
+        let pipe = Arc::new(SharedPipe {
+            handle,
+            server: true,
+            closed: AtomicBool::new(false),
+            _slot: Some(Arc::clone(&self.live)),
+        });
+        self.stop.register(&pipe)?;
+        Ok(Some(PipeConnection { pipe }))
     }
 
     /// Wait for a client that is admitted; refused ones are dropped and the
@@ -272,6 +332,12 @@ fn connect(pipe: &OwnedHandle, event: &OwnedHandle, stop: &OwnedHandle) -> io::R
     // here; waiting (TRUE) returns only once it has completed or been cancelled.
     let ok = unsafe { GetOverlappedResult(handle, &overlapped, &mut done, 1) } != 0;
     if let Some(error) = failure {
+        if ok {
+            // A client connected just as the stop landed; nobody will serve
+            // it, so cut it now rather than leave it waiting on a silent pipe.
+            // SAFETY: a valid pipe handle with no operation in flight.
+            unsafe { DisconnectNamedPipe(handle) };
+        }
         return Err(error);
     }
     if ok {
@@ -318,7 +384,12 @@ pub fn connect_owner(name: &str) -> io::Result<OwnerPipe> {
             "the pipe is not served by this user's BitSov app",
         ));
     }
-    Ok(OwnerPipe(Arc::new(SharedPipe { handle: pipe, _slot: None })))
+    Ok(OwnerPipe(Arc::new(SharedPipe {
+        handle: pipe,
+        server: false,
+        closed: AtomicBool::new(false),
+        _slot: None,
+    })))
 }
 
 /// A client connection to this user's pipe, opened for overlapped I/O.
@@ -328,7 +399,72 @@ pub struct OwnerPipe(Arc<SharedPipe>);
 /// also holds the connection's slot, so the slot is freed with the pipe.
 struct SharedPipe {
     handle: OwnedHandle,
+    /// The server end: [`Self::close`] can disconnect it.
+    server: bool,
+    /// Set by [`Self::close`]; every later operation fails at once.
+    closed: AtomicBool,
     _slot: Option<Arc<()>>,
+}
+
+impl SharedPipe {
+    /// End the connection now, from any thread. On the server end the pipe is
+    /// disconnected first, so an operation started after this fails at once;
+    /// then every operation pending on the handle, from either half, is
+    /// cancelled. The handle itself closes when both halves are dropped.
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let handle = self.handle.as_raw_handle();
+        if self.server {
+            // SAFETY: a valid server pipe handle. The client sees the pipe end;
+            // unread data is dropped, as on any forced close.
+            unsafe { DisconnectNamedPipe(handle) };
+        }
+        // SAFETY: a valid handle; a null `OVERLAPPED` cancels every operation
+        // on it. Each issuer still waits for its own operation to land.
+        unsafe { CancelIoEx(handle, std::ptr::null()) };
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
+/// Ends a connection from another thread ([`PipeHalf::closer`]). It does not
+/// keep the pipe or its slot alive.
+#[derive(Clone)]
+pub struct PipeCloser(Weak<SharedPipe>);
+
+impl std::fmt::Debug for PipeCloser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PipeCloser(..)")
+    }
+}
+
+impl PipeCloser {
+    /// A read or write blocked on either half returns an error of kind
+    /// [`io::ErrorKind::ConnectionAborted`], and so does every later one. On a
+    /// server connection the client sees the pipe end at once. On a client
+    /// pipe only the operations pending at this moment are cancelled; later
+    /// ones fail as soon as they start. A no-op once both halves are gone.
+    pub fn close(&self) {
+        if let Some(pipe) = self.0.upgrade() {
+            pipe.close();
+        }
+    }
+}
+
+fn closed_error() -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionAborted, "the pipe connection was closed")
+}
+
+/// `INFINITE`, or the timeout in whole milliseconds (rounded up, below
+/// `INFINITE`). Zero is refused, as for sockets.
+fn timeout_ms(timeout: Option<Duration>) -> io::Result<u32> {
+    match timeout {
+        None => Ok(INFINITE),
+        Some(t) if t.is_zero() => Err(io::Error::new(io::ErrorKind::InvalidInput, "a zero timeout")),
+        Some(t) => Ok(t.as_nanos().div_ceil(1_000_000).min(u128::from(INFINITE - 1)) as u32),
+    }
 }
 
 impl std::fmt::Debug for OwnerPipe {
@@ -347,12 +483,17 @@ impl OwnerPipe {
 /// One direction of an [`OwnerPipe`] or a [`PipeConnection`]: its own event
 /// and `OVERLAPPED`, one operation at a time. The pipe closes when both halves
 /// are dropped.
+///
+/// The two halves from `split` are alike: use one only to read and the other
+/// only to write. A read timeout set on the writing half has no effect (and a
+/// write timeout on the reading half none either).
 pub struct PipeHalf {
     pipe: Arc<SharedPipe>,
     event: OwnedHandle,
-    /// `INFINITE`, or the milliseconds a read may wait (see
-    /// [`Self::set_read_timeout`]).
+    /// `INFINITE`, or the milliseconds a read may wait.
     read_timeout_ms: u32,
+    /// `INFINITE`, or the milliseconds a write may wait.
+    write_timeout_ms: u32,
 }
 
 impl std::fmt::Debug for PipeHalf {
@@ -363,26 +504,36 @@ impl std::fmt::Debug for PipeHalf {
 
 impl PipeHalf {
     fn new(pipe: Arc<SharedPipe>) -> io::Result<Self> {
-        Ok(Self { pipe, event: manual_reset_event()?, read_timeout_ms: INFINITE })
+        Ok(Self { pipe, event: manual_reset_event()?, read_timeout_ms: INFINITE, write_timeout_ms: INFINITE })
     }
 
-    /// How long a read may wait for data. `None` (the default) waits for ever.
-    /// A read that gets nothing in time is cancelled and fails with
+    /// How long one `read` call may wait for data. `None` (the default) waits
+    /// for ever. A read that gets nothing in time is cancelled and fails with
     /// [`io::ErrorKind::TimedOut`]; the pipe stays open and usable. A zero
     /// duration is refused, as for sockets.
+    ///
+    /// The limit is per call, not per frame: a peer that sends one byte just
+    /// inside each timeout keeps a frame read going. A caller that needs an
+    /// idle or whole-frame deadline keeps its own clock and closes the
+    /// connection ([`Self::closer`]).
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        self.read_timeout_ms = match timeout {
-            None => INFINITE,
-            Some(t) if t.is_zero() => {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "a zero read timeout"))
-            }
-            // Rounded up to whole milliseconds, kept below `INFINITE`.
-            Some(t) => t
-                .as_nanos()
-                .div_ceil(1_000_000)
-                .min(u128::from(INFINITE - 1)) as u32,
-        };
+        self.read_timeout_ms = timeout_ms(timeout)?;
         Ok(())
+    }
+
+    /// How long one `write` call may wait while the peer is not reading.
+    /// `None` (the default) waits for ever. A write that does not finish in
+    /// time is cancelled and fails with [`io::ErrorKind::TimedOut`]; part of
+    /// the buffer may have gone out, so the caller should close the
+    /// connection. A zero duration is refused.
+    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.write_timeout_ms = timeout_ms(timeout)?;
+        Ok(())
+    }
+
+    /// A handle that ends this connection (both halves) from another thread.
+    pub fn closer(&self) -> PipeCloser {
+        PipeCloser(Arc::downgrade(&self.pipe))
     }
 
     /// Run one overlapped operation to completion. `start` issues it with the
@@ -395,12 +546,19 @@ impl PipeHalf {
         wait_ms: u32,
         start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32,
     ) -> io::Result<usize> {
+        if self.pipe.is_closed() {
+            return Err(closed_error());
+        }
         let mut overlapped = OVERLAPPED { hEvent: self.event.as_raw_handle(), ..Default::default() };
         let handle = self.pipe.handle.as_raw_handle();
         let mut cancelled = false;
         if start(handle, &mut overlapped) == 0 {
             // SAFETY: reads this thread's last-error value.
-            match unsafe { GetLastError() } {
+            let code = unsafe { GetLastError() };
+            if code != ERROR_IO_PENDING && self.pipe.is_closed() {
+                return Err(closed_error());
+            }
+            match code {
                 ERROR_IO_PENDING => {}
                 ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED => return Ok(0),
                 code => return Err(io::Error::from_raw_os_error(code as i32)),
@@ -422,15 +580,19 @@ impl PipeHalf {
         // been cancelled.
         if unsafe { GetOverlappedResult(handle, &overlapped, &mut done, 1) } == 0 {
             // SAFETY: reads this thread's last-error value.
-            return match unsafe { GetLastError() } {
+            let code = unsafe { GetLastError() };
+            if self.pipe.is_closed() {
+                return Err(closed_error());
+            }
+            return match code {
                 ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED => Ok(0),
                 ERROR_OPERATION_ABORTED if cancelled => {
-                    Err(io::Error::new(io::ErrorKind::TimedOut, "no data within the read timeout"))
+                    Err(io::Error::new(io::ErrorKind::TimedOut, "the pipe operation timed out"))
                 }
                 code => Err(io::Error::from_raw_os_error(code as i32)),
             };
         }
-        // Data that arrived as the timeout fired is kept, not lost.
+        // Bytes that moved as the timeout fired are kept, not lost.
         Ok(done as usize)
     }
 }
@@ -450,7 +612,8 @@ impl io::Write for PipeHalf {
         let len = buf.len().min(u32::MAX as usize) as u32;
         let ptr = buf.as_ptr();
         // SAFETY: `ptr` is valid for `len` bytes until `complete` returns.
-        let written = self.complete(INFINITE, |handle, overlapped| unsafe { WriteFile(handle, ptr, len, std::ptr::null_mut(), overlapped) })?;
+        let wait_ms = self.write_timeout_ms;
+        let written = self.complete(wait_ms, |handle, overlapped| unsafe { WriteFile(handle, ptr, len, std::ptr::null_mut(), overlapped) })?;
         if written == 0 && len > 0 {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the other end closed the connection"));
         }
@@ -682,11 +845,106 @@ mod tests {
         assert_eq!(&buf, b"ping\n");
 
         // The runner's idle close: dropping both halves ends the client's stream
-        // and frees the slot.
-        drop((server_in, server_out));
+        // and frees the slot; one half alone keeps it.
+        drop(server_out);
+        assert_eq!(listener.live_connections(), 1, "one half still holds the slot");
+        drop(server_in);
         let mut rest = Vec::new();
         assert_eq!(reader.read_to_end(&mut rest).unwrap(), 0);
         assert_eq!(listener.live_connections(), 0);
+    }
+
+    /// Write 64 KiB chunks until a write fails; a client that never reads
+    /// fills the pipe's buffer within a few.
+    fn write_until_error(half: &mut PipeHalf) -> io::Error {
+        let chunk = vec![7u8; 64 * 1024];
+        for _ in 0..256 {
+            if let Err(error) = half.write_all(&chunk) {
+                return error;
+            }
+        }
+        panic!("16 MiB went out to a client that never reads");
+    }
+
+    #[test]
+    fn a_write_the_client_never_reads_times_out() {
+        use std::time::{Duration, Instant};
+        let name = test_name();
+        let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
+        // The client stays connected and never reads.
+        let _client = connect_owner(&name).unwrap().split().unwrap();
+        let (_server_in, mut server_out) = listener.accept_owner().unwrap().split().unwrap();
+        assert_eq!(
+            server_out.set_write_timeout(Some(Duration::ZERO)).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        server_out.set_write_timeout(Some(Duration::from_millis(300))).unwrap();
+        let started = Instant::now();
+        let error = write_until_error(&mut server_out);
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+    }
+
+    /// A read and a write blocked with no timeout on one connection, then
+    /// ended from another thread by `end`. Both return `ConnectionAborted`
+    /// promptly, the client sees the pipe end, and the slot is freed.
+    fn blocked_halves_end_when(end: impl FnOnce(&PipeCloser, &mut PipeListener)) {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let name = test_name();
+        let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
+        let (mut client_in, _client_out) = connect_owner(&name).unwrap().split().unwrap();
+        let (mut server_in, mut server_out) = listener.accept_owner().unwrap().split().unwrap();
+        let closer = server_out.closer();
+
+        let (read_tx, read_rx) = channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 16];
+            let read = server_in.read(&mut buf).map_err(|e| e.kind());
+            drop(server_in);
+            read_tx.send(read).unwrap();
+        });
+        let (write_tx, write_rx) = channel();
+        std::thread::spawn(move || {
+            let write = write_until_error(&mut server_out).kind();
+            drop(server_out);
+            write_tx.send(write).unwrap();
+        });
+        // Let both block: the read on no data, the write on a full pipe.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(read_rx.try_recv().is_err(), "the read is still waiting");
+        assert!(write_rx.try_recv().is_err(), "the write is still waiting");
+
+        end(&closer, &mut listener);
+        let read = read_rx.recv_timeout(Duration::from_secs(5)).expect("the blocked read returns");
+        let write = write_rx.recv_timeout(Duration::from_secs(5)).expect("the blocked write returns");
+        assert_eq!(read, Err(io::ErrorKind::ConnectionAborted));
+        assert_eq!(write, io::ErrorKind::ConnectionAborted);
+
+        // The client's end is cut: reading drains to the end, it does not hang.
+        let (end_tx, end_rx) = channel();
+        std::thread::spawn(move || {
+            let mut rest = Vec::new();
+            end_tx.send(client_in.read_to_end(&mut rest).is_ok()).unwrap();
+        });
+        end_rx.recv_timeout(Duration::from_secs(5)).expect("the client sees the pipe end");
+        // Both halves were dropped by their threads, so the slot is free.
+        assert_eq!(listener.live_connections(), 0);
+        closer.close(); // a no-op once the pipe is gone
+    }
+
+    #[test]
+    fn a_closer_ends_a_blocked_read_and_write() {
+        blocked_halves_end_when(|closer, _| closer.close());
+    }
+
+    #[test]
+    fn stop_ends_a_live_connections_blocked_read_and_write() {
+        blocked_halves_end_when(|_, listener| {
+            listener.stopper().stop();
+            // And no new client is taken.
+            assert_eq!(listener.accept_one().unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        });
     }
 
     #[test]
