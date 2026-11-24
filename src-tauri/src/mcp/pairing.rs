@@ -137,8 +137,12 @@ impl Pairing {
         identities: &mut Identities,
     ) -> Result<Issued, PairError> {
         self.prune(now_ms);
-        let request = self.pending.remove(id).ok_or(PairError::Unknown)?;
+        if !self.pending.contains_key(id) {
+            return Err(PairError::Unknown);
+        }
+        // Issue first: a failed issue leaves the request waiting, so the owner can try again.
         let issued = identities.issue(id).map_err(|_| PairError::Failed)?;
+        let request = self.pending.remove(id).ok_or(PairError::Unknown)?;
         registry.add(id, &request.name, allowed);
         Ok(issued)
     }
@@ -185,6 +189,16 @@ mod tests {
         // Settled: no longer waiting, and cannot be approved twice.
         assert!(pairing.waiting(5).is_empty());
         assert_eq!(pairing.approve(&asked.id, &[], 6, &mut registry, &mut identities).err(), Some(PairError::Unknown));
+    }
+
+    #[test]
+    fn a_failed_approval_leaves_the_request_waiting() {
+        let (mut pairing, mut registry, mut identities) = (Pairing::default(), Registry::default(), Identities::default());
+        // A request whose id the identity store refuses makes the key issue fail.
+        pairing.pending.insert("not a plain id".into(), Pending { name: "Desk".into(), code: code(&SHIM, &[1u8; 32], "Desk"), expires_ms: REQUEST_TTL_MS });
+        assert_eq!(pairing.approve("not a plain id", &[Topic::Node], 0, &mut registry, &mut identities).err(), Some(PairError::Failed));
+        assert_eq!(pairing.waiting(0).len(), 1, "still waiting for the owner");
+        assert!(registry.active("not a plain id").is_none(), "nothing was added");
     }
 
     #[test]
