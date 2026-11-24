@@ -55,9 +55,8 @@ fn run(args: &[String]) -> std::io::Result<()> {
 
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["pair", name] => {
-            if key_file::load(&keys).is_ok() {
-                return Err(Error::new(ErrorKind::AlreadyExists, "this client is already paired; run `bitsov-mcp forget` first"));
-            }
+            // Before connecting: the app hands the secret over once, so it must be savable.
+            key_file::ready_to_pair(&keys)?;
             let stream = connect()?;
             let mut reader = BufReader::new(stream.try_clone()?);
             let mut writer = stream;
