@@ -12,10 +12,15 @@
 //! such a program can still delete or reorder whole lines.
 //!
 //! Two bounds keep the file small:
-//! - at most [`REFUSED_HANDSHAKES_PER_MINUTE`] refused-handshake rows are
-//!   written in any 60 s; the rest are counted and written as one summary row
-//!   ([`SUMMARY_TOOL`]) once the minute has passed. Tool-call rows are never
-//!   held back.
+//! - rows that record nothing read are held back past a per-minute allowance:
+//!   at most [`NOT_AUTHORISED_ROWS_PER_MINUTE`] `NotAuthorised` rows in any
+//!   60 s (all clients together: refused handshakes, unknown or revoked
+//!   clients), and at most [`REFUSED_ROWS_PER_CLIENT_PER_MINUTE`] `Refused`
+//!   or `RateLimited` rows per client. The rest are counted and written as one
+//!   summary row per allowance ([`SUMMARY_TOOL`], naming the client) once a
+//!   minute has passed since the first held row. `Read` and `ReadFailed` rows
+//!   are always written. So a flood adds at most one allowance plus one
+//!   summary row a minute per client.
 //! - when the file grows past [`MAX_FILE_BYTES`], it is cut back to the newest
 //!   whole lines that fit in [`TRIM_TO_BYTES`].
 //!
@@ -23,8 +28,14 @@
 //! is the real file: owner-only and append-only on macOS, iOS and Linux, and
 //! the verified private-file layer on Windows. Other platforms get a clear
 //! `Unsupported` error.
+//!
+//! **For the wiring.** Each append syncs the file to disk, and on Windows
+//! rewrites it (at most [`MAX_FILE_BYTES`], 256 KiB there). So `append` must
+//! not run under the host lock: hand rows to a writer thread. Held counts live
+//! in memory only: call [`AuditLog::flush_due`] from a periodic tick and
+//! [`AuditLog::flush`] when the endpoint stops.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -40,18 +51,30 @@ pub const AUDIT_PURPOSE: &str = "mcp-audit-v1";
 pub const FILE_NAME: &str = "mcp-audit.log";
 /// Rows the UI shows.
 pub const SHOW_ROWS: usize = 200;
-/// Refused-handshake rows written in any 60 s; more are only counted.
-pub const REFUSED_HANDSHAKES_PER_MINUTE: usize = 30;
+/// `NotAuthorised` rows written in any 60 s, all clients together.
+pub const NOT_AUTHORISED_ROWS_PER_MINUTE: usize = 30;
+/// `Refused` and `RateLimited` rows written per client in any 60 s.
+pub const REFUSED_ROWS_PER_CLIENT_PER_MINUTE: usize = 30;
+/// Clients with their own allowance; later ones share one.
+pub const MAX_TRACKED_CLIENTS: usize = 32;
 /// The tool name a refused handshake is audited under (the endpoint's).
 pub const HANDSHAKE_TOOL: &str = "handshake";
-/// The tool name of the row that counts refused handshakes not written.
-pub const SUMMARY_TOOL: &str = "handshakes_not_logged";
+/// The tool name of a row that counts rows not written.
+pub const SUMMARY_TOOL: &str = "rows_not_logged";
 /// Longest line written or read (base64 of the sealed record, without `\n`).
 pub const MAX_LINE_BYTES: usize = 8 * 1024;
 /// Above this size the file is cut back to [`TRIM_TO_BYTES`].
+#[cfg(not(windows))]
 pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 /// What a cut keeps: the newest whole lines that fit.
+#[cfg(not(windows))]
 pub const TRIM_TO_BYTES: usize = 1024 * 1024;
+/// Windows rewrites the whole file on each append, so it is kept smaller:
+/// 128 KiB still holds several hundred rows, more than [`SHOW_ROWS`].
+#[cfg(windows)]
+pub const MAX_FILE_BYTES: usize = 256 * 1024;
+#[cfg(windows)]
+pub const TRIM_TO_BYTES: usize = 128 * 1024;
 
 /// Format version inside each sealed record.
 const VERSION: u32 = 1;
@@ -131,25 +154,71 @@ fn cap(text: &str, max: usize) -> String {
     text[..end].to_owned()
 }
 
-fn is_refused_handshake(row: &AuditRow) -> bool {
-    row.tool == HANDSHAKE_TOOL && row.outcome == Outcome::NotAuthorised
+/// The bytes of whole lines in a tail. A tail read from mid-file is one byte
+/// longer than needed, so when it starts right after a `\n` the first whole
+/// line is kept, and a partial first line is dropped, never parsed.
+fn whole_lines(tail: &TailBytes) -> &[u8] {
+    if tail.from_start {
+        return &tail.bytes;
+    }
+    match tail.bytes.iter().position(|b| *b == b'\n') {
+        Some(i) => &tail.bytes[i + 1..],
+        None => &[],
+    }
+}
+
+/// Rows that share one per-minute allowance. `Read` and `ReadFailed` rows
+/// have none: they are always written.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Bucket {
+    /// Every `NotAuthorised` row (refused handshakes, unknown or revoked
+    /// clients). One shared allowance: these client names are not proven.
+    NotAuthorised,
+    /// `Refused` and `RateLimited` rows of one (authenticated) client.
+    Client(String),
+    /// The same, for clients beyond [`MAX_TRACKED_CLIENTS`].
+    OtherClients,
+}
+
+#[derive(Debug, Default)]
+struct Allowance {
+    /// Times of rows written in the last 60 s.
+    written: VecDeque<u64>,
+    /// Rows counted but not written, and when the first of them was.
+    held: usize,
+    held_since_ms: u64,
+}
+
+impl Allowance {
+    fn prune(&mut self, now: u64) {
+        while self.written.front().is_some_and(|t| now.saturating_sub(*t) >= WINDOW_MS || *t > now) {
+            self.written.pop_front();
+        }
+    }
+}
+
+fn summary_row(bucket: &Bucket, held: usize, now_ms: u64) -> AuditRow {
+    let (client, arguments, outcome) = match bucket {
+        Bucket::NotAuthorised => (String::new(), format!("{held} not-authorised attempts not logged"), Outcome::NotAuthorised),
+        Bucket::Client(c) => (c.clone(), format!("{held} refused or rate-limited calls not logged"), Outcome::Refused),
+        Bucket::OtherClients => {
+            (String::new(), format!("{held} refused or rate-limited calls from other clients not logged"), Outcome::Refused)
+        }
+    };
+    AuditRow { at_ms: now_ms, client, tool: SUMMARY_TOOL.to_owned(), arguments, outcome }
 }
 
 /// The sealed, append-only audit log.
 pub struct AuditLog<'s, I: AppendIo> {
     sealer: &'s dyn Sealer,
     io: I,
-    /// Times of refused-handshake rows written in the last 60 s.
-    handshakes: VecDeque<u64>,
-    /// Refused handshakes counted but not written, and when the first was.
-    held: usize,
-    held_since_ms: u64,
+    allowances: BTreeMap<Bucket, Allowance>,
     write_failures: usize,
 }
 
 impl<'s, I: AppendIo> AuditLog<'s, I> {
     pub fn new(sealer: &'s dyn Sealer, io: I) -> Self {
-        AuditLog { sealer, io, handshakes: VecDeque::new(), held: 0, held_since_ms: 0, write_failures: 0 }
+        AuditLog { sealer, io, allowances: BTreeMap::new(), write_failures: 0 }
     }
 
     /// Rows that could not be sealed or written since this log was made.
@@ -158,38 +227,66 @@ impl<'s, I: AppendIo> AuditLog<'s, I> {
         self.write_failures
     }
 
-    /// Refused handshakes counted but not yet written as a summary row.
-    pub fn held_handshakes(&self) -> usize {
-        self.held
+    /// Rows counted but not yet written as a summary row.
+    pub fn held_rows(&self) -> usize {
+        self.allowances.values().map(|a| a.held).sum()
     }
 
-    /// Write the summary row for held handshakes now, if any (for example
-    /// when the endpoint stops).
+    /// Write a summary row for every allowance whose first held row is a
+    /// minute old, and forget idle allowances. `append` does this itself; the
+    /// wiring also calls it from a periodic tick, so a flood followed by
+    /// silence is still summarised.
+    pub fn flush_due(&mut self, now_ms: u64) {
+        self.flush_where(now_ms, |a| now_ms >= a.held_since_ms.saturating_add(WINDOW_MS));
+    }
+
+    /// Write every pending summary row now (the wiring calls this when the
+    /// endpoint stops). Counts held only in memory are lost on a crash.
     pub fn flush(&mut self, now_ms: u64) {
-        if self.held > 0 {
-            let row = AuditRow {
-                at_ms: now_ms,
-                client: String::new(),
-                tool: SUMMARY_TOOL.to_owned(),
-                arguments: format!("{} refused handshakes not logged", self.held),
-                outcome: Outcome::NotAuthorised,
-            };
-            self.held = 0;
-            self.write(&row);
+        self.flush_where(now_ms, |_| true);
+    }
+
+    fn flush_where(&mut self, now_ms: u64, due: impl Fn(&Allowance) -> bool) {
+        let mut summaries = Vec::new();
+        for (bucket, allowance) in self.allowances.iter_mut() {
+            if allowance.held > 0 && due(allowance) {
+                summaries.push(summary_row(bucket, allowance.held, now_ms));
+                allowance.held = 0;
+            }
+        }
+        self.allowances.retain(|_, a| {
+            a.prune(now_ms);
+            a.held > 0 || !a.written.is_empty()
+        });
+        for row in &summaries {
+            self.write(row);
+        }
+    }
+
+    fn bucket_of(&self, row: &AuditRow) -> Option<Bucket> {
+        match row.outcome {
+            Outcome::Read | Outcome::ReadFailed => None,
+            Outcome::NotAuthorised => Some(Bucket::NotAuthorised),
+            Outcome::Refused | Outcome::RateLimited => {
+                let client = Bucket::Client(cap(&row.client, MAX_CLIENT));
+                let tracked = self.allowances.keys().filter(|b| matches!(b, Bucket::Client(_))).count();
+                Some(if self.allowances.contains_key(&client) || tracked < MAX_TRACKED_CLIENTS {
+                    client
+                } else {
+                    Bucket::OtherClients
+                })
+            }
         }
     }
 
     /// At most `n` of the newest rows, oldest first. A line that does not
     /// decode, open or parse is skipped and counted.
     pub fn last(&self, n: usize) -> io::Result<Tail> {
-        let budget = n.saturating_mul(MAX_LINE_BYTES + 1).min(READ_LIMIT);
+        let budget = n.saturating_mul(MAX_LINE_BYTES + 1).min(READ_LIMIT).saturating_add(1);
         let Some(tail) = self.io.read_tail(budget)? else {
             return Ok(Tail { rows: Vec::new(), skipped: 0 });
         };
-        let mut lines: Vec<&[u8]> = tail.bytes.split(|b| *b == b'\n').collect();
-        if !tail.from_start && !lines.is_empty() {
-            lines.remove(0);
-        }
+        let mut lines: Vec<&[u8]> = whole_lines(&tail).split(|b| *b == b'\n').collect();
         // A final empty piece after the last `\n` is not a line.
         if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
@@ -261,39 +358,32 @@ impl<'s, I: AppendIo> AuditLog<'s, I> {
 
     /// Keep the newest whole lines that fit in [`TRIM_TO_BYTES`].
     fn trim(&mut self) -> io::Result<()> {
-        let Some(tail) = self.io.read_tail(TRIM_TO_BYTES)? else {
+        let Some(tail) = self.io.read_tail(TRIM_TO_BYTES + 1)? else {
             return Ok(());
         };
-        let keep = if tail.from_start {
-            &tail.bytes[..]
-        } else {
-            match tail.bytes.iter().position(|b| *b == b'\n') {
-                Some(i) => &tail.bytes[i + 1..],
-                None => &[][..],
-            }
-        };
-        self.io.replace_all(keep)
+        self.io.replace_all(whole_lines(&tail))
     }
 }
 
 impl<I: AppendIo> Audit for AuditLog<'_, I> {
     fn append(&mut self, row: AuditRow) {
         let now = row.at_ms;
-        if self.held > 0 && now >= self.held_since_ms.saturating_add(WINDOW_MS) {
-            self.flush(now);
-        }
-        if is_refused_handshake(&row) {
-            while self.handshakes.front().is_some_and(|t| now.saturating_sub(*t) >= WINDOW_MS || *t > now) {
-                self.handshakes.pop_front();
-            }
-            if self.handshakes.len() >= REFUSED_HANDSHAKES_PER_MINUTE {
-                if self.held == 0 {
-                    self.held_since_ms = now;
+        self.flush_due(now);
+        if let Some(bucket) = self.bucket_of(&row) {
+            let limit = match bucket {
+                Bucket::NotAuthorised => NOT_AUTHORISED_ROWS_PER_MINUTE,
+                _ => REFUSED_ROWS_PER_CLIENT_PER_MINUTE,
+            };
+            let allowance = self.allowances.entry(bucket).or_default();
+            allowance.prune(now);
+            if allowance.written.len() >= limit {
+                if allowance.held == 0 {
+                    allowance.held_since_ms = now;
                 }
-                self.held += 1;
+                allowance.held += 1;
                 return;
             }
-            self.handshakes.push_back(now);
+            allowance.written.push_back(now);
         }
         self.write(&row);
     }
@@ -432,19 +522,38 @@ mod unix {
             verify(&file)?;
             file.write_all(bytes)?;
             file.sync_all()?;
-            std::fs::rename(&tmp, &self.path)
+            std::fs::rename(&tmp, &self.path)?;
+            // Best effort: make the rename itself durable.
+            if let Some(dir) = self.path.parent() {
+                let _ = File::open(dir).and_then(|d| d.sync_all());
+            }
+            Ok(())
         }
     }
 }
 
 /// Windows: the verified private-file layer. It has no append by handle, so an
-/// append reads the (bounded) file and replaces it with the line added.
+/// append reads the file and replaces it with the line added, cutting it back
+/// first when the line would take it past [`MAX_FILE_BYTES`]. The file so
+/// never grows past [`MAX_FILE_BYTES`] (256 KiB), which bounds the work per
+/// row. Reads accept up to four times that, so a file left larger (for
+/// example by a failed cut) is cut back, not refused for good.
+#[cfg(windows)]
+const WINDOWS_READ_LIMIT: u64 = 4 * MAX_FILE_BYTES as u64;
+
 #[cfg(windows)]
 impl AppendIo for PrivateFile {
     fn append_line(&mut self, line: &[u8]) -> io::Result<u64> {
-        let mut bytes = crate::private_fs::read_optional(&self.path, READ_LIMIT as u64)?
+        let existing = crate::private_fs::read_optional(&self.path, WINDOWS_READ_LIMIT)?
             .map(|b| b.to_vec())
             .unwrap_or_default();
+        let mut bytes = if existing.len() + line.len() + 1 > MAX_FILE_BYTES {
+            let start = existing.len().saturating_sub(TRIM_TO_BYTES + 1);
+            let tail = TailBytes { bytes: existing[start..].to_vec(), from_start: start == 0 };
+            whole_lines(&tail).to_vec()
+        } else {
+            existing
+        };
         bytes.extend_from_slice(line);
         bytes.push(b'\n');
         self.replace_all(&bytes)?;
@@ -452,19 +561,31 @@ impl AppendIo for PrivateFile {
     }
 
     fn read_tail(&self, max_bytes: usize) -> io::Result<Option<TailBytes>> {
-        let Some(all) = crate::private_fs::read_optional(&self.path, READ_LIMIT as u64)? else {
+        let Some(all) = crate::private_fs::read_optional(&self.path, WINDOWS_READ_LIMIT)? else {
             return Ok(None);
         };
         let start = all.len().saturating_sub(max_bytes);
         Ok(Some(TailBytes { bytes: all[start..].to_vec(), from_start: start == 0 }))
     }
 
+    /// A fresh random scratch name per rewrite: a scratch file left by a
+    /// crash is never reused, so it cannot block later appends.
     fn replace_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        let tmp = self.path.with_extension("log.tmp");
+        let tmp = scratch_path(&self.path)?;
         crate::private_fs::write_replacing_verified(&tmp, &self.path, bytes, |e| e, |readback| {
             if readback == bytes { Ok(()) } else { Err(io::Error::other("the audit file did not read back")) }
         })
     }
+}
+
+/// A fresh scratch name beside `path`: `<name>.<16 hex>.tmp`.
+#[cfg(windows)]
+fn scratch_path(path: &Path) -> io::Result<PathBuf> {
+    let mut random = [0u8; 8];
+    getrandom::fill(&mut random).map_err(|_| io::Error::other("no randomness"))?;
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.tmp", hex::encode(random)));
+    Ok(path.with_file_name(name))
 }
 
 /// An in-memory file for tests.
@@ -639,28 +760,128 @@ mod tests {
                 log.append(row(10_000 + i, "balance", Outcome::Read));
             }
         }
-        assert_eq!(lines(&log.io).len(), REFUSED_HANDSHAKES_PER_MINUTE + 1);
-        assert_eq!(log.held_handshakes(), 70);
+        assert_eq!(lines(&log.io).len(), NOT_AUTHORISED_ROWS_PER_MINUTE + 1);
+        assert_eq!(log.held_rows(), 70);
         // Still inside the minute: more are held, no summary yet.
         log.append(handshake(69_000));
-        assert_eq!(log.held_handshakes(), 71);
-        assert_eq!(lines(&log.io).len(), REFUSED_HANDSHAKES_PER_MINUTE + 1);
+        assert_eq!(log.held_rows(), 71);
+        assert_eq!(lines(&log.io).len(), NOT_AUTHORISED_ROWS_PER_MINUTE + 1);
         // Once the minute since the first held row has passed: one summary
         // row, then the new handshake, which the freed window admits.
         log.append(handshake(70_100));
         let rows = log.last(SHOW_ROWS).unwrap().rows;
-        assert_eq!(rows.len(), REFUSED_HANDSHAKES_PER_MINUTE + 3);
+        assert_eq!(rows.len(), NOT_AUTHORISED_ROWS_PER_MINUTE + 3);
         let summary = &rows[rows.len() - 2];
         assert_eq!(summary.tool, SUMMARY_TOOL);
-        assert_eq!(summary.arguments, "71 refused handshakes not logged");
+        assert_eq!(summary.arguments, "71 not-authorised attempts not logged");
         assert_eq!(summary.at_ms, 70_100);
         assert_eq!(rows.last().unwrap(), &handshake(70_100));
-        assert_eq!(log.held_handshakes(), 0);
-        // Ordinary tool calls are never capped, refused or not.
+        assert_eq!(log.held_rows(), 0);
+        // Reads are never capped.
         for i in 0..200u64 {
-            log.append(row(80_000 + i, "balance", Outcome::Refused));
+            log.append(row(80_000 + i, "balance", Outcome::Read));
         }
         assert_eq!(log.last(SHOW_ROWS).unwrap().rows.iter().filter(|r| r.at_ms >= 80_000).count(), 200);
+    }
+
+    fn call(at_ms: u64, client: &str, outcome: Outcome) -> AuditRow {
+        AuditRow { at_ms, client: client.into(), tool: "balance".into(), arguments: "{}".into(), outcome }
+    }
+
+    #[test]
+    fn refused_and_rate_limited_rows_are_capped_per_client_with_a_named_summary() {
+        let sealer = MemorySealer;
+        let mut log = AuditLog::new(&sealer, MemoryFile::default());
+        // Client a floods refused and rate-limited calls; client b makes a few.
+        for i in 0..100u64 {
+            let outcome = if i % 2 == 0 { Outcome::Refused } else { Outcome::RateLimited };
+            log.append(call(1_000 + i, "a", outcome));
+        }
+        for i in 0..5u64 {
+            log.append(call(2_000 + i, "b", Outcome::Refused));
+            log.append(call(2_000 + i, "a", Outcome::Read));
+            log.append(call(2_000 + i, "a", Outcome::ReadFailed));
+        }
+        let rows = log.last(usize::MAX).unwrap().rows;
+        let count = |client: &str, outcome: Outcome| rows.iter().filter(|r| r.client == client && r.outcome == outcome).count();
+        assert_eq!(count("a", Outcome::Refused) + count("a", Outcome::RateLimited), REFUSED_ROWS_PER_CLIENT_PER_MINUTE);
+        assert_eq!(count("b", Outcome::Refused), 5, "another client has its own allowance");
+        assert_eq!(count("a", Outcome::Read), 5);
+        assert_eq!(count("a", Outcome::ReadFailed), 5);
+        assert_eq!(log.held_rows(), 70);
+        // A periodic tick after the minute writes one summary naming the client.
+        log.flush_due(30_000);
+        assert_eq!(log.held_rows(), 70, "not due yet");
+        log.flush_due(62_000);
+        assert_eq!(log.held_rows(), 0);
+        let summary = log.last(1).unwrap().rows.pop().unwrap();
+        assert_eq!(summary, AuditRow {
+            at_ms: 62_000,
+            client: "a".into(),
+            tool: SUMMARY_TOOL.into(),
+            arguments: "70 refused or rate-limited calls not logged".into(),
+            outcome: Outcome::Refused,
+        });
+    }
+
+    #[test]
+    fn one_client_flooding_refused_calls_cannot_push_older_rows_out_of_the_history() {
+        let sealer = MemorySealer;
+        let mut log = AuditLog::new(&sealer, MemoryFile::default());
+        for i in 0..50u64 {
+            log.append(call(i, "owner-tool", Outcome::Read));
+        }
+        // Ten minutes of 100,000 refused and rate-limited calls (every 6 ms),
+        // with the longest arguments a row can carry.
+        let mut flood = 0;
+        for t in (1_000..601_000u64).step_by(6) {
+            let outcome = if t % 12 == 0 { Outcome::Refused } else { Outcome::RateLimited };
+            log.append(AuditRow { at_ms: t, client: "flooder".into(), tool: "x".repeat(64), arguments: "y".repeat(256), outcome });
+            flood += 1;
+        }
+        log.flush(601_000);
+        // No cut was needed (on Windows, with its smaller cap, too), so nothing old was dropped.
+        assert!(log.io.bytes.len() < MAX_FILE_BYTES * 3 / 4, "{} bytes after the flood", log.io.bytes.len());
+        let rows = log.last(usize::MAX).unwrap().rows;
+        assert_eq!(rows.iter().filter(|r| r.client == "owner-tool").count(), 50, "every earlier read is still there");
+        assert!(rows.len() <= 50 + 10 * (REFUSED_ROWS_PER_CLIENT_PER_MINUTE + 1) + 1, "{} rows", rows.len());
+        let written = rows.iter().filter(|r| r.client == "flooder" && r.tool != SUMMARY_TOOL).count();
+        let held: usize = rows
+            .iter()
+            .filter(|r| r.tool == SUMMARY_TOOL)
+            .map(|r| r.arguments.split(' ').next().unwrap().parse::<usize>().unwrap())
+            .sum();
+        assert_eq!(written + held, flood, "every call is either a row or counted in a summary");
+    }
+
+    #[test]
+    fn clients_past_the_tracked_limit_share_one_allowance() {
+        let sealer = MemorySealer;
+        let mut log = AuditLog::new(&sealer, MemoryFile::default());
+        for c in 0..MAX_TRACKED_CLIENTS + 40 {
+            log.append(call(1_000, &format!("c{c}"), Outcome::Refused));
+        }
+        // The first 32 clients each got a row; the 40 others share 30.
+        assert_eq!(lines(&log.io).len(), MAX_TRACKED_CLIENTS + REFUSED_ROWS_PER_CLIENT_PER_MINUTE);
+        assert_eq!(log.held_rows(), 10);
+        log.flush(2_000);
+        let summary = log.last(1).unwrap().rows.pop().unwrap();
+        assert_eq!(summary.client, "");
+        assert_eq!(summary.arguments, "10 refused or rate-limited calls from other clients not logged");
+        // Idle allowances are forgotten once their minute has passed.
+        log.flush_due(100_000);
+        assert!(log.allowances.is_empty());
+    }
+
+    #[test]
+    fn a_cut_from_a_line_boundary_keeps_the_first_whole_line() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"old\nkeep1\nkeep2\n");
+        // A tail read one byte longer than the kept part starts at the `\n`.
+        let tail = TailBytes { bytes: bytes[3..].to_vec(), from_start: false };
+        assert_eq!(whole_lines(&tail), b"keep1\nkeep2\n");
+        let partial = TailBytes { bytes: bytes[5..].to_vec(), from_start: false };
+        assert_eq!(whole_lines(&partial), b"keep2\n");
     }
 
     #[test]
@@ -673,7 +894,7 @@ mod tests {
         }
         log.flush(600_000);
         let n = lines(&log.io).len();
-        assert!(n <= 10 * (REFUSED_HANDSHAKES_PER_MINUTE + 1) + 1, "{n} rows written");
+        assert!(n <= 10 * (NOT_AUTHORISED_ROWS_PER_MINUTE + 1) + 1, "{n} rows written");
         let rows = log.last(usize::MAX).unwrap().rows;
         let written = rows.iter().filter(|r| r.tool == HANDSHAKE_TOOL).count();
         let held: usize = rows
@@ -791,6 +1012,20 @@ mod tests {
         }
 
         #[test]
+        fn a_fifo_at_the_path_is_refused_without_hanging() {
+            let dir = tempfile::tempdir().unwrap();
+            let file = PrivateFile::open(dir.path()).unwrap();
+            let path = dir.path().join(FILE_NAME);
+            let made = std::process::Command::new("mkfifo").arg("-m").arg("600").arg(&path).status().unwrap();
+            assert!(made.success());
+            let sealer = MemorySealer;
+            let mut log = AuditLog::new(&sealer, file);
+            assert!(log.last(SHOW_ROWS).is_err());
+            log.append(row(1, "balance", Outcome::Read));
+            assert_eq!(log.write_failures(), 1);
+        }
+
+        #[test]
         fn a_symlinked_folder_is_refused() {
             let dir = tempfile::tempdir().unwrap();
             let real = dir.path().join("real");
@@ -838,14 +1073,42 @@ mod tests {
                 return;
             }
             let root = temp_root("mcp-audit");
+            let dir = root.join("data");
             let sealer = MemorySealer;
-            let mut log = AuditLog::new(&sealer, PrivateFile::open(&root.join("data")).unwrap());
+            let mut log = AuditLog::new(&sealer, PrivateFile::open(&dir).unwrap());
             for i in 0..3 {
                 log.append(row(i, "balance", Outcome::Read));
             }
             assert_eq!(log.write_failures(), 0);
             assert_eq!(log.last(SHOW_ROWS).unwrap().rows.iter().map(|r| r.at_ms).collect::<Vec<_>>(), vec![0, 1, 2]);
-            crate::private_fs::verify_file(&root.join("data").join(FILE_NAME)).unwrap();
+            crate::private_fs::verify_file(&dir.join(FILE_NAME)).unwrap();
+
+            // A scratch file left by a crash (old fixed name, or a random one)
+            // does not block the next append.
+            for name in [format!("{FILE_NAME}.tmp"), format!("{FILE_NAME}.0011223344556677.tmp")] {
+                let left = crate::private_fs::create_new(&dir.join(name)).unwrap();
+                drop(left);
+            }
+            log.append(row(3, "balance", Outcome::Read));
+            assert_eq!(log.write_failures(), 0);
+            assert_eq!(log.last(SHOW_ROWS).unwrap().rows.len(), 4);
+
+            // A file left larger than the cap (a failed cut) is cut back on
+            // the next append, never refused for good.
+            let line = log.encode(&row(9, "balance", Outcome::Read)).unwrap();
+            let mut big = Vec::new();
+            while big.len() < MAX_FILE_BYTES + 3 * MAX_LINE_BYTES {
+                big.extend_from_slice(&line);
+                big.push(b'\n');
+            }
+            log.io.replace_all(&big).unwrap();
+            log.append(row(10, "balance", Outcome::Read));
+            assert_eq!(log.write_failures(), 0);
+            let size = std::fs::metadata(dir.join(FILE_NAME)).unwrap().len() as usize;
+            assert!(size <= MAX_FILE_BYTES, "{size} bytes");
+            let tail = log.last(SHOW_ROWS).unwrap();
+            assert_eq!(tail.skipped, 0);
+            assert_eq!(tail.rows.last().unwrap().at_ms, 10);
             let _ = std::fs::remove_dir_all(&root);
         }
     }
