@@ -41,7 +41,7 @@ pub struct Client {
 }
 
 /// The clients the owner approved. In memory in this slice.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Registry {
     clients: HashMap<String, Client>,
 }
