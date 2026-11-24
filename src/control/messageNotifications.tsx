@@ -78,26 +78,27 @@ export function createMessageNotifications(options: { mobile?: boolean; now?: ()
     catch { setPermission('error'); }
     finally { requesting = false; }
   };
-  const notify = async (id: string, body: string, current = () => true, open?: () => void) => {
-    if (disposed || seen.has(id)) return;
+  /** True only when the OS was asked to show the alert and accepted it. */
+  const notify = async (id: string, body: string, current = () => true, open?: () => void): Promise<boolean> => {
+    if (disposed || seen.has(id)) return false;
     seen.add(id);
-    if (muted() || !enabled) return;
+    if (muted() || !enabled) return false;
     try {
       if (mobile) {
-        if (foreground() || !await isPermissionGranted() || disposed || muted() || foreground()) return;
+        if (foreground() || !await isPermissionGranted() || disposed || muted() || foreground()) return false;
         await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body } });
-        return;
+        return true;
       }
       const window = getCurrentWindow();
-      if (await window.isFocused() || disposed || muted()) return;
+      if (await window.isFocused() || disposed || muted()) return false;
       // Arrival never prompts: the visible explanation owns the permission tap.
-      if (!await isPermissionGranted()) return;
+      if (!await isPermissionGranted()) return false;
       if (open) {
         await listenForCalls();
         await registerActionTypes([{ id: 'bitsov-incoming-call', actions: [{ id: 'open-call', title: t('incomingOpenCall') }] }]);
       }
       const focused = await window.isFocused();
-      if (disposed || muted() || focused || !current()) return;
+      if (disposed || muted() || focused || !current()) return false;
       // The locked macOS backend maps this sentinel to the OS default sound; Windows and
       // Linux use their own default message sound names.
       // The JS sendNotification wrapper discards its promise. Await the same plugin
@@ -106,7 +107,8 @@ export function createMessageNotifications(options: { mobile?: boolean; now?: ()
       if (open) callActions.set(notificationId!, { current, open });
       await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body,
         ...(open ? { id: notificationId, actionTypeId: 'bitsov-incoming-call' } : { sound }) } });
-    } catch { if (!disposed) setPermission('error'); }
+      return true;
+    } catch { if (!disposed) setPermission('error'); return false; }
   };
   const name = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 80) || t('notificationSomeone');
   return {
@@ -119,8 +121,14 @@ export function createMessageNotifications(options: { mobile?: boolean; now?: ()
         const contact = message.sender.toLowerCase();
         const last = lastByContact.get(contact);
         if (last !== undefined && now() - last < PHONE_NOTIFY_COOLDOWN_MS) return;
-        lastByContact.set(contact, now());
-        void notify(`message:${message.id}`, t('notificationNewMessage'));
+        // Held while the alert is pending, so a burst gets one alert. An alert that was not shown
+        // (app in view, muted, no permission, an error) gives the time back: the next one may show.
+        const held = now();
+        lastByContact.set(contact, held);
+        void notify(`message:${message.id}`, t('notificationNewMessage')).then((shown) => {
+          if (shown || lastByContact.get(contact) !== held) return;
+          if (last === undefined) lastByContact.delete(contact); else lastByContact.set(contact, last);
+        });
         return;
       }
       // Windows and Linux show a generic line: no sender identifier and no message content.

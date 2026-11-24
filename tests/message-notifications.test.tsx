@@ -276,6 +276,28 @@ it('on a phone, one contact gets at most one message notification per 30 s', asy
   n.dispose();
 });
 
+it.each([
+  ['the app was in view', (inView: () => void) => { inView(); }],
+  ['there was no permission', (_inView: () => void) => { native.isPermissionGranted.mockResolvedValueOnce(false); }],
+  ['the system refused it', (_inView: () => void) => { native.sendNotification.mockRejectedValueOnce(new Error('refused')); }],
+])('on a phone, an alert that was not shown (%s) does not hold back the next one', async (_why, suppress) => {
+  let visibility: DocumentVisibilityState = 'hidden';
+  vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+  let clock = 1_000_000;
+  const n = createMessageNotifications({ mobile: true, now: () => clock });
+  suppress(() => { visibility = 'visible'; });
+  n.message({ ...message, id: 'a' }, 'me', 'Robin'); await flush();
+  visibility = 'hidden';
+  const shownBefore = native.sendNotification.mock.calls.filter(([o]) => o).length;
+  clock += 5_000; n.message({ ...message, id: 'b' }, 'me', 'Robin'); await flush();
+  expect(native.sendNotification.mock.calls.length - shownBefore).toBe(1);
+  expect(native.sendNotification).toHaveBeenLastCalledWith({ title: 'BitSov', body: 'You have a new message' });
+  // That one was shown: the next within 30 s is held back.
+  clock += 5_000; n.message({ ...message, id: 'c' }, 'me', 'Robin'); await flush();
+  expect(native.sendNotification.mock.calls.length - shownBefore).toBe(1);
+  n.dispose();
+});
+
 it('a missed call is said once on a phone, without a name; never on a computer', async () => {
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
   const phone = createMessageNotifications({ mobile: true });
