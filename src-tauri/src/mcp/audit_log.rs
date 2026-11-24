@@ -21,8 +21,12 @@
 //!   minute has passed since the first held row. `Read` and `ReadFailed` rows
 //!   are always written. So a flood adds at most one allowance plus one
 //!   summary row a minute per client.
-//! - when the file grows past [`MAX_FILE_BYTES`], it is cut back to the newest
-//!   whole lines that fit in [`TRIM_TO_BYTES`].
+//! - the file is cut by row count, not by bytes, so the history kept does not
+//!   depend on how large one sealed line is (a DPAPI line is several times a
+//!   test line): above [`MAX_ROWS`] rows it is cut back to the newest
+//!   [`KEEP_ROWS`]. [`MAX_FILE_BYTES`] is only a hard ceiling for a file
+//!   damaged or grown outside the log; it is sized at [`MAX_ROWS`] lines of the
+//!   longest length written ([`MAX_LINE_BYTES`]), so rows always cut first.
 //!
 //! File access goes through [`AppendIo`], so tests use memory. [`PrivateFile`]
 //! is the real file: owner-only and append-only on macOS, iOS and Linux, and
@@ -30,8 +34,9 @@
 //! `Unsupported` error.
 //!
 //! **For the wiring.** Each append syncs the file to disk, and on Windows
-//! rewrites it (at most [`MAX_FILE_BYTES`], 256 KiB there). So `append` must
-//! not run under the host lock: hand rows to a writer thread. Held counts live
+//! rewrites it (at most [`MAX_ROWS`] lines, 500 there: under 1 MiB at
+//! realistic DPAPI line sizes, never more than [`MAX_FILE_BYTES`]). So
+//! `append` must not run under the host lock: hand rows to a writer thread. Held counts live
 //! in memory only: call [`AuditLog::flush_due`] from a periodic tick and
 //! [`AuditLog::flush`] when the endpoint stops.
 
@@ -63,18 +68,21 @@ pub const HANDSHAKE_TOOL: &str = "handshake";
 pub const SUMMARY_TOOL: &str = "rows_not_logged";
 /// Longest line written or read (base64 of the sealed record, without `\n`).
 pub const MAX_LINE_BYTES: usize = 8 * 1024;
-/// Above this size the file is cut back to [`TRIM_TO_BYTES`].
+/// Rows kept by a cut. More than [`SHOW_ROWS`], so the UI always has a full page.
 #[cfg(not(windows))]
-pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
-/// What a cut keeps: the newest whole lines that fit.
-#[cfg(not(windows))]
-pub const TRIM_TO_BYTES: usize = 1024 * 1024;
-/// Windows rewrites the whole file on each append, so it is kept smaller:
-/// 128 KiB still holds several hundred rows, more than [`SHOW_ROWS`].
+pub const KEEP_ROWS: usize = 1_000;
+/// Windows rewrites the whole file on each append, so it keeps fewer rows.
 #[cfg(windows)]
-pub const MAX_FILE_BYTES: usize = 256 * 1024;
-#[cfg(windows)]
-pub const TRIM_TO_BYTES: usize = 128 * 1024;
+pub const KEEP_ROWS: usize = 250;
+/// Above this many rows the file is cut back to [`KEEP_ROWS`].
+pub const MAX_ROWS: usize = 2 * KEEP_ROWS;
+/// Hard ceiling on the file's size, whatever its row count: [`MAX_ROWS`] lines
+/// of the longest length written. Realistic lines are far shorter (about
+/// 1.3 KiB for a typical row with DPAPI, less with the Apple sealers), so the
+/// row cut comes first.
+pub const MAX_FILE_BYTES: usize = MAX_ROWS * (MAX_LINE_BYTES + 1);
+/// What a cut by the byte ceiling keeps.
+pub const TRIM_TO_BYTES: usize = KEEP_ROWS * (MAX_LINE_BYTES + 1);
 
 /// Format version inside each sealed record.
 const VERSION: u32 = 1;
@@ -84,7 +92,7 @@ const MAX_CLIENT: usize = 128;
 const MAX_TOOL: usize = 64;
 const MAX_ARGUMENTS: usize = 256;
 /// The largest file the log ever leaves behind: a cut happens right after the
-/// append that crossed [`MAX_FILE_BYTES`].
+/// append that crossed a bound.
 const READ_LIMIT: usize = MAX_FILE_BYTES + MAX_LINE_BYTES + 1;
 
 /// The tail of the file, as read.
@@ -213,12 +221,14 @@ pub struct AuditLog<'s, I: AppendIo> {
     sealer: &'s dyn Sealer,
     io: I,
     allowances: BTreeMap<Bucket, Allowance>,
+    /// Rows in the file, counted once on the first append, then kept.
+    rows: Option<usize>,
     write_failures: usize,
 }
 
 impl<'s, I: AppendIo> AuditLog<'s, I> {
     pub fn new(sealer: &'s dyn Sealer, io: I) -> Self {
-        AuditLog { sealer, io, allowances: BTreeMap::new(), write_failures: 0 }
+        AuditLog { sealer, io, allowances: BTreeMap::new(), rows: None, write_failures: 0 }
     }
 
     /// Rows that could not be sealed or written since this log was made.
@@ -345,23 +355,47 @@ impl<'s, I: AppendIo> AuditLog<'s, I> {
             self.write_failures += 1;
             return;
         };
-        match self.io.append_line(&line) {
-            Ok(size) if size > MAX_FILE_BYTES as u64 => {
-                if self.trim().is_err() {
-                    self.write_failures += 1;
-                }
+        let size = match self.io.append_line(&line) {
+            Ok(size) => size,
+            Err(_) => {
+                self.write_failures += 1;
+                return;
             }
-            Ok(_) => {}
-            Err(_) => self.write_failures += 1,
+        };
+        let rows = match self.rows {
+            Some(rows) => Some(rows + 1),
+            None => self.count_rows().ok(),
+        };
+        self.rows = rows;
+        if (size > MAX_FILE_BYTES as u64 || rows.is_some_and(|r| r > MAX_ROWS)) && self.trim().is_err() {
+            self.write_failures += 1;
         }
     }
 
-    /// Keep the newest whole lines that fit in [`TRIM_TO_BYTES`].
+    /// Whole lines in the (bounded) file, the one just appended included.
+    fn count_rows(&self) -> io::Result<usize> {
+        let tail = self.io.read_tail(READ_LIMIT)?;
+        Ok(tail.map_or(0, |t| whole_lines(&t).iter().filter(|b| **b == b'\n').count()))
+    }
+
+    /// Keep the newest [`KEEP_ROWS`] whole lines, and at most
+    /// [`TRIM_TO_BYTES`] of them.
     fn trim(&mut self) -> io::Result<()> {
         let Some(tail) = self.io.read_tail(TRIM_TO_BYTES + 1)? else {
+            self.rows = Some(0);
             return Ok(());
         };
-        self.io.replace_all(whole_lines(&tail))
+        let lines = whole_lines(&tail);
+        let total = lines.iter().filter(|b| **b == b'\n').count();
+        let skip = total.saturating_sub(KEEP_ROWS);
+        let start = if skip == 0 {
+            0
+        } else {
+            lines.iter().enumerate().filter(|(_, b)| **b == b'\n').nth(skip - 1).map_or(lines.len(), |(i, _)| i + 1)
+        };
+        self.io.replace_all(&lines[start..])?;
+        self.rows = Some(total - skip);
+        Ok(())
     }
 }
 
@@ -534,12 +568,12 @@ mod unix {
 
 /// Windows: the verified private-file layer. It has no append by handle, so an
 /// append reads the file and replaces it with the line added, cutting it back
-/// first when the line would take it past [`MAX_FILE_BYTES`]. The file so
-/// never grows past [`MAX_FILE_BYTES`] (256 KiB), which bounds the work per
-/// row. Reads accept up to four times that, so a file left larger (for
-/// example by a failed cut) is cut back, not refused for good.
+/// first when the line would take it past the byte ceiling. The row cut keeps
+/// the file at most [`MAX_ROWS`] lines, which bounds the work per row. Reads
+/// accept up to twice the ceiling, so a file left larger (for example by a
+/// failed cut) is cut back, not refused for good.
 #[cfg(windows)]
-const WINDOWS_READ_LIMIT: u64 = 4 * MAX_FILE_BYTES as u64;
+const WINDOWS_READ_LIMIT: u64 = 2 * MAX_FILE_BYTES as u64;
 
 #[cfg(windows)]
 impl AppendIo for PrivateFile {
@@ -854,6 +888,88 @@ mod tests {
         assert_eq!(written + held, flood, "every call is either a row or counted in a summary");
     }
 
+    /// Output at least as large as the Windows DPAPI sealer's: the same
+    /// purpose frame and JSON envelope with base64url inside, and 512 bytes of
+    /// blob overhead (a real current-user DPAPI blob adds about 300), padded to
+    /// 16. Reversible, not encryption.
+    struct DpapiSizedSealer;
+
+    const DPAPI_SIZED_OVERHEAD: usize = 512;
+
+    impl DpapiSizedSealer {
+        fn frame(purpose: &str) -> Vec<u8> {
+            let mut frame = b"bitsov-sealed-v1\0".to_vec();
+            for label in ["a-reasonably-long-app-profile-name", purpose] {
+                frame.extend_from_slice(&(label.len() as u32).to_be_bytes());
+                frame.extend_from_slice(label.as_bytes());
+            }
+            frame
+        }
+    }
+
+    impl Sealer for DpapiSizedSealer {
+        fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let mut blob = vec![0u8; DPAPI_SIZED_OVERHEAD];
+            blob.extend(Self::frame(purpose));
+            blob.extend_from_slice(&(plaintext.len() as u32).to_be_bytes());
+            blob.extend(plaintext.iter().map(|b| b ^ 0x5a));
+            blob.resize(blob.len().div_ceil(16) * 16, 0);
+            let envelope = serde_json::json!({"v": 1, "backend": "dpapi-current-user", "ciphertext": URL_SAFE_NO_PAD.encode(&blob)});
+            Ok(serde_json::to_vec(&envelope).unwrap())
+        }
+
+        fn open(&self, purpose: &str, sealed: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let envelope: serde_json::Value = serde_json::from_slice(sealed).map_err(|e| e.to_string())?;
+            let blob = URL_SAFE_NO_PAD.decode(envelope["ciphertext"].as_str().ok_or("no ciphertext")?).map_err(|e| e.to_string())?;
+            let body = blob.get(DPAPI_SIZED_OVERHEAD..).ok_or("short")?.strip_prefix(Self::frame(purpose).as_slice()).ok_or("purpose")?;
+            let (len, rest) = body.split_first_chunk::<4>().ok_or("short")?;
+            let payload = rest.get(..u32::from_be_bytes(*len) as usize).ok_or("short")?;
+            Ok(zeroize::Zeroizing::new(payload.iter().map(|b| b ^ 0x5a).collect()))
+        }
+    }
+
+    #[test]
+    fn with_dpapi_sized_lines_a_flood_still_cannot_push_older_rows_out() {
+        let sealer = DpapiSizedSealer;
+        let mut log = AuditLog::new(&sealer, MemoryFile::default());
+        // The worst row fits a line, with room: every field at its cap, all
+        // characters JSON-escaped.
+        assert!(log.encode(&AuditRow {
+            at_ms: u64::MAX,
+            client: "\u{1}".repeat(MAX_CLIENT),
+            tool: "\u{1}".repeat(MAX_TOOL),
+            arguments: "\u{1}".repeat(MAX_ARGUMENTS),
+            outcome: Outcome::NotAuthorised,
+        }).is_some_and(|line| line.len() <= MAX_LINE_BYTES));
+        for i in 0..50u64 {
+            log.append(call(i, "owner-tool", Outcome::Read));
+        }
+        let typical = lines(&log.io)[0].len();
+        assert!(typical > 4 * 200, "a DPAPI-sized line ({typical} bytes) is far larger than a test line");
+        // Ten minutes of 100,000 refused and rate-limited calls at the field caps.
+        let mut flood = 0;
+        for t in (1_000..601_000u64).step_by(6) {
+            let outcome = if t % 12 == 0 { Outcome::Refused } else { Outcome::RateLimited };
+            log.append(AuditRow { at_ms: t, client: "flooder".into(), tool: "x".repeat(64), arguments: "y".repeat(256), outcome });
+            flood += 1;
+        }
+        log.flush(601_000);
+        assert!(log.rows.is_some_and(|r| r < MAX_ROWS), "no cut was needed");
+        let rows = log.last(usize::MAX).unwrap().rows;
+        assert_eq!(rows.iter().filter(|r| r.client == "owner-tool").count(), 50, "every earlier read is still there");
+        let written = rows.iter().filter(|r| r.client == "flooder" && r.tool != SUMMARY_TOOL).count();
+        let held: usize = rows
+            .iter()
+            .filter(|r| r.tool == SUMMARY_TOOL)
+            .map(|r| r.arguments.split(' ').next().unwrap().parse::<usize>().unwrap())
+            .sum();
+        assert_eq!(written + held, flood);
+        // And the kept history holds a full UI page however long the lines are.
+        const { assert!(KEEP_ROWS >= SHOW_ROWS && TRIM_TO_BYTES >= KEEP_ROWS * (MAX_LINE_BYTES + 1)) };
+    }
+
     #[test]
     fn clients_past_the_tracked_limit_share_one_allowance() {
         let sealer = MemorySealer;
@@ -906,24 +1022,51 @@ mod tests {
     }
 
     #[test]
-    fn the_file_is_cut_back_to_whole_newest_lines() {
+    fn the_file_is_cut_back_by_rows_to_whole_newest_lines() {
         let sealer = MemorySealer;
         let mut log = AuditLog::new(&sealer, MemoryFile::default());
-        let mut i = 0u64;
-        while log.io.bytes.len() <= MAX_FILE_BYTES - MAX_LINE_BYTES {
-            log.append(AuditRow { at_ms: i, client: "c".into(), tool: "t".into(), arguments: "a".repeat(200), outcome: Outcome::Read });
-            i += 1;
+        let total = MAX_ROWS as u64 + 50;
+        for i in 0..total {
+            log.append(row(i, "balance", Outcome::Read));
         }
-        for _ in 0..50 {
-            log.append(AuditRow { at_ms: i, client: "c".into(), tool: "t".into(), arguments: "a".repeat(200), outcome: Outcome::Read });
-            i += 1;
-        }
-        assert!(log.io.bytes.len() <= MAX_FILE_BYTES);
+        // The cut ran once, at MAX_ROWS + 1 rows, keeping KEEP_ROWS; 49 more followed.
+        assert_eq!(lines(&log.io).len(), KEEP_ROWS + 49);
+        assert_eq!(log.rows, Some(KEEP_ROWS + 49));
         let all = log.last(usize::MAX).unwrap();
         assert_eq!(all.skipped, 0, "a cut leaves no partial line");
-        assert_eq!(all.rows.last().unwrap().at_ms, i - 1);
+        assert_eq!(all.rows.last().unwrap().at_ms, total - 1);
         assert!(all.rows.windows(2).all(|w| w[1].at_ms == w[0].at_ms + 1));
-        assert!(all.rows.len() < i as usize);
+        assert_eq!(log.write_failures(), 0);
+    }
+
+    #[test]
+    fn rows_already_in_the_file_are_counted_and_cut_on_the_first_append() {
+        let sealer = MemorySealer;
+        let mut first = AuditLog::new(&sealer, MemoryFile::default());
+        for i in 0..MAX_ROWS as u64 {
+            first.append(row(i, "balance", Outcome::Read));
+        }
+        // A new log over the same file (a restart) counts what is there.
+        let mut log = AuditLog::new(&sealer, std::mem::take(&mut first.io));
+        log.append(row(MAX_ROWS as u64, "balance", Outcome::Read));
+        assert_eq!(lines(&log.io).len(), KEEP_ROWS);
+        assert_eq!(log.last(1).unwrap().rows[0].at_ms, MAX_ROWS as u64);
+    }
+
+    #[test]
+    fn the_byte_ceiling_cuts_a_file_grown_outside_the_log() {
+        let sealer = MemorySealer;
+        let mut io = MemoryFile { exists: true, ..MemoryFile::default() };
+        // Few lines, but each at the longest length: junk the log never wrote.
+        let junk = vec![b'A'; MAX_LINE_BYTES];
+        while io.bytes.len() <= MAX_FILE_BYTES {
+            io.bytes.extend_from_slice(&junk);
+            io.bytes.push(b'\n');
+        }
+        let mut log = AuditLog::new(&sealer, io);
+        log.append(row(7, "balance", Outcome::Read));
+        assert!(log.io.bytes.len() <= TRIM_TO_BYTES);
+        assert_eq!(log.last(1).unwrap().rows[0].at_ms, 7);
         assert_eq!(log.write_failures(), 0);
     }
 
@@ -1102,6 +1245,8 @@ mod tests {
                 big.push(b'\n');
             }
             log.io.replace_all(&big).unwrap();
+            // A new log over the file (a restart) counts its rows and cuts.
+            let mut log = AuditLog::new(&sealer, PrivateFile::open(&dir).unwrap());
             log.append(row(10, "balance", Outcome::Read));
             assert_eq!(log.write_failures(), 0);
             let size = std::fs::metadata(dir.join(FILE_NAME)).unwrap().len() as usize;
@@ -1109,6 +1254,7 @@ mod tests {
             let tail = log.last(SHOW_ROWS).unwrap();
             assert_eq!(tail.skipped, 0);
             assert_eq!(tail.rows.last().unwrap().at_ms, 10);
+            assert_eq!(log.last(usize::MAX).unwrap().rows.len(), KEEP_ROWS);
             let _ = std::fs::remove_dir_all(&root);
         }
     }
