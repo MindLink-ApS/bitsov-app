@@ -15,26 +15,46 @@ pub const BYTES: &[u8] = include_bytes!("../resources/sounds/bitsov-alert.caf");
 
 /// Writes the sound into `sounds_dir` when it is missing or different.
 /// True when it wrote. The write is atomic (a temp file, then a rename), so a
-/// half-written sound is never left under the real name.
-pub fn install(sounds_dir: &Path) -> std::io::Result<bool> {
+/// half-written sound is never left under the real name. Before the rename
+/// the file gets the data-protection class from `protect` (iOS: class C via
+/// `bitsov_ffi::file_protection`, readable from the first unlock after boot,
+/// so a locked phone can still play it).
+pub fn install_with(sounds_dir: &Path, protect: impl Fn(&std::fs::File) -> std::io::Result<()>) -> std::io::Result<bool> {
+    use std::io::Write;
     let target = sounds_dir.join(FILE_NAME);
     if std::fs::read(&target).is_ok_and(|current| current == BYTES) {
         return Ok(false);
     }
     std::fs::create_dir_all(sounds_dir)?;
     let temp = sounds_dir.join(format!(".{FILE_NAME}.tmp"));
-    std::fs::write(&temp, BYTES)?;
+    let mut file = std::fs::File::create(&temp)?;
+    file.write_all(BYTES)?;
+    // A sound without the class still plays once the phone is unlocked; never fail the write for it.
+    if let Err(error) = protect(&file) {
+        eprintln!("alert sound protection class not set: {error}");
+    }
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&temp, &target)?;
     Ok(true)
 }
 
-/// iOS startup: `$HOME/Library/Sounds`. A failure only costs the sound; the
-/// alert itself still shows, so it is logged and never stops the app.
+/// [`install_with`] with no protection change (every platform but iOS, and tests).
+pub fn install(sounds_dir: &Path) -> std::io::Result<bool> {
+    install_with(sounds_dir, |_| Ok(()))
+}
+
+/// iOS: `$HOME/Library/Sounds`, at startup and again each time the app comes
+/// to the foreground. A launch before the first unlock after boot cannot
+/// write (the data is still locked), so the later call puts the sound in
+/// place. It is a cheap compare once the right file is there. A failure only
+/// costs the sound; the alert itself still shows, so it is logged and never
+/// stops the app.
 #[cfg(target_os = "ios")]
 pub fn install_ios() {
     let Some(home) = std::env::var_os("HOME") else { return };
     let dir = std::path::PathBuf::from(home).join("Library").join("Sounds");
-    if let Err(error) = install(&dir) {
+    if let Err(error) = install_with(&dir, bitsov_ffi::file_protection::until_first_unlock) {
         eprintln!("alert sound not installed: {error}");
     }
 }
@@ -62,6 +82,27 @@ mod tests {
         assert_eq!(std::fs::read(dir.join(FILE_NAME)).unwrap(), BYTES);
         assert!(!install(&dir).unwrap(), "the same file is left alone");
         assert!(!dir.join(format!(".{FILE_NAME}.tmp")).exists(), "no temp file is left behind");
+    }
+
+    #[test]
+    fn the_protection_class_is_applied_before_the_rename_and_its_failure_never_blocks_the_sound() {
+        use std::cell::Cell;
+        let dir = temp_dir("protect");
+        let called = Cell::new(0);
+        assert!(install_with(&dir, |file| {
+            called.set(called.get() + 1);
+            // Applied to the temp file, before it takes the real name.
+            assert_eq!(file.metadata()?.len(), BYTES.len() as u64);
+            assert!(!dir.join(FILE_NAME).exists(), "still under the temp name");
+            Ok(())
+        }).unwrap());
+        assert_eq!(called.get(), 1);
+        // A failing protection call still installs the sound.
+        let other = temp_dir("protect-fails");
+        assert!(install_with(&other, |_| Err(std::io::Error::other("no class"))).unwrap());
+        assert_eq!(std::fs::read(other.join(FILE_NAME)).unwrap(), BYTES);
+        // An installed, matching file is left alone and protection is not re-applied.
+        assert!(!install_with(&dir, |_| panic!("not called for a matching file")).unwrap());
     }
 
     #[test]

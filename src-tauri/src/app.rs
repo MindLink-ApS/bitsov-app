@@ -12439,6 +12439,9 @@ fn run() {
         }
         #[cfg(any(mobile, feature = "mobile"))]
         if is_remote_resume_event(&event) {
+            // A first launch before the first unlock after boot could not write the alert sound.
+            #[cfg(target_os = "ios")]
+            crate::alert_sound::install_ios();
             #[cfg(target_os = "ios")]
             if !resume_ios_startup(app) { return; }
             resume_remote(app);
