@@ -23,6 +23,11 @@ pub fn install_with(sounds_dir: &Path, protect: impl Fn(&std::fs::File) -> std::
     use std::io::Write;
     let target = sounds_dir.join(FILE_NAME);
     if std::fs::read(&target).is_ok_and(|current| current == BYTES) {
+        // Already in place, maybe from before the protection class existed:
+        // apply it to the existing file too, without rewriting it.
+        if let Err(error) = std::fs::OpenOptions::new().read(true).write(true).open(&target).and_then(|file| protect(&file)) {
+            eprintln!("alert sound protection class not set: {error}");
+        }
         return Ok(false);
     }
     std::fs::create_dir_all(sounds_dir)?;
@@ -85,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn the_protection_class_is_applied_before_the_rename_and_its_failure_never_blocks_the_sound() {
+    fn the_protection_class_is_applied_to_new_and_existing_files_and_its_failure_never_blocks_the_sound() {
         use std::cell::Cell;
         let dir = temp_dir("protect");
         let called = Cell::new(0);
@@ -101,8 +106,18 @@ mod tests {
         let other = temp_dir("protect-fails");
         assert!(install_with(&other, |_| Err(std::io::Error::other("no class"))).unwrap());
         assert_eq!(std::fs::read(other.join(FILE_NAME)).unwrap(), BYTES);
-        // An installed, matching file is left alone and protection is not re-applied.
-        assert!(!install_with(&dir, |_| panic!("not called for a matching file")).unwrap());
+        // An installed, matching file (also one from before this class existed) is not
+        // rewritten, but gets the class applied, and a failure there is not an error.
+        let applied = Cell::new(0);
+        let before = std::fs::metadata(dir.join(FILE_NAME)).unwrap().modified().unwrap();
+        assert!(!install_with(&dir, |file| {
+            applied.set(applied.get() + 1);
+            assert_eq!(file.metadata()?.len(), BYTES.len() as u64);
+            Ok(())
+        }).unwrap());
+        assert_eq!(applied.get(), 1);
+        assert_eq!(std::fs::metadata(dir.join(FILE_NAME)).unwrap().modified().unwrap(), before, "not rewritten");
+        assert!(!install_with(&dir, |_| Err(std::io::Error::other("no class"))).unwrap());
     }
 
     #[test]
