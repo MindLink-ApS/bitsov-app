@@ -161,6 +161,16 @@ it('tapping the current Chats tab returns to the list', async () => {
   expect(visible('[data-phone-list]')).toHaveLength(1);
   expect(visible('[data-composer]')).toHaveLength(0);
 });
+it.each([[744, true], [767, true], [768, false], [1024, false]])('an iPad window %ipx wide uses the phone tabs: %s', async (width, tabs) => {
+  // The real query, answered for this window width: tablets split from 768 px on.
+  const answer = (query: string) => { const m = /max-width:\s*(\d+)px/.exec(query); return m ? width <= Number(m[1]) : false; };
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPad');
+  vi.stubGlobal('__TAURI_INTERNALS__', {});
+  vi.spyOn(window, 'matchMedia').mockImplementation(query => ({ matches: answer(query), media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList);
+  const { createRoot } = await import('solid-js');
+  const { createPhoneLayout } = await import('../src/control/PhoneShell');
+  createRoot((done) => { expect(createPhoneLayout()()).toBe(tabs); done(); });
+});
 it('keeps the phone shell on a landscape iPhone wider than 680px', async () => {
   await mount({ platform: 'iPhone', narrow: false });
   expect(visible('[data-phone-tabs]')).toHaveLength(1);
