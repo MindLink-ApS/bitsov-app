@@ -3,10 +3,12 @@ import { defineConfig } from '@playwright/test';
 // One server/browser install for every WebKit suite on main. Keyboard coverage
 // (including legacy fallback) lives in dynamic-type.spec.ts. There is no
 // phone-shell spec at the #327 base; add it here when that feature lands.
+// Specs that place a call load tests/fixtures/fake-media-init.js: Linux WebKit
+// has no microphone, and a refused one ends the call before its card shows.
 const port = 1423;
 export default defineConfig({
   testDir: 'tests/a11y',
-  testMatch: ['safe-areas*.spec.ts', 'dynamic-type.spec.ts', 'inputs.spec.ts', 'chain-warnings.spec.ts', 'call-self-tile.spec.ts', 'money-notice-desktop.spec.ts', 'rail-labels.spec.ts', 'contact-panel-modal.spec.ts', 'thread-read.spec.ts', 'call-confirm-sheet.spec.ts', 'call-sheet.spec.ts', 'tablet-layout.spec.ts'],
+  testMatch: ['safe-areas*.spec.ts', 'dynamic-type.spec.ts', 'inputs.spec.ts', 'chain-warnings.spec.ts', 'call-self-tile.spec.ts', 'money-notice-desktop.spec.ts', 'rail-labels.spec.ts', 'contact-panel-modal.spec.ts', 'thread-read.spec.ts', 'call-confirm-sheet.spec.ts', 'call-sheet.spec.ts', 'tablet-layout.spec.ts', 'call-panel-composer.spec.ts'],
   forbidOnly: !!process.env.CI,
   workers: 1,
   retries: 0,
