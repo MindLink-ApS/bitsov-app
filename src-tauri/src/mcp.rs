@@ -340,6 +340,8 @@ pub mod pairing;
 pub mod store;
 /// Phase 1, slice A1.2: the local endpoint (framing, handshake, pairing, macOS listener; not wired).
 pub mod endpoint;
+/// Phase 1, slice A1.5a: serving connections without holding the host across reads; the macOS runner (not wired).
+pub mod runner;
 
 #[cfg(test)]
 mod tests;
