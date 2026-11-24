@@ -46,25 +46,13 @@ const onTop = (page: Page, sel: string) => page.locator(sel).first().evaluate((e
   return !!hit && (hit === el || el.contains(hit));
 });
 
-/** What is drawn at the centre of `sel` is not the call card (another overlay may be). */
-const notUnderCard = (page: Page, sel: string) => page.locator(sel).first().evaluate((el) => {
-  const r = el.getBoundingClientRect();
-  const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-  return !hit?.closest('[data-call-panel]');
-});
-
-/**
- * The card stays clear of Send, + and the microphone. `strict`: nothing at all covers them.
- * Otherwise only the card is checked: in a 375 px landscape phone window the shell's own bottom
- * tabs can reach the composer when the header wraps, which is not the call card's doing.
- */
-async function composerClear(page: Page, state: string, strict = true) {
+/** The card stays clear of Send, + and the microphone, and nothing at all covers them. */
+async function composerClear(page: Page, state: string) {
   const panel = page.locator('[data-call-panel]').first();
   await expect(panel).toBeVisible();
   const card = await boxOf(page, '[data-call-panel]');
   for (const sel of [SEND, PLUS, MIC]) {
-    if (strict) expect.soft(await onTop(page, sel), `${state}: ${sel} is on top at its centre`).toBe(true);
-    else expect.soft(await notUnderCard(page, sel), `${state}: the card is not drawn over ${sel}`).toBe(true);
+    expect.soft(await onTop(page, sel), `${state}: ${sel} is on top at its centre`).toBe(true);
     expect.soft(overlaps(card, await boxOf(page, sel)), `${state}: the card does not overlap ${sel}`).toBe(false);
   }
   expect.soft(overlaps(card, await boxOf(page, '[data-composer-bar]')), `${state}: the card does not overlap the composer`).toBe(false);
@@ -185,7 +173,7 @@ test.describe('phone shell, landscape', () => {
     await expect(page.locator(SEND)).toBeVisible();
     await ringFromHeader(page);
     await expect(page.locator('[data-call-panel="calling"]')).toBeVisible({ timeout: 10_000 });
-    await composerClear(page, 'calling', false);
+    await composerClear(page, 'calling');
     await hangUpReachable(page, 'calling');
   });
 });
