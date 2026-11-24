@@ -342,6 +342,8 @@ pub mod store;
 pub mod endpoint;
 /// Phase 1, slice A1.5a: serving connections without holding the host across reads; the macOS runner (not wired).
 pub mod runner;
+/// Phase 1, slice A1.5a: the sealed, append-only audit log (not wired).
+pub mod audit_log;
 
 #[cfg(test)]
 mod tests;
