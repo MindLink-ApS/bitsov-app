@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { checkContactPanelModal } from './contact-panel-check';
-const preview = '/docs/ui/u5-phone-shell/harness/preview.html';
+import { PHONE_SHELL_PREVIEW } from './phoneShellPreview';
+
+const preview = PHONE_SHELL_PREVIEW;
 for (const lang of ['en', 'da']) {
   test(`${lang}: phone navigation, reachable entries and safe-area geometry`, async ({ page }) => {
     await page.goto(`${preview}?scene=list&lang=${lang}`);
