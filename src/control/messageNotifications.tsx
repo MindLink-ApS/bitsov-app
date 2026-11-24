@@ -23,12 +23,16 @@ let nextCallNotification = 1_000_000;
 export const PHONE_SOUND = 'bitsov-alert.caf';
 /** One phone notification per contact at most this often; later ones in the window are dropped. */
 export const PHONE_NOTIFY_COOLDOWN_MS = 30_000;
+/** At most this many phone notifications in any minute, all contacts and missed calls together. */
+export const PHONE_NOTIFY_PER_MINUTE = 10;
+const MINUTE_MS = 60_000;
 
 /**
  * Only live arrivals enter here; history reads never produce alerts.
  * `mobile`: a phone's lock screen is public, so every line is generic (no names, text,
  * amounts or ids), alerts fire only while the app is in the background, a contact gets at
- * most one per `PHONE_NOTIFY_COOLDOWN_MS`, and a call that went unanswered says so once.
+ * most one per `PHONE_NOTIFY_COOLDOWN_MS`, no more than `PHONE_NOTIFY_PER_MINUTE` are shown in
+ * any minute, and a call that went unanswered says so once.
  */
 export function createMessageNotifications(options: { mobile?: boolean; ios?: boolean; now?: () => number } = {}) {
   const mobile = options.mobile ?? false;
@@ -48,6 +52,8 @@ export function createMessageNotifications(options: { mobile?: boolean; ios?: bo
   let requesting = false;
   const seen = new Set<string>();
   const lastByContact = new Map<string, number>();
+  /** Phones: when each alert of the last minute was shown (or is pending). */
+  const shownThisMinute: number[] = [];
   /** Phones: the app is in the foreground when its page is visible. */
   const foreground = () => typeof document !== 'undefined' && document.visibilityState === 'visible';
   const callActions = new Map<number, { current: () => boolean; open: () => void }>();
@@ -117,6 +123,22 @@ export function createMessageNotifications(options: { mobile?: boolean; ios?: bo
       return true;
     } catch { if (!disposed) setPermission('error'); return false; }
   };
+  /**
+   * Phones: `notify` within the overall cap. A slot is held while the alert is pending (so a
+   * burst cannot pass the cap) and given back when nothing was shown.
+   */
+  const notifyPhone = async (id: string, body: string): Promise<boolean> => {
+    const at = now();
+    while (shownThisMinute.length > 0 && at - shownThisMinute[0] >= MINUTE_MS) shownThisMinute.shift();
+    if (shownThisMinute.length >= PHONE_NOTIFY_PER_MINUTE) return false;
+    shownThisMinute.push(at);
+    const shown = await notify(id, body);
+    if (!shown) {
+      const slot = shownThisMinute.indexOf(at);
+      if (slot >= 0) shownThisMinute.splice(slot, 1);
+    }
+    return shown;
+  };
   const name = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 80) || t('notificationSomeone');
   return {
     permission, muted, deferred, checkPermission, request, calls,
@@ -132,7 +154,7 @@ export function createMessageNotifications(options: { mobile?: boolean; ios?: bo
         // (app in view, muted, no permission, an error) gives the time back: the next one may show.
         const held = now();
         lastByContact.set(contact, held);
-        void notify(`message:${message.id}`, t('notificationNewMessage')).then((shown) => {
+        void notifyPhone(`message:${message.id}`, t('notificationNewMessage')).then((shown) => {
           if (shown || lastByContact.get(contact) !== held) return;
           if (last === undefined) lastByContact.delete(contact); else lastByContact.set(contact, last);
         });
@@ -143,7 +165,7 @@ export function createMessageNotifications(options: { mobile?: boolean; ios?: bo
     },
     call(id: string, callerName: string, current?: () => boolean, open?: () => void) { if (calls) void notify(`call:${id}`, t('notificationCall', name(callerName)), current, open); },
     /** Phones: an incoming call that ended unanswered, said once and without a name. */
-    missedCall(id: string) { if (mobile) void notify(`missed:${id}`, t('notificationMissedCall')); },
+    missedCall(id: string) { if (mobile) void notifyPhone(`missed:${id}`, t('notificationMissedCall')); },
     dispose() { disposed = true; seen.clear(); callActions.clear(); void listener?.then(l => l.unregister()).catch(() => {}); },
   };
 }

@@ -300,6 +300,44 @@ it.each([
   n.dispose();
 });
 
+it('on a phone, at most 10 alerts show in any minute, missed calls included', async () => {
+  let visibility: DocumentVisibilityState = 'hidden';
+  vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+  let clock = 1_000_000;
+  const n = createMessageNotifications({ mobile: true, now: () => clock });
+  // Alerts that never showed do not use the minute's room.
+  visibility = 'visible';
+  for (let i = 0; i < 5; i++) n.message({ ...message, id: `seen-${i}`, sender: `in-view-${i}` }, 'me', 'Robin');
+  await flush();
+  visibility = 'hidden';
+  expect(native.sendNotification).not.toHaveBeenCalled();
+  // Twelve contacts and two missed calls within the same minute: ten are shown.
+  for (let i = 0; i < 12; i++) { n.message({ ...message, id: `m-${i}`, sender: `peer-${i}` }, 'me', 'Robin'); clock += 1_000; }
+  n.missedCall('peer:c1'); n.missedCall('peer:c2');
+  await flush();
+  expect(native.sendNotification).toHaveBeenCalledTimes(10);
+  // A minute after the first shown alert, one more fits.
+  clock = 1_000_000 + 60_000;
+  n.missedCall('peer:c3'); n.message({ ...message, id: 'late', sender: 'peer-late' }, 'me', 'Robin');
+  await flush();
+  expect(native.sendNotification).toHaveBeenCalledTimes(11);
+  expect(native.sendNotification).toHaveBeenLastCalledWith({ title: 'BitSov', body: 'You missed a call' });
+  n.dispose();
+});
+
+it('on a phone, an alert the system refused gives its slot back', async () => {
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  let clock = 1_000_000;
+  const n = createMessageNotifications({ mobile: true, now: () => clock });
+  native.sendNotification.mockRejectedValueOnce(new Error('refused'));
+  for (let i = 0; i < 11; i++) { n.message({ ...message, id: `m-${i}`, sender: `peer-${i}` }, 'me', 'Robin'); clock += 100; await flush(); }
+  // One refused, ten shown: the refused one did not count.
+  expect(native.sendNotification).toHaveBeenCalledTimes(11);
+  n.message({ ...message, id: 'm-over', sender: 'peer-over' }, 'me', 'Robin'); await flush();
+  expect(native.sendNotification).toHaveBeenCalledTimes(11);
+  n.dispose();
+});
+
 it.each(['en', 'da'] as const)('on an iPhone (%s), alerts name the bundled sound through the plugin; on Android they name none', async lang => {
   setLanguagePref(lang);
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
