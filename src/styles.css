@@ -2001,6 +2001,11 @@ html[data-keyboard-open='true'] .phone-tabs { display: none; }
   html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='true']:has(> .track:not([hidden])) { grid-template-rows: auto minmax(0, 1fr); grid-template-areas: 'status' 'content'; }
   .cc[data-phone-shell='true']:has(> .track:not([hidden])) .phone-tabs { display: none; }
 }
+/* Tablets from 768 px on (PhoneShell's TABLET_SPLIT_MIN_WIDTH): the chat list sits beside the
+   conversation. On touch, the list is a comfortable column, like a messaging app's. */
+@media (pointer: coarse) and (min-width: 768px) {
+  html:is([data-platform='ios'], [data-platform='android']) { --rail-w: clamp(320px, 28vw, 360px); }
+}
 @media (prefers-reduced-motion: no-preference) {
   .cc[data-phone-shell='true'] > .track:not([hidden]) { animation: phone-push var(--d-mid) var(--ease); }
   @keyframes phone-push { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
