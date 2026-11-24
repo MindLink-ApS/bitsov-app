@@ -26,7 +26,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::{EqualSid, TOKEN_QUERY};
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
@@ -108,7 +108,11 @@ impl PipeListener {
             && self.live_connections() < MAX_CONNECTIONS
             && client_is_owner(&self.waiting, &self.user);
         if !admit {
-            disconnect(&self.waiting)?;
+            // A disconnected instance takes no client until it is connected
+            // again, so it is replaced: the new one is created first, so the
+            // name is never released, and dropping the old one cuts the client.
+            let next = instance(&self.name, &self.descriptor, false)?;
+            drop(std::mem::replace(&mut self.waiting, next));
             return Ok(None);
         }
         let next = instance(&self.name, &self.descriptor, false)?;
@@ -141,8 +145,9 @@ fn instance(name: &[u16], descriptor: &SecurityDescriptor, first: bool) -> io::R
             name.as_ptr(),
             open_mode,
             policy::MCP_PIPE_MODE,
-            // One more than the cap: the instance that waits for the next client.
-            MAX_CONNECTIONS as u32 + 1,
+            // The cap, plus the instance that waits for the next client, plus
+            // its replacement while a refused client is being dropped.
+            MAX_CONNECTIONS as u32 + 2,
             BUFFER_BYTES,
             BUFFER_BYTES,
             0,
@@ -168,14 +173,6 @@ fn connect(pipe: &OwnedHandle) -> io::Result<bool> {
         ERROR_NO_DATA => Ok(false),
         code => Err(io::Error::from_raw_os_error(code as i32)),
     }
-}
-
-fn disconnect(pipe: &OwnedHandle) -> io::Result<()> {
-    // SAFETY: a valid pipe handle; the instance can be connected again.
-    if unsafe { DisconnectNamedPipe(pipe.as_raw_handle()) } == 0 {
-        return Err(last_error());
-    }
-    Ok(())
 }
 
 fn client_is_owner(pipe: &OwnedHandle, user: &UserSid) -> bool {
@@ -264,6 +261,9 @@ mod tests {
         assert!(listener.accept_one().unwrap().is_none(), "the ninth is refused");
         let mut buf = [0u8; 1];
         assert!(!matches!(late.read(&mut buf), Ok(n) if n > 0), "and disconnected");
+        // Still at the cap, a refused client leaves a fresh instance behind.
+        let _later = client(&name).unwrap();
+        assert!(listener.accept_one().unwrap().is_none(), "the cap holds");
         drop(connections.pop());
         let _again = client(&name).unwrap();
         assert!(listener.accept_one().unwrap().is_some(), "a freed slot takes a new client");
