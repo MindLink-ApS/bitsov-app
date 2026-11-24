@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 use super::identity::Identities;
 use super::pairing::{PairError, Pairing};
 use super::server::{Reads, MAX_FRAME_BYTES};
-use super::session::{AuditRow, Outcome, Registry, Sessions, MAX_CLIENT_NAME};
+use super::session::{clean, AuditRow, Outcome, Registry, Sessions, MAX_CLIENT_NAME};
 use super::store::R2_PAIRING_OPEN;
 use crate::ai::Topic;
 
@@ -105,10 +105,9 @@ impl Host {
     /// A refused hello or signature, or a revoked client's frame: audited
     /// (ADR A1 §1.4). The client id is cleaned and capped like every row.
     fn refuse_audited(&mut self, client: &str, reason: &str, now_ms: u64) -> Step {
-        let client: String = client.chars().filter(|c| !c.is_control()).take(MAX_CLIENT_NAME).collect();
         self.audit.push(AuditRow {
             at_ms: now_ms,
-            client,
+            client: clean(client, MAX_CLIENT_NAME),
             tool: HANDSHAKE_AUDIT_TOOL.to_owned(),
             arguments: reason.to_owned(),
             outcome: Outcome::NotAuthorised,
@@ -374,6 +373,16 @@ mod tests {
         assert_eq!(host.audit[0].tool, HANDSHAKE_AUDIT_TOOL);
         assert_eq!(host.audit[0].outcome, Outcome::NotAuthorised);
         assert_eq!(host.audit[0].client, "mcp-0000000000000000");
+
+        // An attacker-chosen id is cleaned like every other audit row: no control or
+        // bidi characters, trimmed, capped.
+        let mut conn = Conn::Start;
+        let hostile = format!("  \u{202e}evil\u{2066}\n{}  ", "x".repeat(200));
+        host.on_frame(&mut conn, &frame(json!({ "hello": hostile })), 1, &Fake);
+        let row = &host.audit[1].client;
+        assert!(row.starts_with("evil") && !row.contains('\u{202e}') && !row.contains('\u{2066}') && !row.contains('\n'));
+        assert_eq!(row, &crate::mcp::session::clean(&hostile, MAX_CLIENT_NAME));
+        assert!(row.chars().count() <= MAX_CLIENT_NAME);
     }
 
     #[test]
