@@ -1669,6 +1669,8 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .rail .track-link + .track-link { margin-top: 2px; }
   .send-btn.primary, .primary.soft.send-btn, .send-btn { height: 44px; border-radius: 22px; }
   .composer-info > summary { min-width: 44px; }
+  /* As on phones: `.track-head > .track-title-btn { min-width: 0 }` would keep a short name under 44 px. */
+  .track-head > .track-title-btn { min-width: 44px; }
   /* The message stamp row is 44 px tall so its cost toggle is a full target inside it. */
   .stamp { min-height: 44px; }
   .stamp .cost-toggle { min-height: 44px; min-width: 44px; justify-content: center; }

@@ -95,6 +95,11 @@ test.describe('touch', () => {
         // Every visible control, rail and open chat alike, is a 44 px touch target of its own:
         // hit at its centre and overlapping no other control.
         expect(await targetProblems(page)).toEqual([]);
+
+        // A short contact name keeps a 44 px wide title button.
+        const title = page.locator('section.track .track-head > .track-title-btn').first();
+        await title.locator('h1').evaluate((h) => { h.textContent = 'Al'; });
+        expect((await title.boundingBox())!.width, 'short title width').toBeGreaterThanOrEqual(44);
       });
     }
   }
