@@ -102,6 +102,7 @@ mod macos {
         idle: Duration,
         stopping: AtomicBool,
         live: Mutex<Live>,
+        spawn: Spawn,
     }
 
     /// The live connections (a handle each, to close them on stop) and their
@@ -134,12 +135,22 @@ mod macos {
             source: Arc<dyn ReadSource + Send + Sync>,
             idle: Duration,
         ) -> io::Result<Self> {
+            Self::start_spawning(dir, host, source, idle, spawn_thread)
+        }
+
+        fn start_spawning(
+            dir: &Path,
+            host: Arc<Mutex<Host>>,
+            source: Arc<dyn ReadSource + Send + Sync>,
+            idle: Duration,
+            spawn: Spawn,
+        ) -> io::Result<Self> {
             if idle.is_zero() {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "the idle timeout must not be zero"));
             }
             let listener = unix::bind(dir)?;
             let socket = dir.join(unix::SOCKET_NAME);
-            let shared = Arc::new(Shared { host, source, idle, stopping: AtomicBool::new(false), live: Mutex::default() });
+            let shared = Arc::new(Shared { host, source, idle, stopping: AtomicBool::new(false), live: Mutex::default(), spawn });
             let accepting = shared.clone();
             let accept = std::thread::Builder::new()
                 .name("mcp-accept".into())
@@ -235,18 +246,27 @@ mod macos {
         live.next += 1;
         live.streams.insert(key, handle);
         let place = Place { shared: shared.clone(), key };
-        let spawned = std::thread::Builder::new().name("mcp-conn".into()).spawn(move || {
+        // The thread is spawned with the lock released: if the spawn fails,
+        // the place is dropped here and its drop takes this same lock.
+        drop(live);
+        let spawned = (shared.spawn)(Box::new(move || {
             run_connection(&place.shared, stream);
             drop(place);
-        });
-        match spawned {
-            Ok(worker) => live.workers.push(worker),
-            Err(_) => {
-                if let Some(stream) = live.streams.remove(&key) {
-                    let _ = stream.shutdown(Shutdown::Both);
-                }
+        }));
+        // Only the accept thread admits, and stop() joins it before it takes
+        // the workers, so no worker can be missed here.
+        if let Ok(worker) = spawned {
+            if let Ok(mut live) = shared.live.lock() {
+                live.workers.push(worker);
             }
         }
+    }
+
+    /// How a connection thread is started (a test makes it fail).
+    type Spawn = fn(Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>>;
+
+    fn spawn_thread(work: Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>> {
+        std::thread::Builder::new().name("mcp-conn".into()).spawn(work)
     }
 
     /// One live connection's place. Dropping it, on every way out of the
@@ -284,6 +304,7 @@ mod macos {
             idle: IDLE_TIMEOUT,
             stopping: AtomicBool::new(false),
             live: Mutex::default(),
+            spawn: spawn_thread,
         });
         shared.live.lock().unwrap().streams.insert(7, served);
         let place = Place { shared: shared.clone(), key: 7 };
@@ -294,6 +315,43 @@ mod macos {
         assert!(ended.is_err());
         assert!(shared.live.lock().unwrap().streams.is_empty(), "the place is free");
         assert_eq!((&client).read(&mut [0u8; 1]).unwrap(), 0, "the client sees the end");
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn a_failed_thread_spawn_frees_the_place_and_neither_accept_nor_stop_hangs() {
+        use std::io::Read;
+        fn no_threads(_work: Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>> {
+            Err(io::Error::other("no thread for this test"))
+        }
+        struct Unused;
+        impl ReadSource for Unused {
+            fn reads_for(&self, _preset: crate::ai::Preset) -> Box<dyn crate::mcp::server::Reads + '_> {
+                unreachable!("no read in this test")
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("bsm-{}-sf", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let runner = Runner::start_spawning(&dir, Arc::new(Mutex::new(Host::default())), Arc::new(Unused), IDLE_TIMEOUT, no_threads).unwrap();
+        // On a thread with a deadline, so a deadlock fails the test instead of hanging it.
+        let (done, finished) = std::sync::mpsc::channel();
+        let socket = dir.join(unix::SOCKET_NAME);
+        std::thread::spawn(move || {
+            let mut runner = runner;
+            // Two in a row: the accept thread is still accepting after the first.
+            let ends: Vec<bool> = (0..2).map(|_| {
+                let client = UnixStream::connect(&socket).unwrap();
+                client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                matches!((&client).read(&mut [0u8; 1]), Ok(0))
+            }).collect();
+            let live = runner.live();
+            runner.stop();
+            let _ = done.send((ends, live));
+        });
+        let (ends, live) = finished.recv_timeout(Duration::from_secs(20)).expect("accept and stop() return");
+        assert_eq!(ends, [true, true], "each client sees the end");
+        assert_eq!(live, 0, "the place is free");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn run_connection(shared: &Shared, stream: UnixStream) {
