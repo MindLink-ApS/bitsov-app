@@ -223,12 +223,7 @@ impl PipeListener {
         }
         let next = instance(&self.name, &self.descriptor, false)?;
         let handle = std::mem::replace(&mut self.waiting, next);
-        let pipe = Arc::new(SharedPipe {
-            handle,
-            server: true,
-            closed: AtomicBool::new(false),
-            _slot: Some(Arc::clone(&self.live)),
-        });
+        let pipe = SharedPipe::new(handle, true, Some(Arc::clone(&self.live)))?;
         self.stop.register(&pipe)?;
         Ok(Some(PipeConnection { pipe }))
     }
@@ -384,12 +379,7 @@ pub fn connect_owner(name: &str) -> io::Result<OwnerPipe> {
             "the pipe is not served by this user's BitSov app",
         ));
     }
-    Ok(OwnerPipe(Arc::new(SharedPipe {
-        handle: pipe,
-        server: false,
-        closed: AtomicBool::new(false),
-        _slot: None,
-    })))
+    Ok(OwnerPipe(SharedPipe::new(pipe, false, None)?))
 }
 
 /// A client connection to this user's pipe, opened for overlapped I/O.
@@ -403,16 +393,32 @@ struct SharedPipe {
     server: bool,
     /// Set by [`Self::close`]; every later operation fails at once.
     closed: AtomicBool,
+    /// Set by [`Self::close`], never reset. Every pending operation waits on
+    /// it next to its own event, so one issued after the close still ends.
+    closing: OwnedHandle,
     _slot: Option<Arc<()>>,
 }
 
 impl SharedPipe {
-    /// End the connection now, from any thread. On the server end the pipe is
-    /// disconnected first, so an operation started after this fails at once;
-    /// then every operation pending on the handle, from either half, is
-    /// cancelled. The handle itself closes when both halves are dropped.
+    fn new(handle: OwnedHandle, server: bool, slot: Option<Arc<()>>) -> io::Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            handle,
+            server,
+            closed: AtomicBool::new(false),
+            closing: manual_reset_event()?,
+            _slot: slot,
+        }))
+    }
+
+    /// End the connection now, from any thread, and for good: an operation
+    /// pending now, or issued at any time after, returns `ConnectionAborted`.
+    /// The flag and the `closing` event cover operations that start after the
+    /// cancel below; the server end is also disconnected, so the client sees
+    /// the pipe end. The handle itself closes when both halves are dropped.
     fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        // SAFETY: a valid event handle owned by this pipe.
+        unsafe { SetEvent(self.closing.as_raw_handle()) };
         let handle = self.handle.as_raw_handle();
         if self.server {
             // SAFETY: a valid server pipe handle. The client sees the pipe end;
@@ -442,10 +448,10 @@ impl std::fmt::Debug for PipeCloser {
 
 impl PipeCloser {
     /// A read or write blocked on either half returns an error of kind
-    /// [`io::ErrorKind::ConnectionAborted`], and so does every later one. On a
-    /// server connection the client sees the pipe end at once. On a client
-    /// pipe only the operations pending at this moment are cancelled; later
-    /// ones fail as soon as they start. A no-op once both halves are gone.
+    /// [`io::ErrorKind::ConnectionAborted`], and so does every later one, on
+    /// a server connection or a client pipe alike, including one that was
+    /// starting while the close ran. On a server connection the client also
+    /// sees the pipe end at once. A no-op once both halves are gone.
     pub fn close(&self) {
         if let Some(pipe) = self.0.upgrade() {
             pipe.close();
@@ -552,6 +558,7 @@ impl PipeHalf {
         let mut overlapped = OVERLAPPED { hEvent: self.event.as_raw_handle(), ..Default::default() };
         let handle = self.pipe.handle.as_raw_handle();
         let mut cancelled = false;
+        let mut wait_failed = None;
         if start(handle, &mut overlapped) == 0 {
             // SAFETY: reads this thread's last-error value.
             let code = unsafe { GetLastError() };
@@ -563,15 +570,19 @@ impl PipeHalf {
                 ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED => return Ok(0),
                 code => return Err(io::Error::from_raw_os_error(code as i32)),
             }
-            if wait_ms != INFINITE
-                // SAFETY: a valid event handle, set when the operation completes.
-                && unsafe { WaitForSingleObject(self.event.as_raw_handle(), wait_ms) } == WAIT_TIMEOUT
-            {
+            // This operation's event first: if it completed as the close or
+            // the timeout came, its result is kept.
+            let waits = [self.event.as_raw_handle(), self.pipe.closing.as_raw_handle()];
+            // SAFETY: two valid event handles.
+            let woke = unsafe { WaitForMultipleObjects(2, waits.as_ptr(), 0, wait_ms) };
+            if woke != WAIT_OBJECT_0 {
+                // Closed, timed out, or the wait failed: cancel this operation.
+                wait_failed = (woke != WAIT_OBJECT_0 + 1 && woke != WAIT_TIMEOUT).then(last_error);
+                cancelled = woke == WAIT_TIMEOUT;
                 // SAFETY: cancels only this operation on this handle; the wait
                 // below keeps the buffer and `overlapped` alive until it lands.
                 // If it completed meanwhile, there is nothing to cancel.
                 unsafe { CancelIoEx(handle, &overlapped) };
-                cancelled = true;
             }
         }
         let mut done = 0u32;
@@ -583,6 +594,9 @@ impl PipeHalf {
             let code = unsafe { GetLastError() };
             if self.pipe.is_closed() {
                 return Err(closed_error());
+            }
+            if let Some(error) = wait_failed {
+                return Err(error);
             }
             return match code {
                 ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED => Ok(0),
@@ -936,6 +950,33 @@ mod tests {
     #[test]
     fn a_closer_ends_a_blocked_read_and_write() {
         blocked_halves_end_when(|closer, _| closer.close());
+    }
+
+    /// The close is sticky: a read or write started after it, on the server
+    /// or the client side, fails at once instead of waiting for data.
+    #[test]
+    fn an_operation_started_after_close_is_aborted_promptly() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let name = test_name();
+        let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
+        let (client_in, client_out) = connect_owner(&name).unwrap().split().unwrap();
+        let (server_in, server_out) = listener.accept_owner().unwrap().split().unwrap();
+        // The client first, while the server end is still open: nothing but
+        // the close can end a client read there.
+        for (label, mut reader, mut writer) in [("client", client_in, client_out), ("server", server_in, server_out)] {
+            reader.closer().close();
+            let (tx, rx) = channel();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8];
+                let read = reader.read(&mut buf).map_err(|e| e.kind());
+                let write = writer.write(b"late\n").map_err(|e| e.kind());
+                tx.send((read, write)).unwrap();
+            });
+            let (read, write) = rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| panic!("{label}: hangs after close"));
+            assert_eq!(read, Err(io::ErrorKind::ConnectionAborted), "{label} read");
+            assert_eq!(write, Err(io::ErrorKind::ConnectionAborted), "{label} write");
+        }
     }
 
     #[test]
