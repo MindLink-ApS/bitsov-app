@@ -15,6 +15,12 @@ const save = (key: string, value: boolean) => { try { localStorage.setItem(key, 
 const notificationsMuted = () => read(MUTED);
 let nextCallNotification = 1_000_000;
 
+/**
+ * The sound iPhone alerts ask for. The notification plugin plays a named sound on iOS only when
+ * one is given, and the host writes this file into the app's `Library/Sounds` at startup
+ * (`alert_sound.rs`). Android alerts name no sound and get the system default.
+ */
+export const PHONE_SOUND = 'bitsov-alert.caf';
 /** One phone notification per contact at most this often; later ones in the window are dropped. */
 export const PHONE_NOTIFY_COOLDOWN_MS = 30_000;
 
@@ -24,8 +30,9 @@ export const PHONE_NOTIFY_COOLDOWN_MS = 30_000;
  * amounts or ids), alerts fire only while the app is in the background, a contact gets at
  * most one per `PHONE_NOTIFY_COOLDOWN_MS`, and a call that went unanswered says so once.
  */
-export function createMessageNotifications(options: { mobile?: boolean; now?: () => number } = {}) {
+export function createMessageNotifications(options: { mobile?: boolean; ios?: boolean; now?: () => number } = {}) {
   const mobile = options.mobile ?? false;
+  const ios = mobile && (options.ios ?? false);
   const now = options.now ?? (() => Date.now());
   // Calls (with their Show call action) and owner approvals stay on the Mac. Windows and
   // Linux get plain message delivery: no action types, listeners or window restoration.
@@ -86,7 +93,7 @@ export function createMessageNotifications(options: { mobile?: boolean; now?: ()
     try {
       if (mobile) {
         if (foreground() || !await isPermissionGranted() || disposed || muted() || foreground()) return false;
-        await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body } });
+        await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body, ...(ios ? { sound: PHONE_SOUND } : {}) } });
         return true;
       }
       const window = getCurrentWindow();
