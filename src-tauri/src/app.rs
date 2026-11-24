@@ -8435,6 +8435,22 @@ async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSa
     })
 }
 
+/// Android: fetch, then save into the shared Downloads collection through the
+/// app's MediaStore plugin (Android 10+). Nothing is replaced: a taken name is
+/// renamed by the system.
+#[cfg(target_os = "android")]
+async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSaveResult, String> {
+    let blob = do_file_fetch(state, message_id).await?;
+    let request = crate::file_save_android::request(&blob.filename, &blob.mime_type, &blob.data_b64)?;
+    crate::file_save_android::save(request).await?;
+    Ok(act::FileSaveResult {
+        saved: true,
+        filename: blob.filename,
+        mime_type: blob.mime_type,
+        size_bytes: blob.size_bytes,
+    })
+}
+
 /// iOS: fetch, then write into the app's own Documents folder, which the Files
 /// app shows under BitSov (`UIFileSharingEnabled`). Never replaces a file:
 /// a taken name becomes `name (2)`. Nothing else of the app lives there.
@@ -8453,7 +8469,7 @@ async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSa
     })
 }
 
-#[cfg(all(any(mobile, feature = "mobile"), not(target_os = "ios")))]
+#[cfg(all(any(mobile, feature = "mobile"), not(any(target_os = "ios", target_os = "android"))))]
 async fn do_file_save(
     _state: &NodeState,
     _message_id: &str,
@@ -12538,6 +12554,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(crate::android_network::init())
         .plugin(crate::pairing_link_mobile::init())
         .plugin(crate::phone_recovery::init())
+        .plugin(crate::file_save_android::init())
         .plugin(tauri_plugin_barcode_scanner::init());
     // iOS device keys use the statically linked Apple enclave bridge;
     // the QR scanner is the only mobile plugin. Pairing

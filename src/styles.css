@@ -1657,6 +1657,25 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   :root { --input-font-min: 16px; }
 }
 
+/* Touch screens wider than a phone (tablets) keep the desktop rail, but every
+   control a finger reaches is a real 44 px target, as on phones; a mouse keeps
+   the compact sizes. No invisible overhanging tap layers: each target is its own
+   box, so neighbouring targets never overlap (WCAG 2.5.8). */
+@media (pointer: coarse) {
+  button:not(.link), summary, [role='tab'], [role='radio'], [role='menuitem'] { min-height: 44px; }
+  button:not(.link) { min-width: 44px; }
+  /* A .link that stands alone (Back, Save, Retry, Restore) is an action; one inside a sentence stays a text link. */
+  button.link:not(:is(p, li, .hint, .stamp) *) { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; }
+  .rail .track-link + .track-link { margin-top: 2px; }
+  .send-btn.primary, .primary.soft.send-btn, .send-btn { height: 44px; border-radius: 22px; }
+  .composer-info > summary { min-width: 44px; }
+  /* As on phones: `.track-head > .track-title-btn { min-width: 0 }` would keep a short name under 44 px. */
+  .track-head > .track-title-btn { min-width: 44px; }
+  /* The message stamp row is 44 px tall so its cost toggle is a full target inside it. */
+  .stamp { min-height: 44px; }
+  .stamp .cost-toggle { min-height: 44px; min-width: 44px; justify-content: center; }
+}
+
 /* Mobile WKWebView draws edge to edge with viewport-fit=cover. The shell
    owns each inset once, so its bar and composer stay inside it
    in both orientations. Fixed overlays need their own safe content area.
@@ -1970,6 +1989,18 @@ html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='
 .cc[data-phone-shell='true'] .composer { padding-bottom: var(--s-3); }
 html[data-keyboard-open='true'] .cc[data-phone-shell='true'] { grid-template-rows: auto minmax(0, 1fr); grid-template-areas: 'status' 'content'; }
 html[data-keyboard-open='true'] .phone-tabs { display: none; }
+/* A phone on its side has about 320–430 px of height. When the status header wraps, it could push
+   the open chat under the bottom tabs, out of reach of Send, + and the microphone. There the status
+   header (which scrolls) takes at most 30% of the height. In the shortest windows, where even that
+   leaves the chat too little room, the tabs step aside while a chat is open, as they do for the
+   keyboard; the chat's Back stays, and the tabs return on the list. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .phone-status { max-height: 30vh; }
+}
+@media (orientation: landscape) and (max-height: 360px) {
+  html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='true']:has(> .track:not([hidden])) { grid-template-rows: auto minmax(0, 1fr); grid-template-areas: 'status' 'content'; }
+  .cc[data-phone-shell='true']:has(> .track:not([hidden])) .phone-tabs { display: none; }
+}
 @media (prefers-reduced-motion: no-preference) {
   .cc[data-phone-shell='true'] > .track:not([hidden]) { animation: phone-push var(--d-mid) var(--ease); }
   @keyframes phone-push { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
