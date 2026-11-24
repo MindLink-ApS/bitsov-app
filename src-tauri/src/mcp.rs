@@ -336,6 +336,8 @@ pub mod broker;
 pub mod identity;
 /// Phase 1, slice 5: pairing requests with a six-word code, approved by the owner (not wired).
 pub mod pairing;
+/// Phase 1, slice A1.1: the sealed approved-clients file, fail closed (not wired).
+pub mod store;
 
 #[cfg(test)]
 mod tests;
