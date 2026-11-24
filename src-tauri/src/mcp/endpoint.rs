@@ -850,7 +850,7 @@ mod tests {
 
         let Begin::Read(pending) = host.begin_frame(&mut conn, call, 14) else { panic!("a read to run") };
         let done = pending.read(call, &Fixed(&Fake));
-        host.revoke(&id).unwrap();
+        host.revoke_saved(&MemFile::default(), Some(&TagSealer), &id).unwrap();
         let step = host.finish_frame(&mut conn, pending, done);
         assert_eq!(reply(&step)["error"], "client not authorised", "the read's result is not sent");
         assert!(step.close);
