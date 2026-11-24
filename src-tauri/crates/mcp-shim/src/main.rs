@@ -38,9 +38,14 @@ mod platform {
     use std::io::{self, BufReader};
 
     #[cfg(target_os = "macos")]
-    pub type Stream = std::os::unix::net::UnixStream;
+    pub type Reader = std::os::unix::net::UnixStream;
+    #[cfg(target_os = "macos")]
+    pub type Writer = std::os::unix::net::UnixStream;
+    // Two overlapped halves: a read waiting on the app never holds up a write.
     #[cfg(windows)]
-    pub type Stream = std::fs::File;
+    pub type Reader = bitsov_mcp::windows::PipeHalf;
+    #[cfg(windows)]
+    pub type Writer = bitsov_mcp::windows::PipeHalf;
 
     #[cfg(target_os = "macos")]
     pub fn default_endpoint() -> io::Result<String> {
@@ -51,19 +56,22 @@ mod platform {
         bitsov_mcp::windows::default_pipe()
     }
 
-    pub fn connect(endpoint: &str) -> io::Result<(BufReader<Stream>, Stream)> {
+    pub fn connect(endpoint: &str) -> io::Result<(BufReader<Reader>, Writer)> {
+        let unreachable = |e: io::Error| io::Error::new(e.kind(),
+            format!("cannot reach the BitSov app ({e}); is it open with AI clients turned on?"));
         #[cfg(target_os = "macos")]
-        let stream = bitsov_mcp::macos::connect(std::path::Path::new(endpoint));
+        let (reader, writer) = {
+            let stream = bitsov_mcp::macos::connect(std::path::Path::new(endpoint)).map_err(unreachable)?;
+            (stream.try_clone()?, stream)
+        };
         #[cfg(windows)]
-        let stream = bitsov_mcp::windows::connect(endpoint);
-        let stream = stream.map_err(|e| io::Error::new(e.kind(),
-            format!("cannot reach the BitSov app ({e}); is it open with AI clients turned on?")))?;
-        Ok((BufReader::new(stream.try_clone()?), stream))
+        let (reader, writer) = bitsov_mcp::windows::connect(endpoint).map_err(unreachable)?;
+        Ok((BufReader::new(reader), writer))
     }
 
     /// The client's input ended: half-close the socket (macOS), or end the
     /// process, which closes the pipe (Windows pipes have no half-close).
-    pub fn client_ended(stream: Stream) {
+    pub fn client_ended(stream: Writer) {
         #[cfg(target_os = "macos")]
         {
             let _ = stream.shutdown(std::net::Shutdown::Write);

@@ -348,8 +348,9 @@ pub mod key_file {
 /// Reaching the app on Windows: this user's pipe, served by this user.
 #[cfg(windows)]
 pub mod windows {
-    use std::fs::File;
     use std::io;
+
+    pub use bitsov_ffi::win_private::pipe::PipeHalf;
 
     /// The current user's pipe name, `\\.\pipe\bitsov-mcp-<SID>`.
     pub fn default_pipe() -> io::Result<String> {
@@ -357,8 +358,10 @@ pub mod windows {
     }
 
     /// Connect only when the pipe's server process is this user, not elevated.
-    pub fn connect(name: &str) -> io::Result<File> {
-        bitsov_ffi::win_private::pipe::connect_owner(name)
+    /// Returns a read half and a write half that work at the same time
+    /// (overlapped I/O), as the relay needs.
+    pub fn connect(name: &str) -> io::Result<(PipeHalf, PipeHalf)> {
+        bitsov_ffi::win_private::pipe::connect_owner(name)?.split()
     }
 }
 
