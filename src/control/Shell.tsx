@@ -2362,7 +2362,8 @@ export function ControlCenter(props: Props) {
               onEnded={() => { void loadBudget(); void loadWallet(); }} />
           </Show>
           <Show when={notifications && props.active && !contextOpen() && walletTab() === null}>
-            <Show when={notifications!.calls && (callView().phase !== 'idle' || waitingCalls().length > 0)}><NotificationSettings notifications={notifications!} offer /></Show>
+            {/* Mac: when a call needs the OS. Phones: after the first real incoming message, never at launch. */}
+            <Show when={(notifications!.calls && (callView().phase !== 'idle' || waitingCalls().length > 0)) || notifications!.offerOnPhone()}><NotificationSettings notifications={notifications!} offer /></Show>
           </Show>
           <Show when={moneyBlocked() && !phoneShell() && streamFrames() === 0}>
             <div class="money-notice-float">{moneyNotice()}</div>

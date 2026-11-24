@@ -371,3 +371,36 @@ it('a missed call is said once on a phone, without a name; never on a computer',
   expect(native.sendNotification).not.toHaveBeenCalled();
   computer.dispose();
 });
+
+it('phones offer permission only after the first real incoming message, never at launch, and remember it', async () => {
+  localStorage.removeItem('bitsov.notifications.asked'); localStorage.removeItem('bitsov.notifications.enabled');
+  localStorage.removeItem('bitsov.notifications.heard'); localStorage.removeItem('bitsov.notifications.deferred');
+  native.isPermissionGranted.mockResolvedValue(false);
+  const n = createMessageNotifications({ mobile: true, ios: true });
+  await n.checkPermission();
+  expect(n.permission()).toBe('prompt');
+  expect(n.offerOnPhone()).toBe(false);
+  // Own, unpaid and call-signal messages are not a reason to ask.
+  n.message({ ...message, sender: 'me' }, 'me', 'Me');
+  n.message({ ...message, payment_amount_msat: 0 }, 'me', 'Robin');
+  n.message({ ...message, kind: 400 }, 'me', 'Robin');
+  expect(n.offerOnPhone()).toBe(false);
+  n.message(message, 'me', 'Robin'); await flush();
+  expect(n.offerOnPhone()).toBe(true);
+  // Arrival never prompts by itself; the visible offer owns the tap.
+  expect(native.requestPermission).not.toHaveBeenCalled();
+  mount = document.createElement('div'); document.body.append(mount);
+  dispose = render(() => <NotificationSettings notifications={n} offer />, mount);
+  expect(mount.querySelector('[data-notification-enable]')).not.toBeNull();
+  const later = createMessageNotifications({ mobile: true });
+  await later.checkPermission();
+  expect(later.offerOnPhone()).toBe(true);
+  later.defer();
+  expect(later.offerOnPhone()).toBe(false);
+  // Desktop is unchanged: no offer from messages.
+  const desk = createMessageNotifications();
+  await desk.checkPermission();
+  desk.message({ ...message, id: 'm2' }, 'me', 'Robin');
+  expect(desk.offerOnPhone()).toBe(false);
+  desk.dispose(); later.dispose(); n.dispose();
+});
