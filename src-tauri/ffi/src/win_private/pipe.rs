@@ -10,6 +10,11 @@
 //! - A client whose process token is not this user, is elevated, or cannot be
 //!   read is disconnected before a byte is read. So is a client over the cap.
 //!
+//! The client side ([`connect_owner`], used by the `bitsov-mcp` shim) checks the
+//! server the same way: a pipe served by another user, or by an elevated
+//! process, is closed before a byte is written. It also opens the pipe at
+//! identification level only, so a server can never act as the client.
+//!
 //! Residual: the client is found by process id (`GetNamedPipeClientProcessId`).
 //! A client that exits right after connecting could have its id reused by a
 //! new process; that process passes only if it is this user, unelevated.
@@ -21,16 +26,21 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
+    GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
+    ERROR_PIPE_NOT_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
 };
+use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::Security::{EqualSid, TOKEN_QUERY};
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::Storage::FileSystem::{
+    ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
+    SECURITY_IDENTIFICATION,
+};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateEventW, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 use super::{
@@ -175,10 +185,150 @@ fn connect(pipe: &OwnedHandle) -> io::Result<bool> {
     }
 }
 
+/// The current user's MCP pipe name. Refused in an elevated process.
+pub fn current_user_pipe_name() -> io::Result<String> {
+    let user = current_user()?;
+    policy::mcp_pipe_name(user.as_str()).map_err(refused)
+}
+
+/// Client side: open the pipe `name` and keep it only if its server process is
+/// this user and not elevated. Refused in an elevated process.
+///
+/// The pipe is opened for overlapped I/O and handed out as a read half and a
+/// write half ([`OwnerPipe::split`]). A synchronous pipe handle serialises
+/// every operation on it, so a read blocked waiting for the app would hold up
+/// a write from another thread, and the relay would deadlock. Each half has
+/// its own event, and a read and a write can be in flight at the same time.
+pub fn connect_owner(name: &str) -> io::Result<OwnerPipe> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let user = current_user()?;
+    let pipe = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OVERLAPPED)
+        // Identification level: the server can read who we are, never act as us.
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(name)?;
+    let pipe = OwnedHandle::from(pipe);
+    let mut pid = 0u32;
+    // SAFETY: an open pipe handle and a valid out pointer.
+    let found = unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } != 0;
+    if !found || !process_is_owner(pid, &user) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the pipe is not served by this user's BitSov app",
+        ));
+    }
+    Ok(OwnerPipe(Arc::new(pipe)))
+}
+
+/// A client connection to this user's pipe, opened for overlapped I/O.
+pub struct OwnerPipe(Arc<OwnedHandle>);
+
+impl std::fmt::Debug for OwnerPipe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OwnerPipe(..)")
+    }
+}
+
+impl OwnerPipe {
+    /// A read half and a write half, usable from two threads at once.
+    pub fn split(self) -> io::Result<(PipeHalf, PipeHalf)> {
+        Ok((PipeHalf::new(Arc::clone(&self.0))?, PipeHalf::new(self.0)?))
+    }
+}
+
+/// One direction of an [`OwnerPipe`]: its own event and `OVERLAPPED`, one
+/// operation at a time. The pipe closes when both halves are dropped.
+pub struct PipeHalf {
+    pipe: Arc<OwnedHandle>,
+    event: OwnedHandle,
+}
+
+impl std::fmt::Debug for PipeHalf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PipeHalf(..)")
+    }
+}
+
+impl PipeHalf {
+    fn new(pipe: Arc<OwnedHandle>) -> io::Result<Self> {
+        // SAFETY: an unnamed manual-reset event, default security; owned below.
+        let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        if event.is_null() {
+            return Err(last_error());
+        }
+        // SAFETY: the handle was just returned to us and is closed exactly once.
+        Ok(Self { pipe, event: unsafe { OwnedHandle::from_raw_handle(event) } })
+    }
+
+    /// Run one overlapped operation to completion. `start` issues it with the
+    /// given `OVERLAPPED`; this waits for it before returning, so the buffer
+    /// and the `OVERLAPPED` outlive the operation.
+    fn complete(&mut self, start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32) -> io::Result<usize> {
+        let mut overlapped = OVERLAPPED { hEvent: self.event.as_raw_handle(), ..Default::default() };
+        let handle = self.pipe.as_raw_handle();
+        if start(handle, &mut overlapped) == 0 {
+            // SAFETY: reads this thread's last-error value.
+            match unsafe { GetLastError() } {
+                ERROR_IO_PENDING => {}
+                ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED => return Ok(0),
+                code => return Err(io::Error::from_raw_os_error(code as i32)),
+            }
+        }
+        let mut done = 0u32;
+        // SAFETY: the operation was issued on `handle` with `overlapped`, both
+        // alive here; waiting (TRUE) returns only once it has completed.
+        if unsafe { GetOverlappedResult(handle, &overlapped, &mut done, 1) } == 0 {
+            // SAFETY: reads this thread's last-error value.
+            return match unsafe { GetLastError() } {
+                ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED => Ok(0),
+                code => Err(io::Error::from_raw_os_error(code as i32)),
+            };
+        }
+        Ok(done as usize)
+    }
+}
+
+impl io::Read for PipeHalf {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let len = buf.len().min(u32::MAX as usize) as u32;
+        let ptr = buf.as_mut_ptr();
+        // SAFETY: `ptr` is valid for `len` bytes until `complete` returns.
+        self.complete(|handle, overlapped| unsafe { ReadFile(handle, ptr, len, std::ptr::null_mut(), overlapped) })
+    }
+}
+
+impl io::Write for PipeHalf {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let len = buf.len().min(u32::MAX as usize) as u32;
+        let ptr = buf.as_ptr();
+        // SAFETY: `ptr` is valid for `len` bytes until `complete` returns.
+        let written = self.complete(|handle, overlapped| unsafe { WriteFile(handle, ptr, len, std::ptr::null_mut(), overlapped) })?;
+        if written == 0 && len > 0 {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the app closed the connection"));
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn client_is_owner(pipe: &OwnedHandle, user: &UserSid) -> bool {
     let mut pid = 0u32;
     // SAFETY: a connected pipe handle and a valid out pointer.
-    if unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) } == 0 || pid == 0 {
+    if unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) } == 0 {
+        return false;
+    }
+    process_is_owner(pid, user)
+}
+
+/// The process `pid` runs as `user` and is not elevated. Any failure to tell
+/// is a no.
+fn process_is_owner(pid: u32, user: &UserSid) -> bool {
+    if pid == 0 {
         return false;
     }
     // SAFETY: query-only access; the handle is owned just below.
@@ -270,9 +420,65 @@ mod tests {
     }
 
     #[test]
+    fn a_client_connects_only_to_a_pipe_served_by_this_user() {
+        let name = test_name();
+        let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
+        let (_reader, mut writer) = connect_owner(&name).expect("served by this user").split().unwrap();
+        let connection = listener.accept_owner().unwrap();
+        writer.write_all(b"ping\n").unwrap();
+        let mut got = [0u8; 5];
+        (&*connection.pipe()).read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"ping\n");
+        assert!(connect_owner(&test_name()).is_err(), "no such pipe");
+    }
+
+    /// The relay's shape: one thread blocked reading from the app while
+    /// another writes to it. With one synchronous handle the write waited
+    /// behind the read and nothing moved.
+    #[test]
+    fn a_write_goes_through_while_a_read_waits_on_the_same_pipe() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let name = test_name();
+        let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
+        let (mut reader, mut writer) = connect_owner(&name).unwrap().split().unwrap();
+        let connection = listener.accept_owner().unwrap();
+
+        let (got_tx, got_rx) = channel();
+        std::thread::spawn(move || {
+            let mut reply = [0u8; 5];
+            got_tx.send(reader.read_exact(&mut reply).map(|()| reply)).unwrap();
+        });
+        // Let the reader block in its read first.
+        std::thread::sleep(Duration::from_millis(200));
+        let (sent_tx, sent_rx) = channel();
+        std::thread::spawn(move || sent_tx.send(writer.write_all(b"ping\n").map(|()| writer)).unwrap());
+        let _writer = sent_rx.recv_timeout(Duration::from_secs(5)).expect("the write is not held up by the read").unwrap();
+
+        let mut request = [0u8; 5];
+        (&*connection.pipe()).read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"ping\n");
+        (&*connection.pipe()).write_all(b"pong\n").unwrap();
+        let reply = got_rx.recv_timeout(Duration::from_secs(5)).expect("the read completes").unwrap();
+        assert_eq!(&reply, b"pong\n");
+
+        // The app closing the connection reads as the end of the stream.
+        let (mut reader, _writer) = {
+            let name = test_name();
+            let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
+            let halves = connect_owner(&name).unwrap().split().unwrap();
+            drop(listener.accept_owner().unwrap());
+            halves
+        };
+        let mut rest = Vec::new();
+        assert_eq!(reader.read_to_end(&mut rest).unwrap(), 0);
+    }
+
+    #[test]
     fn the_pipe_name_is_per_user() {
         let user = current_user().unwrap();
         let name = policy::mcp_pipe_name(user.as_str()).unwrap();
         assert!(name.starts_with(r"\\.\pipe\bitsov-mcp-S-1-"));
+        assert_eq!(current_user_pipe_name().unwrap(), name);
     }
 }

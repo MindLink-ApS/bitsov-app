@@ -66,6 +66,9 @@ jobs:
           sel='select(.profile.test == true and .executable != null) | .executable'
           cargo test --locked -p bitsov-ffi --no-run --message-format=json | jq -r "$sel" > "$RUNNER_TEMP/ffi-tests.txt"
           cargo test --locked -p bitsov-app --lib --no-run --message-format=json | jq -r "$sel" > "$RUNNER_TEMP/app-tests.txt"
+          # The MCP shim (owner-only pipe client, private key file) and its wire format.
+          # Listed with the ffi binaries: those run unfiltered (the app list runs only its store suites).
+          cargo test --locked -p bitsov-mcp -p bitsov-mcp-wire --no-run --message-format=json | jq -r "$sel" >> "$RUNNER_TEMP/ffi-tests.txt"
           cat "$RUNNER_TEMP/ffi-tests.txt" "$RUNNER_TEMP/app-tests.txt"
       - name: Windows store tests as a standard user (not elevated)
         shell: pwsh
