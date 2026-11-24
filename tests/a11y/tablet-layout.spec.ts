@@ -1,10 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
 import { PHONE_SHELL_PREVIEW } from './phoneShellPreview';
 
-// iPad-sized windows, through the phone-shell preview page. An iPad is an iOS platform; above 680 px
-// wide it gets the desktop rail, below it the phone tabs (src/control/PhoneShell.tsx). On a touch
-// screen every visible control is a 44 px touch target of its own (no overlapping tap layers);
-// with a mouse the rail keeps its compact rows and Send its compact size.
+// iPad-sized windows, through the phone-shell preview page. An iPad is an iOS platform; from 768 px
+// wide it shows the chat list beside the conversation, below that the phone tabs
+// (src/control/PhoneShell.tsx, by window width, so split-screen follows). On a touch screen the
+// list is a 320-360 px column and every visible control is a 44 px touch target of its own (no
+// overlapping tap layers); with a mouse the rail keeps its compact rows and Send its compact size.
 const IPAD_UA =
   'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
 
@@ -102,6 +103,33 @@ test.describe('touch', () => {
         expect((await title.boundingBox())!.width, 'short title width').toBeGreaterThanOrEqual(44);
       });
     }
+  }
+});
+
+test.describe('split view', () => {
+  test.use({ userAgent: IPAD_UA, hasTouch: true, isMobile: true });
+  for (const size of SIZES.filter((s) => s.width >= 768)) {
+    test(`iPad ${size.width}x${size.height}: the chat list sits beside the conversation, and You and Wallet are in reach`, async ({ page }) => {
+      await open(page, size.width, size.height, 'en');
+      await expect(page.locator('[data-phone-tabs]')).toHaveCount(0);
+      await page.locator('.rail [data-track^="peer:"]').first().click();
+      const rail = (await page.locator('.rail').boundingBox())!;
+      const chat = (await page.locator('section.track').first().boundingBox())!;
+      expect(rail.width, 'list column width').toBeGreaterThanOrEqual(320);
+      expect(rail.width, 'list column width').toBeLessThanOrEqual(361);
+      expect(rail.x + rail.width, 'the list is left of the conversation').toBeLessThanOrEqual(chat.x + 1);
+      expect(chat.width, 'the conversation keeps the rest').toBeGreaterThanOrEqual(size.width - rail.width - 2);
+      await expect(page.locator('section.track .composer').first()).toBeInViewport();
+      await page.locator('.rail [data-profile]').click();
+      await expect(page.locator('[data-avatar-menu] [data-open-wallet]')).toBeInViewport();
+    });
+  }
+  for (const size of [{ width: 744, height: 1133 }, { width: 507, height: 1180 }, { width: 767, height: 1024 }]) {
+    test(`iPad window ${size.width}x${size.height} (mini portrait, split-screen): one column with the phone tabs`, async ({ page }) => {
+      await open(page, size.width, size.height, 'en');
+      await expect(page.locator('[data-phone-tabs]')).toBeVisible();
+      await expect(page.locator('.rail')).toHaveCount(0);
+    });
   }
 });
 
