@@ -330,6 +330,8 @@ fn check_inner(grant: &ClientGrant, req: &Request<'_>, now_ms: u64, spent: Grant
 pub mod server;
 /// Phase 1, slice 2: per-client sessions (registry, revoke, rate limit, audit; not wired).
 pub mod session;
+/// Phase 1, slice 3: the read broker (closed node reads, counts by default; not wired).
+pub mod broker;
 
 #[cfg(test)]
 mod tests;
