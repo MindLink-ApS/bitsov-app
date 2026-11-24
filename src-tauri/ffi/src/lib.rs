@@ -63,6 +63,9 @@ pub mod phone_recovery;
 #[cfg(target_os = "ios")]
 pub mod call_audio;
 
+#[cfg(target_os = "ios")]
+pub mod file_protection;
+
 /// Latency-critical activity while a call is live. The Swift bridge is built
 /// only on a macOS desktop build.
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
