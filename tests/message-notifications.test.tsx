@@ -246,7 +246,7 @@ it.each(['en', 'da'] as const)('on a phone (%s), a message notification is gener
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
   const n = createMessageNotifications({ mobile: true });
   n.message(message, 'me', 'Robin'); await flush();
-  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: lang === 'en' ? 'You have a new message' : 'Du har en ny besked', sound: 'default' });
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: lang === 'en' ? 'You have a new message' : 'Du har en ny besked' });
   const sent = JSON.stringify(native.sendNotification.mock.calls);
   for (const hidden of ['Robin', 'SECRET', 'peer', '2000', 'sat']) expect(sent).not.toContain(hidden);
   // Phones never use the desktop window focus API or call action types.
@@ -291,7 +291,7 @@ it.each([
   const shownBefore = native.sendNotification.mock.calls.filter(([o]) => o).length;
   clock += 5_000; n.message({ ...message, id: 'b' }, 'me', 'Robin'); await flush();
   expect(native.sendNotification.mock.calls.length - shownBefore).toBe(1);
-  expect(native.sendNotification).toHaveBeenLastCalledWith({ title: 'BitSov', body: 'You have a new message', sound: 'default' });
+  expect(native.sendNotification).toHaveBeenLastCalledWith({ title: 'BitSov', body: 'You have a new message' });
   // That one was shown: the next within 30 s is held back.
   clock += 5_000; n.message({ ...message, id: 'c' }, 'me', 'Robin'); await flush();
   expect(native.sendNotification.mock.calls.length - shownBefore).toBe(1);
@@ -302,7 +302,7 @@ it('a missed call is said once on a phone, without a name; never on a computer',
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
   const phone = createMessageNotifications({ mobile: true });
   phone.missedCall('peer:c1'); phone.missedCall('peer:c1'); await flush();
-  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'You missed a call', sound: 'default' });
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'You missed a call' });
   phone.dispose();
   native.sendNotification.mockClear();
   const computer = createMessageNotifications();
