@@ -256,6 +256,20 @@ pub mod key_file {
         Ok(ClientKey { id: id.to_owned(), secret })
     }
 
+    /// Before pairing: refuse if anything at all is at the key path (a good
+    /// key, a damaged or widened file, a link). The app hands a secret over
+    /// only once, so pairing must not start unless that secret can be saved.
+    pub fn ready_to_pair(dir: &Path) -> io::Result<()> {
+        match std::fs::symlink_metadata(dir.join(FILE_NAME)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "a key file is already there (paired, or damaged); run `bitsov-mcp forget` first",
+            )),
+        }
+    }
+
     /// Delete the key. True if there was one.
     pub fn forget(dir: &Path) -> io::Result<bool> {
         match std::fs::remove_file(dir.join(FILE_NAME)) {
@@ -305,6 +319,20 @@ pub mod key_file {
         let id = value.get("id").and_then(Value::as_str).filter(|id| valid_client_id(id)).ok_or_else(bad)?;
         let secret = value.get("secret").and_then(hex32).ok_or_else(bad)?;
         Ok(ClientKey { id: id.to_owned(), secret })
+    }
+
+    /// Before pairing: refuse if anything at all is at the key path (a good
+    /// key, a damaged or foreign file, a link). The app hands a secret over
+    /// only once, so pairing must not start unless that secret can be saved.
+    pub fn ready_to_pair(dir: &Path) -> io::Result<()> {
+        match std::fs::symlink_metadata(dir.join(FILE_NAME)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "a key file is already there (paired, or damaged); run `bitsov-mcp forget` first",
+            )),
+        }
     }
 
     /// Delete the key (only a verified private file). True if there was one.
@@ -499,9 +527,12 @@ mod tests {
         assert!(key_file::save(&dir, &key).is_err(), "never overwritten");
         assert!(key_file::forget(&dir).unwrap());
         assert!(!key_file::forget(&dir).unwrap());
-        // A plain file the private layer did not create is refused.
+        // A plain file the private layer did not create is refused, and it
+        // blocks pairing until it is removed by hand.
+        assert!(key_file::ready_to_pair(&dir).is_ok());
         std::fs::write(dir.join(key_file::FILE_NAME), b"{}").unwrap();
         assert!(key_file::load(&dir).is_err());
+        assert_eq!(key_file::ready_to_pair(&dir).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
     }
 
     #[cfg(unix)]
@@ -524,6 +555,36 @@ mod tests {
         assert!(!key_file::forget(&dir).unwrap());
         std::os::unix::fs::symlink(temp.path().join("elsewhere"), &path).unwrap();
         assert!(key_file::load(&dir).is_err(), "a link is not followed");
+    }
+
+    /// Pairing burns the app's one-time secret if it cannot be saved, so a
+    /// key path that is taken in any way stops `pair` before it connects.
+    #[cfg(unix)]
+    #[test]
+    fn pairing_is_refused_while_anything_is_at_the_key_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("keys");
+        assert!(key_file::ready_to_pair(&dir).is_ok(), "no directory yet");
+        let key = ClientKey { id: "mcp-0d".into(), secret: Zeroizing::new([6u8; 32]) };
+        key_file::save(&dir, &key).unwrap();
+        let path = dir.join(key_file::FILE_NAME);
+        let refused = |why: &str| {
+            let error = key_file::ready_to_pair(&dir).expect_err(why);
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{why}");
+            assert!(error.to_string().contains("bitsov-mcp forget"), "{why}");
+        };
+        refused("a good key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(key_file::load(&dir).is_err());
+        refused("a widened key that load refuses");
+        std::fs::write(&path, b"not json").unwrap();
+        refused("a damaged key");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("missing"), &path).unwrap();
+        refused("a dangling link");
+        assert!(key_file::forget(&dir).unwrap(), "forget clears even a link");
+        assert!(key_file::ready_to_pair(&dir).is_ok());
     }
 
     #[cfg(target_os = "macos")]
