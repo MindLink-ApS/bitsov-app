@@ -42,13 +42,14 @@ pub enum IdentityError {
     UnknownClient,
 }
 
+#[derive(Clone)]
 struct Pending {
     challenge: [u8; 32],
     expires_ms: u64,
 }
 
 /// The host's per-client public keys and open challenges.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Identities {
     keys: HashMap<String, VerifyingKey>,
     pending: HashMap<String, Pending>,
@@ -77,6 +78,24 @@ impl Identities {
         self.keys.insert(client.to_owned(), key.verifying_key());
         self.pending.remove(client);
         Ok(Issued { secret })
+    }
+
+    /// Restores a stored client's public key (from the sealed store, after a
+    /// restart). Refused for a malformed id or a key that is not a valid
+    /// Ed25519 point.
+    pub fn insert(&mut self, client: &str, public_key: &[u8; 32]) -> Result<(), IdentityError> {
+        if !plain_id(client) {
+            return Err(IdentityError::BadClientId);
+        }
+        let key = VerifyingKey::from_bytes(public_key).map_err(|_| IdentityError::UnknownClient)?;
+        self.keys.insert(client.to_owned(), key);
+        self.pending.remove(client);
+        Ok(())
+    }
+
+    /// The public key the host holds for `client`, to store it.
+    pub fn public_key(&self, client: &str) -> Option<[u8; 32]> {
+        self.keys.get(client).map(VerifyingKey::to_bytes)
     }
 
     /// A new challenge for `client`, valid until `now_ms + CHALLENGE_TTL_MS`.

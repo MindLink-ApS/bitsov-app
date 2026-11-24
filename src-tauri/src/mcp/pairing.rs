@@ -56,6 +56,7 @@ pub enum PairError {
     Failed,
 }
 
+#[derive(Clone)]
 struct Pending {
     name: String,
     code: [&'static str; 6],
@@ -63,7 +64,7 @@ struct Pending {
 }
 
 /// Requests waiting for the owner.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Pairing {
     pending: HashMap<String, Pending>,
 }
