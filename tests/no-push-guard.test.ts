@@ -11,6 +11,21 @@ import { expect, it } from 'vitest';
 const root = join(__dirname, '..');
 const read = (path: string) => readFileSync(join(root, path), 'utf8');
 
+/**
+ * A VoIP background mode in any form: plist `<string>voip</string>`, YAML `- voip`, `[voip]` or
+ * `["voip"]`. iOS accepts only the lowercase value, so prose such as "no VoIP push" is not a match.
+ */
+const VOIP_MODE = /(?<![\w-])voip(?![\w-])/;
+
+it('the VoIP check catches every way the mode can be written', () => {
+  for (const form of ['<string>voip</string>', '- voip', '      - voip', 'UIBackgroundModes: [voip]', 'UIBackgroundModes: ["voip"]', "UIBackgroundModes: [audio, 'voip']", "UIBackgroundModes: [ voip ]"]) {
+    expect(form, form).toMatch(VOIP_MODE);
+  }
+  for (const form of ['UIBackgroundModes: [audio]', '<string>audio</string>', 'voipless', '<!-- no VoIP push/CallKit -->']) {
+    expect(form, form).not.toMatch(VOIP_MODE);
+  }
+});
+
 it('iOS: no push entitlement and no remote-notification or VoIP background mode', () => {
   for (const path of ['src-tauri/Entitlements.plist', 'src-tauri/gen/apple/bitsov-app_iOS/bitsov-app_iOS.entitlements', 'src-tauri/gen/apple/project.yml']) {
     expect(read(path), path).not.toMatch(/aps-environment/);
@@ -18,7 +33,7 @@ it('iOS: no push entitlement and no remote-notification or VoIP background mode'
   for (const path of ['src-tauri/Info.ios.plist', 'src-tauri/gen/apple/bitsov-app_iOS/Info.plist', 'src-tauri/gen/apple/project.yml']) {
     const text = read(path);
     expect(text, path).not.toMatch(/remote-notification/);
-    expect(text, path).not.toMatch(/<string>voip<\/string>|-\s*voip\b/);
+    expect(text, path).not.toMatch(VOIP_MODE);
   }
 });
 
