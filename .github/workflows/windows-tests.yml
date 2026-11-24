@@ -181,6 +181,7 @@ jobs:
             'trust::windows_store_tests', 'app::windows_ai_storage_tests',
             'app::device::windows_store_tests', 'app::home_keychain_windows::tests',
             'remote_access::windows_store::tests', 'mcp::audit_log::tests::windows_file',
+            'mcp::runner::tests::windows_runner_tests',
             'at_rest::dpapi')
           # The list must not drift: any test under a Windows-named module that
           # none of the suites covers fails the job (listing reads no storage).
