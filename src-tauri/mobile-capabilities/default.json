@@ -115,6 +115,7 @@
     "allow-file-fetch",
     "allow-file-save",
     "allow-call-audio-session",
+    "allow-phone-notify",
     "allow-call-quote",
     "allow-call-signal",
     "allow-call-free-reply",

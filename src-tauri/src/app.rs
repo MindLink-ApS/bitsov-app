@@ -12393,6 +12393,27 @@ async fn call_audio_session(window: WebviewWindow<impl tauri::Runtime>, live: bo
     { let _ = (window, live); Ok(()) }
 }
 
+/// iOS phone alerts with the system default sound: the notification plugin
+/// can only name a sound file on iOS. Text only (checked); no node request.
+#[tauri::command]
+async fn phone_notify(window: WebviewWindow<impl tauri::Runtime>, title: String, body: String) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    let title = crate::phone_alert::text(&title)?;
+    let body = crate::phone_alert::text(&body)?;
+    #[cfg(target_os = "ios")]
+    {
+        // The Swift bridge waits for the system's answer: keep it off the main thread.
+        tauri::async_runtime::spawn_blocking(move || bitsov_ffi::phone_notify::notify(&title, &body))
+            .await
+            .map_err(|error| error.to_string())?
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (window, title, body);
+        Err("Phone alerts are posted this way only on iOS.".into())
+    }
+}
+
 pub(super) fn entry() {
     #[cfg(target_os = "ios")]
     bitsov_ffi::pairing_link::install(|url| crate::pairing_link_ios::receive([url]));
@@ -12670,6 +12691,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             file_fetch,
             file_save,
             call_audio_session,
+            phone_notify,
             call_quote,
             call_signal,
             call_free_reply,
@@ -31264,6 +31286,7 @@ mod assistant_acl_tests {
                 "file_fetch",
                 "file_save",
                 "call_audio_session",
+                "phone_notify",
                 "call_quote",
                 "call_signal",
                 "call_free_reply",
@@ -31622,10 +31645,10 @@ mod assistant_acl_tests {
         let main_perms = permission_identifiers(main);
         assert!(main_perms.iter().any(|id| id == "core:default"));
         for command in &commands {
-            if ["pairing_link_take", "open_app_settings", "open_tailscale"].contains(&command.as_str()) {
+            if ["pairing_link_take", "open_app_settings", "open_tailscale", "phone_notify"].contains(&command.as_str()) {
                 assert!(
                     !main_perms.iter().any(|id| id == &allow_perm(command)),
-                    "the Android intent inbox must not be granted on desktop"
+                    "a phone-only command (the Android intent inbox, iOS alerts) must not be granted on desktop"
                 );
                 continue;
             }

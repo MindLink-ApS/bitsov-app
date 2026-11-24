@@ -129,6 +129,7 @@ fn main() {
             "file_fetch",
             "file_save",
             "call_audio_session",
+            "phone_notify",
             "call_quote",
             "call_signal",
             "call_free_reply",
