@@ -334,6 +334,8 @@ pub mod session;
 pub mod broker;
 /// Phase 1, slice 4: per-client keys and a single-use session challenge (not wired).
 pub mod identity;
+/// Phase 1, slice 5: pairing requests with a six-word code, approved by the owner (not wired).
+pub mod pairing;
 
 #[cfg(test)]
 mod tests;
