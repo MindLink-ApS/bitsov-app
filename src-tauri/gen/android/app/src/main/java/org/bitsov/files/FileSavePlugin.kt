@@ -1,4 +1,4 @@
-package tech.mindlink.bitsov
+package org.bitsov.files
 
 import android.app.Activity
 import android.content.ContentValues

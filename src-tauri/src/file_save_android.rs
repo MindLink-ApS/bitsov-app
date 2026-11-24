@@ -89,7 +89,7 @@ mod android {
 
     pub fn init() -> TauriPlugin<Wry> {
         Builder::new("file-save").setup(|_app, api| {
-            let handle = api.register_android_plugin("tech.mindlink.bitsov", "FileSavePlugin")?;
+            let handle = api.register_android_plugin("org.bitsov.files", "FileSavePlugin")?;
             HANDLE.set(handle).map_err(|_| std::io::Error::other("file save already registered"))?;
             Ok(())
         }).build()
