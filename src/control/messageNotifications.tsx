@@ -15,11 +15,21 @@ const save = (key: string, value: boolean) => { try { localStorage.setItem(key, 
 const notificationsMuted = () => read(MUTED);
 let nextCallNotification = 1_000_000;
 
-/** Only live arrivals enter here; history reads never produce alerts. */
-export function createMessageNotifications() {
+/** One phone notification per contact at most this often; later ones in the window are dropped. */
+export const PHONE_NOTIFY_COOLDOWN_MS = 30_000;
+
+/**
+ * Only live arrivals enter here; history reads never produce alerts.
+ * `mobile`: a phone's lock screen is public, so every line is generic (no names, text,
+ * amounts or ids), alerts fire only while the app is in the background, a contact gets at
+ * most one per `PHONE_NOTIFY_COOLDOWN_MS`, and a call that went unanswered says so once.
+ */
+export function createMessageNotifications(options: { mobile?: boolean; now?: () => number } = {}) {
+  const mobile = options.mobile ?? false;
+  const now = options.now ?? (() => Date.now());
   // Calls (with their Show call action) and owner approvals stay on the Mac. Windows and
   // Linux get plain message delivery: no action types, listeners or window restoration.
-  const calls = isMacOS();
+  const calls = !mobile && isMacOS();
   const sound = calls ? 'NSUserNotificationDefaultSoundName'
     : /\bWindows\b/.test(typeof navigator === 'undefined' ? '' : navigator.userAgent) ? 'Default' : 'message-new-instant';
   const [permission, setPermission] = createSignal<'checking' | 'prompt' | 'granted' | 'denied' | 'error'>('checking');
@@ -30,6 +40,9 @@ export function createMessageNotifications() {
   let disposed = false;
   let requesting = false;
   const seen = new Set<string>();
+  const lastByContact = new Map<string, number>();
+  /** Phones: the app is in the foreground when its page is visible. */
+  const foreground = () => typeof document !== 'undefined' && document.visibilityState === 'visible';
   const callActions = new Map<number, { current: () => boolean; open: () => void }>();
   let listener: ReturnType<typeof onAction> | undefined;
   const listenForCalls = () => listener ??= onAction(event => {
@@ -70,6 +83,11 @@ export function createMessageNotifications() {
     seen.add(id);
     if (muted() || !enabled) return;
     try {
+      if (mobile) {
+        if (foreground() || !await isPermissionGranted() || disposed || muted() || foreground()) return;
+        await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body } });
+        return;
+      }
       const window = getCurrentWindow();
       if (await window.isFocused() || disposed || muted()) return;
       // Arrival never prompts: the visible explanation owns the permission tap.
@@ -97,10 +115,20 @@ export function createMessageNotifications() {
     defer() { setDeferred(true); save(DEFERRED, true); },
     message(message: Message, ownId: string, senderName: string) {
       if (message.sender.toLowerCase() === ownId.toLowerCase() || !((message.payment_amount_msat ?? 0) > 0) || ![0, 200].includes(message.kind)) return;
+      if (mobile) {
+        const contact = message.sender.toLowerCase();
+        const last = lastByContact.get(contact);
+        if (last !== undefined && now() - last < PHONE_NOTIFY_COOLDOWN_MS) return;
+        lastByContact.set(contact, now());
+        void notify(`message:${message.id}`, t('notificationNewMessage'));
+        return;
+      }
       // Windows and Linux show a generic line: no sender identifier and no message content.
       void notify(`message:${message.id}`, calls ? t('notificationMessage', name(senderName)) : t('notificationNewMessage'));
     },
     call(id: string, callerName: string, current?: () => boolean, open?: () => void) { if (calls) void notify(`call:${id}`, t('notificationCall', name(callerName)), current, open); },
+    /** Phones: an incoming call that ended unanswered, said once and without a name. */
+    missedCall(id: string) { if (mobile) void notify(`missed:${id}`, t('notificationMissedCall')); },
     dispose() { disposed = true; seen.clear(); callActions.clear(); void listener?.then(l => l.unregister()).catch(() => {}); },
   };
 }

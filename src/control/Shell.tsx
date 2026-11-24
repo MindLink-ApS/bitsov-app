@@ -380,7 +380,7 @@ let artifactSeq = 0;
 type NewArtifact = Artifact extends infer A ? (A extends Artifact ? Omit<A, 'id' | 'at'> & { at?: number } : never) : never;
 
 export function ControlCenter(props: Props) {
-  const notifications = isTauri() && !isMobilePlatform() ? createMessageNotifications() : null;
+  const notifications = isTauri() ? createMessageNotifications({ mobile: isMobilePlatform() }) : null;
   onMount(() => { void notifications?.checkPermission(); });
   onCleanup(() => notifications?.dispose());
   const phoneLayout = createPhoneLayout();
@@ -1668,7 +1668,10 @@ export function ControlCenter(props: Props) {
       setCallView(view);
       if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, callNameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
     },
-    onMissed: call => missedCalls.add(call, openKey() === `peer:${call.peer}` && document.hasFocus() && !contextOpen() && walletTab() === null),
+    onMissed: call => {
+      missedCalls.add(call, openKey() === `peer:${call.peer}` && document.hasFocus() && !contextOpen() && walletTab() === null);
+      notifications?.missedCall(`${call.peer}:${call.callId}`);
+    },
     onWaiting: views => {
       setWaitingCalls(views);
       for (const view of views) if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) {
