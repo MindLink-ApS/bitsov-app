@@ -9,7 +9,7 @@
 //! keeps only the public half; the secret half goes to the client's shim once.
 //! A session starts by proving that key: the host hands out a random
 //! challenge, the shim signs [`message`] (version, client id, challenge), and
-//! [`Identities::verify`] checks it. A challenge is used at most once, expires
+//! [`Identities::verify`] checks it. A challenge is answered at most once, expires
 //! after [`CHALLENGE_TTL_MS`], and a newer one replaces it, so a recorded
 //! session cannot be replayed. Revoke drops the key and any open challenge.
 
@@ -101,10 +101,15 @@ impl Identities {
     }
 
     /// True only for a signature by `client`'s current key over [`message`]
-    /// for its open, unexpired challenge. The challenge is used up either way.
+    /// for its open, unexpired challenge. An answer to that challenge uses it
+    /// up, passing or failing. An answer naming any other challenge leaves the
+    /// open one untouched, so a stray or forged answer cannot cancel it.
     pub fn verify(&mut self, client: &str, challenge: &[u8; 32], signature: &[u8], now_ms: u64) -> bool {
+        if self.pending.get(client).is_none_or(|pending| pending.challenge != *challenge) {
+            return false;
+        }
         let Some(pending) = self.pending.remove(client) else { return false };
-        if pending.challenge != *challenge || now_ms >= pending.expires_ms {
+        if now_ms >= pending.expires_ms {
             return false;
         }
         let (Some(key), Ok(signature)) = (self.keys.get(client), Signature::from_slice(signature)) else {
@@ -171,6 +176,18 @@ mod tests {
         let newer = ids.challenge("desk", 1).unwrap();
         assert!(!ids.verify("desk", &old, &sign(&issued.secret, "desk", &old), 2), "a newer challenge replaces it");
         let _ = newer;
+    }
+
+    #[test]
+    fn a_stray_answer_to_another_challenge_does_not_cancel_the_open_one() {
+        let mut ids = Identities::default();
+        let issued = paired(&mut ids, "desk");
+        let open = ids.challenge("desk", 0).unwrap();
+        // Someone who knows only the client id sends junk for a made-up challenge.
+        assert!(!ids.verify("desk", &[7u8; 32], &[0u8; 64], 1));
+        assert!(!ids.verify("desk", &[7u8; 32], &sign(&issued.secret, "desk", &[7u8; 32]), 2));
+        // The shim's real answer to the open challenge still opens the session.
+        assert!(ids.verify("desk", &open, &sign(&issued.secret, "desk", &open), 3));
     }
 
     #[test]

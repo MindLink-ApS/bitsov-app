@@ -12555,13 +12555,14 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(crate::android_network::init())
         .plugin(crate::pairing_link_mobile::init())
         .plugin(crate::phone_recovery::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(crate::file_save_android::init())
         .plugin(tauri_plugin_barcode_scanner::init());
     // iOS device keys use the statically linked Apple enclave bridge;
     // the QR scanner is the only mobile plugin. Pairing
     // links arrive as `RunEvent::Opened` (see `run`), not through a plugin.
     #[cfg(target_os = "ios")]
-    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    let builder = builder.plugin(tauri_plugin_barcode_scanner::init()).plugin(tauri_plugin_notification::init());
     builder
         .manage(AiState::default())
         .invoke_handler({

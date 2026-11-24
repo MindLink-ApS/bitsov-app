@@ -240,3 +240,73 @@ it.each([['Windows', windowsUa], ['Linux', linuxUa]] as const)('wires live paid 
   expect(native.registerActionTypes).not.toHaveBeenCalled(); expect(native.onAction).not.toHaveBeenCalled();
   expect(native.requestPermission).not.toHaveBeenCalled();
 });
+
+it.each(['en', 'da'] as const)('on a phone (%s), a message notification is generic: no name, text or amount', async lang => {
+  setLanguagePref(lang);
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  const n = createMessageNotifications({ mobile: true });
+  n.message(message, 'me', 'Robin'); await flush();
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: lang === 'en' ? 'You have a new message' : 'Du har en ny besked' });
+  const sent = JSON.stringify(native.sendNotification.mock.calls);
+  for (const hidden of ['Robin', 'SECRET', 'peer', '2000', 'sat']) expect(sent).not.toContain(hidden);
+  // Phones never use the desktop window focus API or call action types.
+  expect(native.isFocused).not.toHaveBeenCalled();
+  expect(native.registerActionTypes).not.toHaveBeenCalled();
+  n.dispose();
+});
+
+it('on a phone, nothing is shown while the app is in the foreground', async () => {
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const n = createMessageNotifications({ mobile: true });
+  n.message(message, 'me', 'Robin'); n.missedCall('peer:c1'); await flush();
+  expect(native.sendNotification).not.toHaveBeenCalled();
+  n.dispose();
+});
+
+it('on a phone, one contact gets at most one message notification per 30 s', async () => {
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  let clock = 1_000_000;
+  const n = createMessageNotifications({ mobile: true, now: () => clock });
+  n.message({ ...message, id: 'a' }, 'me', 'Robin');
+  clock += 10_000; n.message({ ...message, id: 'b' }, 'me', 'Robin');
+  n.message({ ...message, id: 'c', sender: 'other' }, 'me', 'Kim');
+  clock += 25_000; n.message({ ...message, id: 'd' }, 'me', 'Robin');
+  await flush();
+  expect(native.sendNotification).toHaveBeenCalledTimes(3); // a, c (another contact), d (after 35 s)
+  n.dispose();
+});
+
+it.each([
+  ['the app was in view', (inView: () => void) => { inView(); }],
+  ['there was no permission', (_inView: () => void) => { native.isPermissionGranted.mockResolvedValueOnce(false); }],
+  ['the system refused it', (_inView: () => void) => { native.sendNotification.mockRejectedValueOnce(new Error('refused')); }],
+])('on a phone, an alert that was not shown (%s) does not hold back the next one', async (_why, suppress) => {
+  let visibility: DocumentVisibilityState = 'hidden';
+  vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+  let clock = 1_000_000;
+  const n = createMessageNotifications({ mobile: true, now: () => clock });
+  suppress(() => { visibility = 'visible'; });
+  n.message({ ...message, id: 'a' }, 'me', 'Robin'); await flush();
+  visibility = 'hidden';
+  const shownBefore = native.sendNotification.mock.calls.filter(([o]) => o).length;
+  clock += 5_000; n.message({ ...message, id: 'b' }, 'me', 'Robin'); await flush();
+  expect(native.sendNotification.mock.calls.length - shownBefore).toBe(1);
+  expect(native.sendNotification).toHaveBeenLastCalledWith({ title: 'BitSov', body: 'You have a new message' });
+  // That one was shown: the next within 30 s is held back.
+  clock += 5_000; n.message({ ...message, id: 'c' }, 'me', 'Robin'); await flush();
+  expect(native.sendNotification.mock.calls.length - shownBefore).toBe(1);
+  n.dispose();
+});
+
+it('a missed call is said once on a phone, without a name; never on a computer', async () => {
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  const phone = createMessageNotifications({ mobile: true });
+  phone.missedCall('peer:c1'); phone.missedCall('peer:c1'); await flush();
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'You missed a call' });
+  phone.dispose();
+  native.sendNotification.mockClear();
+  const computer = createMessageNotifications();
+  computer.missedCall('peer:c2'); await flush();
+  expect(native.sendNotification).not.toHaveBeenCalled();
+  computer.dispose();
+});
