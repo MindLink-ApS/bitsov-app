@@ -216,7 +216,7 @@ impl Peek {
             let params = request.get("params");
             let tool = params.and_then(|p| p.get("name")).and_then(Value::as_str).unwrap_or_default();
             let arguments = params.and_then(|p| p.get("arguments")).map(Value::to_string).unwrap_or_default();
-            Call { tool: clean(tool, MAX_AUDIT_TOOL), arguments: cap(&arguments, MAX_AUDIT_ARGUMENTS) }
+            Call { tool: audit_text(tool, MAX_AUDIT_TOOL), arguments: audit_text(&arguments, MAX_AUDIT_ARGUMENTS) }
         });
         let reply_id = match &id {
             Some(id @ (Value::String(_) | Value::Number(_))) => id.clone(),
@@ -234,6 +234,11 @@ fn clean(text: &str, max: usize) -> String {
         .collect::<String>()
         .trim()
         .to_owned()
+}
+
+/// Audit text: control and bidi characters dropped, then at most `max` bytes.
+fn audit_text(text: &str, max: usize) -> String {
+    cap(&clean(text, usize::MAX), max)
 }
 
 /// Keeps at most `max` bytes, on a character boundary.
@@ -402,13 +407,22 @@ mod tests {
         let frame = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":long_tool,"arguments":{"pad":"é".repeat(400)}}});
         sessions.handle("desk", frame.to_string().as_bytes(), 0, &registry(), &reads, &mut audit);
         let row = &audit[0];
-        assert!(row.tool.chars().count() <= MAX_AUDIT_TOOL);
+        assert!(row.tool.len() <= MAX_AUDIT_TOOL);
         assert!(!row.tool.contains('\u{202e}') && !row.tool.contains('\n'));
         assert!(row.arguments.len() <= MAX_AUDIT_ARGUMENTS);
         assert_eq!(row.outcome, Outcome::Refused);
 
+        // Arguments are cleaned too: JSON escapes control characters, but not bidi ones.
+        let frame = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_payments","arguments":{"note":"a\u{202e}b\u{2066}c\u{0007}"}}});
+        sessions.handle("desk", frame.to_string().as_bytes(), 0, &registry(), &reads, &mut audit);
+        let args = &audit.last().unwrap().arguments;
+        assert!(args.chars().all(|c| !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')), "{args:?}");
+        assert!(args.contains("abc"), "{args:?}");
+
         sessions.handle("desk", &call(2, "read_node"), 0, &registry(), &reads, &mut audit);
-        assert!(!format!("{:?}", audit[1]).contains("ok"), "the read result is not logged");
+        // The successful read's own row (found by tool and outcome, not position) holds nothing it read.
+        let read = audit.iter().find(|row| row.tool == "read_node" && row.outcome == Outcome::Read).expect("the read_node row");
+        assert!(!format!("{read:?}").contains("ok"), "the read result is not logged");
     }
 
     #[test]
