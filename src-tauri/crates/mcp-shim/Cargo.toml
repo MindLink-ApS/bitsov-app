@@ -1,0 +1,28 @@
+[package]
+license = "MIT"
+name = "bitsov-mcp"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Connects an AI client (MCP over stdio) to the BitSov app's local endpoint"
+
+[lib]
+name = "bitsov_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bitsov-mcp"
+path = "src/main.rs"
+
+[dependencies]
+bitsov-mcp-wire = { path = "../mcp-wire" }
+getrandom = "0.4"
+hex = "0.4"
+serde_json = "1"
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

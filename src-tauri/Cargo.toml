@@ -32,6 +32,8 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # Pairing client (#77 ceremony, src/pairing): the app-held Ed25519 client key, the
 # node's BLAKE3 short-code derivation for the tripwire, and a CSPRNG for the seed.
 ed25519-dalek = "2"
+# The MCP endpoint's wire format, shared with the bitsov-mcp shim.
+bitsov-mcp-wire = { path = "crates/mcp-wire" }
 blake3 = "1"
 bip39 = { version = "2.2.2", default-features = false, features = ["std"] }
 getrandom = "0.4"
@@ -115,6 +117,8 @@ path = "crates/mock-node"
 optional = true
 
 [dev-dependencies]
+# The shim, driven against the real endpoint host in tests.
+bitsov-mcp = { path = "crates/mcp-shim" }
 tokio = { version = "1", features = ["test-util"] }
 # `tauri::test` (MockRuntime + IPC) is feature-gated. Cargo enables this for
 # `cargo test` only; `cargo check` / `cargo build` keep the default features.
@@ -129,6 +133,6 @@ required-features = ["sit-mock"]
 # Jarvis Phase 1 test bed. The app binary does not link it. `cargo test`
 # in this directory builds it, and the broker tests above use it in-process.
 [workspace]
-members = [".", "crates/mock-node", "ffi"]
-default-members = [".", "crates/mock-node", "ffi"]
+members = [".", "crates/mock-node", "crates/mcp-wire", "crates/mcp-shim", "ffi"]
+default-members = [".", "crates/mock-node", "crates/mcp-wire", "crates/mcp-shim", "ffi"]
 resolver = "2"

@@ -18,7 +18,7 @@ use crate::ai::Topic;
 /// The MCP protocol revision this skeleton speaks.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// Largest accepted frame. Larger frames are refused unread.
-pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub use bitsov_mcp_wire::MAX_FRAME_BYTES;
 
 // JSON-RPC 2.0 error codes.
 const PARSE_ERROR: i64 = -32700;

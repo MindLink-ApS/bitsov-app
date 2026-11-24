@@ -23,23 +23,10 @@ use crate::ai::Topic;
 pub const REQUEST_TTL_MS: u64 = 5 * 60_000;
 /// Requests waiting at once; more are refused until one is settled or expires.
 pub const MAX_PENDING: usize = 4;
-const DOMAIN: &[u8] = b"bitsov-mcp-pair-v1";
 
-/// The six words both sides show: 66 bits of a hash over the domain, both
-/// nonces and the declared name, as BIP-39 English words.
-pub fn code(shim_nonce: &[u8; 32], host_nonce: &[u8; 32], name: &str) -> [&'static str; 6] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(DOMAIN);
-    hasher.update(shim_nonce);
-    hasher.update(host_nonce);
-    hasher.update(&(name.len() as u64).to_be_bytes());
-    hasher.update(name.as_bytes());
-    let digest = hasher.finalize();
-    let bytes = digest.as_bytes();
-    let bits = u128::from_be_bytes(bytes[..16].try_into().expect("16 bytes"));
-    let list = bip39::Language::English.word_list();
-    std::array::from_fn(|i| list[((bits >> (128 - 11 * (i + 1))) & 2047) as usize])
-}
+/// The six words both sides show (shared with the shim, which computes them
+/// itself from both nonces and the cleaned name).
+pub use bitsov_mcp_wire::pair_code as code;
 
 /// One request as the app shows it to the owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,14 +68,8 @@ pub struct Pairing {
     pending: HashMap<String, Pending>,
 }
 
-fn clean_name(name: &str) -> String {
-    name.chars()
-        .filter(|c| !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
-        .take(MAX_CLIENT_NAME)
-        .collect::<String>()
-        .trim()
-        .to_owned()
-}
+use bitsov_mcp_wire::clean_name;
+const _: () = assert!(bitsov_mcp_wire::MAX_CLIENT_NAME == MAX_CLIENT_NAME);
 
 impl Pairing {
     fn prune(&mut self, now_ms: u64) {
