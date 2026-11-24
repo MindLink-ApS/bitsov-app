@@ -5,12 +5,17 @@ import { t, type CopyKey } from '../i18n';
 
 export type PhoneTab = 'chats' | 'calls' | 'wallet' | 'you';
 
-/** iPhones/iPods and Android handsets keep tabs across rotation. Tablets use
- * the compact breakpoint; desktop builds always retain their existing rail. */
+/** Below this window width a tablet (iPad mini portrait, split-screen) uses the phone layout. */
+export const TABLET_SPLIT_MIN_WIDTH = 768;
+
+/** iPhones/iPods and Android handsets keep tabs across rotation. Tablets show the
+ * chat list beside the conversation from TABLET_SPLIT_MIN_WIDTH on, by window
+ * width (so split-screen follows), and the phone tabs below it. Desktop builds
+ * always retain their existing rail. */
 export function createPhoneLayout() {
   if (!isMobilePlatform()) return () => false;
   if (!isIpad() && (/iPhone|iPod/i.test(navigator.userAgent) || /Android.*Mobile/i.test(navigator.userAgent))) return () => true;
-  const media = window.matchMedia('(max-width: 680px)');
+  const media = window.matchMedia(`(max-width: ${TABLET_SPLIT_MIN_WIDTH - 1}px)`);
   const [narrow, setNarrow] = createSignal(media.matches);
   const change = () => setNarrow(media.matches);
   media.addEventListener('change', change);
