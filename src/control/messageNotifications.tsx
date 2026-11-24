@@ -15,6 +15,12 @@ const save = (key: string, value: boolean) => { try { localStorage.setItem(key, 
 const notificationsMuted = () => read(MUTED);
 let nextCallNotification = 1_000_000;
 
+/**
+ * The sound phone alerts ask for. iOS plays a named sound only when the alert names one, and the
+ * system default when the name is not a sound file in the app; Android falls back to its default
+ * notification sound either way.
+ */
+export const PHONE_SOUND = 'default';
 /** One phone notification per contact at most this often; later ones in the window are dropped. */
 export const PHONE_NOTIFY_COOLDOWN_MS = 30_000;
 
@@ -86,7 +92,7 @@ export function createMessageNotifications(options: { mobile?: boolean; now?: ()
     try {
       if (mobile) {
         if (foreground() || !await isPermissionGranted() || disposed || muted() || foreground()) return false;
-        await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body } });
+        await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body, sound: PHONE_SOUND } });
         return true;
       }
       const window = getCurrentWindow();
