@@ -227,7 +227,7 @@ impl Peek {
 }
 
 /// Drops control and bidi characters and keeps at most `max` characters.
-fn clean(text: &str, max: usize) -> String {
+pub(super) fn clean(text: &str, max: usize) -> String {
     text.chars()
         .filter(|c| !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
         .take(max)

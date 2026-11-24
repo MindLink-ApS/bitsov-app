@@ -59,6 +59,8 @@ const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 0x1;
 const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 0x2;
 const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 
+pub mod pipe;
+
 fn refused(refusal: Refusal) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, refusal)
 }

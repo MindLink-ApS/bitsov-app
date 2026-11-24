@@ -200,6 +200,29 @@ pub fn private_sddl(user_sid: &str, kind: ObjectKind) -> Result<String, Refusal>
     Ok(format!("O:{user_sid}D:P(A;{flags};FA;;;{user_sid})"))
 }
 
+/// The MCP endpoint's pipe (ADR H3953 A1 §1.3): at most this many clients at once.
+pub const MCP_PIPE_MAX_CONNECTIONS: usize = 8;
+/// `PIPE_ACCESS_DUPLEX`.
+pub const MCP_PIPE_OPEN_MODE: u32 = 0x3;
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`: creating the name fails if it exists.
+pub const MCP_PIPE_FIRST_INSTANCE: u32 = 0x0008_0000;
+/// Byte mode, blocking, and `PIPE_REJECT_REMOTE_CLIENTS` (0x8).
+pub const MCP_PIPE_MODE: u32 = 0x8;
+
+/// The current user's MCP pipe: one per user, named by the user's SID.
+pub fn mcp_pipe_name(user_sid: &str) -> Result<String, Refusal> {
+    if !valid_sid_string(user_sid) {
+        return Err(Refusal::InvalidSid);
+    }
+    Ok(format!(r"\\.\pipe\bitsov-mcp-{user_sid}"))
+}
+
+/// A pipe client is admitted only when its token is readable, not elevated,
+/// and this user. Any failure to tell refuses it.
+pub fn mcp_pipe_client_allowed(elevated: Result<bool, ()>, same_user: Result<bool, ()>) -> bool {
+    elevation_policy(elevated).is_ok() && same_user == Ok(true)
+}
+
 /// Current-user DPAPI without any UI. `CRYPTPROTECT_LOCAL_MACHINE` (0x4) is
 /// never set: machine scope would let any local account open the secret.
 pub const DPAPI_FLAGS: u32 = 0x1;
@@ -211,6 +234,28 @@ mod tests {
     use super::*;
 
     const SID: &str = "S-1-5-21-1004336348-1177238915-682003330-1001";
+
+    #[test]
+    fn the_mcp_pipe_is_per_user_local_only_and_capped() {
+        assert_eq!(
+            mcp_pipe_name(SID).unwrap(),
+            r"\\.\pipe\bitsov-mcp-S-1-5-21-1004336348-1177238915-682003330-1001"
+        );
+        assert_eq!(mcp_pipe_name("S-1-5-21-1\\..\\x"), Err(Refusal::InvalidSid));
+        assert_eq!(mcp_pipe_name(""), Err(Refusal::InvalidSid));
+        assert_ne!(MCP_PIPE_MODE & 0x8, 0, "remote clients are rejected");
+        assert_ne!(MCP_PIPE_FIRST_INSTANCE, 0);
+        assert_eq!(MCP_PIPE_MAX_CONNECTIONS, 8);
+    }
+
+    #[test]
+    fn a_pipe_client_must_be_this_user_unelevated_and_readable() {
+        assert!(mcp_pipe_client_allowed(Ok(false), Ok(true)));
+        assert!(!mcp_pipe_client_allowed(Ok(true), Ok(true)), "elevated");
+        assert!(!mcp_pipe_client_allowed(Err(()), Ok(true)), "elevation unreadable");
+        assert!(!mcp_pipe_client_allowed(Ok(false), Ok(false)), "another user");
+        assert!(!mcp_pipe_client_allowed(Ok(false), Err(())), "user unreadable");
+    }
 
     fn user_ace(kind: ObjectKind) -> AceFacts {
         AceFacts {
