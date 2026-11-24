@@ -380,7 +380,7 @@ let artifactSeq = 0;
 type NewArtifact = Artifact extends infer A ? (A extends Artifact ? Omit<A, 'id' | 'at'> & { at?: number } : never) : never;
 
 export function ControlCenter(props: Props) {
-  const notifications = isTauri() ? createMessageNotifications({ mobile: isMobilePlatform(), ios: appPlatform() === 'ios' }) : null;
+  const notifications = isTauri() ? createMessageNotifications({ mobile: isMobilePlatform() }) : null;
   onMount(() => { void notifications?.checkPermission(); });
   onCleanup(() => notifications?.dispose());
   const phoneLayout = createPhoneLayout();

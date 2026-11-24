@@ -15,6 +15,12 @@ const save = (key: string, value: boolean) => { try { localStorage.setItem(key, 
 const notificationsMuted = () => read(MUTED);
 let nextCallNotification = 1_000_000;
 
+/**
+ * The sound phone alerts ask for. iOS plays a named sound only when the alert names one, and the
+ * system default when the name is not a sound file in the app; Android falls back to its default
+ * notification sound either way.
+ */
+export const PHONE_SOUND = 'default';
 /** One phone notification per contact at most this often; later ones in the window are dropped. */
 export const PHONE_NOTIFY_COOLDOWN_MS = 30_000;
 
@@ -24,14 +30,8 @@ export const PHONE_NOTIFY_COOLDOWN_MS = 30_000;
  * amounts or ids), alerts fire only while the app is in the background, a contact gets at
  * most one per `PHONE_NOTIFY_COOLDOWN_MS`, and a call that went unanswered says so once.
  */
-export function createMessageNotifications(options: { mobile?: boolean; ios?: boolean; now?: () => number } = {}) {
+export function createMessageNotifications(options: { mobile?: boolean; now?: () => number } = {}) {
   const mobile = options.mobile ?? false;
-  /**
-   * iOS posts phone alerts through the host's `phone_notify`, which asks for the system default
-   * sound: the notification plugin can only name a sound file there, and without one the alert
-   * is silent. Android uses the plugin, whose alerts take the system default sound already.
-   */
-  const ios = mobile && (options.ios ?? false);
   const now = options.now ?? (() => Date.now());
   // Calls (with their Show call action) and owner approvals stay on the Mac. Windows and
   // Linux get plain message delivery: no action types, listeners or window restoration.
@@ -92,8 +92,7 @@ export function createMessageNotifications(options: { mobile?: boolean; ios?: bo
     try {
       if (mobile) {
         if (foreground() || !await isPermissionGranted() || disposed || muted() || foreground()) return false;
-        if (ios) await invoke('phone_notify', { title: t('notificationApp'), body });
-        else await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body } });
+        await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body, sound: PHONE_SOUND } });
         return true;
       }
       const window = getCurrentWindow();
