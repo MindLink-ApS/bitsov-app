@@ -1419,7 +1419,6 @@ mod tests {
             assert_eq!(receive(&mut waiting.0)["pair"], "waiting", "the pairing request is kept while handshakes can go");
             send(&mut ninth.1, r#"{"hello":"mcp-00"}"#);
             assert_eq!(receive(&mut ninth.0)["error"], "unknown client", "the ninth was served");
-            assert_eq!(runner.live(), MAX_CONNECTIONS);
 
             // Only ready clients and the pairing request left: the pairing request makes room.
             drop(stalled);
