@@ -137,7 +137,7 @@ pub struct PrivateFile {
 }
 
 impl FileIo for PrivateFile {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     fn read(&self, max_bytes: usize) -> std::io::Result<Option<Vec<u8>>> {
         use std::io::Read;
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -161,14 +161,14 @@ impl FileIo for PrivateFile {
         crate::private_fs::read_optional(&self.path, max_bytes as u64).map(|bytes| bytes.map(|b| b.to_vec()))
     }
 
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(all(unix, not(target_os = "android")), windows)))]
     fn read(&self, _max_bytes: usize) -> std::io::Result<Option<Vec<u8>>> {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no private storage on this platform"))
     }
 
     /// A temp file beside the target (new, 0600, never through a link),
     /// synced, then renamed over it; the directory is made 0700.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
         use std::io::Write;
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -201,7 +201,7 @@ impl FileIo for PrivateFile {
         })
     }
 
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(all(unix, not(target_os = "android")), windows)))]
     fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no private storage on this platform"))
     }
@@ -271,7 +271,7 @@ mod tests {
     use std::cell::RefCell;
 
     /// A test sealer with integrity: a keyed BLAKE3 tag over purpose and body.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     #[test]
     fn the_private_file_round_trips_and_refuses_widened_or_linked_files() {
         use std::os::unix::fs::PermissionsExt;
