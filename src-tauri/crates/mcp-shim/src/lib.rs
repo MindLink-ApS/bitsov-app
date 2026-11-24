@@ -260,6 +260,9 @@ pub mod key_file {
     /// key, a damaged or widened file, a link). The app hands a secret over
     /// only once, so pairing must not start unless that secret can be saved.
     pub fn ready_to_pair(dir: &Path) -> io::Result<()> {
+        // The directory first: one that is not this user's fails here, before
+        // the app is asked for anything.
+        private_dir(dir)?;
         match std::fs::symlink_metadata(dir.join(FILE_NAME)) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -325,6 +328,9 @@ pub mod key_file {
     /// key, a damaged or foreign file, a link). The app hands a secret over
     /// only once, so pairing must not start unless that secret can be saved.
     pub fn ready_to_pair(dir: &Path) -> io::Result<()> {
+        // The directory first: a folder that is not private to this user fails
+        // here, before the app is asked for anything.
+        create_dir_private(dir)?;
         match std::fs::symlink_metadata(dir.join(FILE_NAME)) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -536,6 +542,11 @@ mod tests {
         std::fs::write(dir.join(key_file::FILE_NAME), b"{}").unwrap();
         assert!(key_file::load(&dir).is_err());
         assert_eq!(key_file::ready_to_pair(&dir).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        // A plain folder (inherited access, not made private) stops pairing
+        // before the app is contacted, instead of failing at save.
+        let plain = temp.path().join("plain-keys");
+        std::fs::create_dir(&plain).unwrap();
+        assert!(key_file::ready_to_pair(&plain).is_err());
     }
 
     #[cfg(unix)]
@@ -588,6 +599,11 @@ mod tests {
         refused("a dangling link");
         assert!(key_file::forget(&dir).unwrap(), "forget clears even a link");
         assert!(key_file::ready_to_pair(&dir).is_ok());
+        // Something that is not a directory where the key directory should be
+        // stops pairing before the app is contacted.
+        let not_a_dir = temp.path().join("plain");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+        assert!(key_file::ready_to_pair(&not_a_dir).is_err());
     }
 
     #[cfg(target_os = "macos")]

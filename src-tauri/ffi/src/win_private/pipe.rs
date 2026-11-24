@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(&reply, b"pong\n");
 
         // The app closing the connection reads as the end of the stream.
-        let (mut reader, _writer) = {
+        let (mut reader, mut _writer) = {
             let name = test_name();
             let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
             let halves = connect_owner(&name).unwrap().split().unwrap();
@@ -472,6 +472,17 @@ mod tests {
         };
         let mut rest = Vec::new();
         assert_eq!(reader.read_to_end(&mut rest).unwrap(), 0);
+        // Writing after the app closed fails; it never reports success.
+        assert!(_writer.write_all(b"late\n").is_err());
+    }
+
+    #[test]
+    fn a_plain_file_is_never_taken_for_the_apps_pipe() {
+        let dir = std::env::temp_dir().join(format!("bitsov-pipe-file-{}", std::process::id()));
+        std::fs::write(&dir, b"not a pipe").unwrap();
+        let refused = connect_owner(dir.to_str().unwrap());
+        let _ = std::fs::remove_file(&dir);
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

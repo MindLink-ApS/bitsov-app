@@ -69,8 +69,15 @@ mod platform {
         Ok((BufReader::new(reader), writer))
     }
 
-    /// The client's input ended: half-close the socket (macOS), or end the
-    /// process, which closes the pipe (Windows pipes have no half-close).
+    /// How long, on Windows, replies may still arrive after the client's
+    /// input ended (a piped one-shot request, for example).
+    #[cfg(windows)]
+    pub const DRAIN_AFTER_INPUT_ENDS: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// The client's input ended: half-close the socket (macOS). Windows pipes
+    /// have no half-close, so the app cannot tell; replies already on their
+    /// way are given [`DRAIN_AFTER_INPUT_ENDS`] to reach stdout (each one is
+    /// flushed as it arrives), then the process ends and closes the pipe.
     pub fn client_ended(stream: Writer) {
         #[cfg(target_os = "macos")]
         {
@@ -78,6 +85,7 @@ mod platform {
         }
         #[cfg(windows)]
         {
+            std::thread::sleep(DRAIN_AFTER_INPUT_ENDS);
             drop(stream);
             std::process::exit(0);
         }
