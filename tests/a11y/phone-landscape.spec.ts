@@ -3,7 +3,7 @@ import { PHONE_SHELL_PREVIEW } from './phoneShellPreview';
 
 // A phone on its side, through the phone-shell preview page. When the status header wraps to
 // several lines (long text, larger fonts), the open chat must still reach Send, + and the
-// microphone, with room to spare. The status header is held to 20% of the height; the bottom tabs stay, except in the
+// microphone, with room to spare. The status header is held to 15% of the height (one line at least); the bottom tabs stay, except in the
 // shortest windows (360 px or less), where they step aside while a chat is open.
 const IPHONE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';

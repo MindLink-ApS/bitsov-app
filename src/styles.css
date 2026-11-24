@@ -1991,12 +1991,12 @@ html[data-keyboard-open='true'] .cc[data-phone-shell='true'] { grid-template-row
 html[data-keyboard-open='true'] .phone-tabs { display: none; }
 /* A phone on its side has about 320–430 px of height. When the status header wraps, it could push
    the open chat under the bottom tabs, out of reach of Send, + and the microphone. There the status
-   header (which scrolls) takes at most 20% of the height, so the chat keeps room for its messages
-   with 44 px touch targets. In the shortest windows, where even that
+   header (which scrolls) takes at most 15% of the height, but always one 56 px line, so the chat
+   keeps room for its message bar with 44 px touch targets. In the shortest windows, where even that
    leaves the chat too little room, the tabs step aside while a chat is open, as they do for the
    keyboard; the chat's Back stays, and the tabs return on the list. */
 @media (orientation: landscape) and (max-height: 500px) {
-  .phone-status { max-height: 20vh; }
+  .phone-status { max-height: max(56px, 15vh); }
 }
 @media (orientation: landscape) and (max-height: 360px) {
   html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='true']:has(> .track:not([hidden])) { grid-template-rows: auto minmax(0, 1fr); grid-template-areas: 'status' 'content'; }
