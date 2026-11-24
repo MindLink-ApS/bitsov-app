@@ -3,16 +3,19 @@ import { PHONE_SHELL_PREVIEW } from './phoneShellPreview';
 
 // iPad-sized windows, through the phone-shell preview page. An iPad is an iOS platform; above 680 px
 // wide it gets the desktop rail, below it the phone tabs (src/control/PhoneShell.tsx). On a touch
-// screen every visible control is a 44 px touch target (its own box, or a larger invisible tap
-// area drawn by ::after); with a mouse the rail keeps its compact rows.
+// screen every visible control is a 44 px touch target of its own (no overlapping tap layers);
+// with a mouse the rail keeps its compact rows and Send its compact size.
 const IPAD_UA =
   'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
 
 const SIZES = [
+  { name: 'portrait', width: 744, height: 1133 },
   { name: 'portrait', width: 768, height: 1024 },
   { name: 'landscape', width: 1024, height: 768 },
   { name: 'portrait', width: 820, height: 1180 },
   { name: 'landscape', width: 1180, height: 820 },
+  { name: 'portrait', width: 1024, height: 1366 },
+  { name: 'landscape', width: 1366, height: 1024 },
 ] as const;
 
 async function open(page: Page, width: number, height: number, lang: 'en' | 'da') {
@@ -23,18 +26,48 @@ async function open(page: Page, width: number, height: number, lang: 'en' | 'da'
   await page.evaluate(() => document.fonts.ready);
 }
 
-/** Visible controls whose tap area (box or larger ::after) is under 44 px either way. */
-const smallTargets = (page: Page) => page.evaluate(() => [...document.querySelectorAll<HTMLElement>('button, a[href], summary, [role="button"]')]
-  .filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden')
-  .map((el) => {
+/**
+ * Problems with the controls as touch targets: under 44 px either way, not hit at their own
+ * centre (something else would take the tap), or overlapping another visible control's box.
+ * Collapsed groups are opened first; controls scrolled under a sticky edge are checked again once
+ * scrolled into view. Text links
+ * inside a sentence (p, li, a hint, a message stamp) are text, not targets.
+ */
+const targetProblems = (page: Page) => page.evaluate(() => {
+  // Open every collapsed group first, so its rows are measured too.
+  for (const d of document.querySelectorAll('details')) d.open = true;
+  const controls = [...document.querySelectorAll<HTMLElement>('button, a[href], summary, [role="button"]')]
+    .filter((el) => el.checkVisibility({ visibilityProperty: true }))
+    .filter((el) => !(el.matches('button.link, a[href]') && el.closest('p, li, .hint, .stamp')));
+  const label = (el: HTMLElement) => `${el.tagName.toLowerCase()}.${String(el.className).split(' ').join('.')} '${(el.textContent ?? '').trim().slice(0, 18)}'`;
+  const hitAtCentre = (el: HTMLElement) => {
     const r = el.getBoundingClientRect();
-    const after = getComputedStyle(el, '::after');
-    const extra = after.content !== 'none' && after.position === 'absolute'
-      ? { w: parseFloat(after.width) || 0, h: parseFloat(after.height) || 0 } : { w: 0, h: 0 };
-    return { el, w: Math.max(r.width, extra.w), h: Math.max(r.height, extra.h) };
-  })
-  .filter(({ w, h }) => w > 0 && h > 0 && (w < 44 || h < 44))
-  .map(({ el, w, h }) => `${el.tagName.toLowerCase()}.${String(el.className).split(' ').join('.')} '${(el.textContent ?? '').trim().slice(0, 18)}' ${Math.round(w)}x${Math.round(h)}`));
+    const x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2;
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
+    const hit = document.elementFromPoint(x, y);
+    return !!hit && (hit === el || el.contains(hit));
+  };
+  const problems: string[] = [];
+  for (const el of controls) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 44 || r.height < 44) problems.push(`${label(el)} ${Math.round(r.width)}x${Math.round(r.height)}`);
+  }
+  // Pass 1, as laid out: the controls a finger can reach now must not overlap each other.
+  const visible = controls.filter(hitAtCentre).map((el) => ({ el, r: el.getBoundingClientRect() }));
+  for (let a = 0; a < visible.length; a++) for (let b = a + 1; b < visible.length; b++) {
+    const p = visible[a], q = visible[b];
+    if (p.el.contains(q.el) || q.el.contains(p.el)) continue;
+    const w = Math.min(p.r.right, q.r.right) - Math.max(p.r.left, q.r.left);
+    const h = Math.min(p.r.bottom, q.r.bottom) - Math.max(p.r.top, q.r.top);
+    if (w > 0.5 && h > 0.5) problems.push(`${label(p.el)} overlaps ${label(q.el)}`);
+  }
+  // Pass 2: every other control, once scrolled into view, is hit at its own centre.
+  for (const el of controls.filter((el) => !visible.some((v) => v.el === el))) {
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    if (!hitAtCentre(el)) problems.push(`${label(el)} is covered at its centre`);
+  }
+  return problems;
+});
 
 test.describe('touch', () => {
   test.use({ userAgent: IPAD_UA, hasTouch: true, isMobile: true });
@@ -59,8 +92,9 @@ test.describe('touch', () => {
         expect(box!.x + box!.width).toBeLessThanOrEqual(size.width + 1);
         expect(box!.y + box!.height).toBeLessThanOrEqual(size.height + 1);
 
-        // Every visible control, rail and open chat alike, is a 44 px touch target.
-        expect(await smallTargets(page)).toEqual([]);
+        // Every visible control, rail and open chat alike, is a 44 px touch target of its own:
+        // hit at its centre and overlapping no other control.
+        expect(await targetProblems(page)).toEqual([]);
       });
     }
   }
@@ -74,5 +108,8 @@ test.describe('mouse', () => {
     const row = await page.locator('.rail .track-link').first().boundingBox();
     expect(row).not.toBeNull();
     expect(row!.height).toBeLessThan(44);
+    await page.locator('[data-track^="peer:"]').first().click();
+    const send = await page.locator('[data-composer-bar] .send-btn').first().boundingBox();
+    expect(send!.height).toBeLessThan(44);
   });
 });

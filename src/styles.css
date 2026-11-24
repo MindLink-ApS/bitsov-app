@@ -1658,16 +1658,20 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 }
 
 /* Touch screens wider than a phone (tablets) keep the desktop rail, but every
-   control is a 44 px touch target. A mouse keeps the compact sizes. The
-   message cost toggle keeps its inline size and gets a larger invisible tap area. */
+   control a finger reaches is a real 44 px target, as on phones; a mouse keeps
+   the compact sizes. No invisible overhanging tap layers: each target is its own
+   box, so neighbouring targets never overlap (WCAG 2.5.8). */
 @media (pointer: coarse) {
-  .rail .track-link, .rail .new-track, .rail summary { min-height: 44px; }
-  .track-head > .track-title-btn { min-width: 44px; min-height: 44px; }
-  .icon-btn, .call-button.icon-btn, .context-toggle.icon-btn, .composer .attach { min-width: 44px; min-height: 44px; }
-  .send-btn.primary, .primary.soft.send-btn, .send-btn { height: 44px; min-height: 44px; border-radius: 22px; }
-  .composer-info > summary { width: 44px; height: 44px; }
-  .stamp .cost-toggle { position: relative; }
-  .stamp .cost-toggle::after { content: ''; position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; transform: translate(-50%, -50%); }
+  button:not(.link), summary, [role='tab'], [role='radio'], [role='menuitem'] { min-height: 44px; }
+  button:not(.link) { min-width: 44px; }
+  /* A .link that stands alone (Back, Save, Retry, Restore) is an action; one inside a sentence stays a text link. */
+  button.link:not(:is(p, li, .hint, .stamp) *) { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; }
+  .rail .track-link + .track-link { margin-top: 2px; }
+  .send-btn.primary, .primary.soft.send-btn, .send-btn { height: 44px; border-radius: 22px; }
+  .composer-info > summary { min-width: 44px; }
+  /* The message stamp row is 44 px tall so its cost toggle is a full target inside it. */
+  .stamp { min-height: 44px; }
+  .stamp .cost-toggle { min-height: 44px; min-width: 44px; justify-content: center; }
 }
 
 /* Mobile WKWebView draws edge to edge with viewport-fit=cover. The shell
