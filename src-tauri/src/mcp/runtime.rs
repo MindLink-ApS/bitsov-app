@@ -251,8 +251,12 @@ pub struct Runtime {
     unsaved_revoke: bool,
     spawn_tick: SpawnTick,
     /// Clients revoked in memory when the state was dropped after a panic
-    /// ([`Guarded`]): revoked again after the next load, so a recovery never
-    /// gives back access a revoke took away.
+    /// ([`Guarded`]): revoked again after every load until a save succeeds,
+    /// so a recovery never gives back access a revoke took away. Cleared only
+    /// by a successful save: saves are refused while the file is blocked, so
+    /// the host saved was either loaded (these applied) or started over (no
+    /// client of the old file in it), and either way the file no longer
+    /// approves them. Whether a record for an id exists does not matter.
     carry_revokes: Vec<String>,
 }
 
@@ -360,15 +364,23 @@ impl Runtime {
         }
         let mut loaded = Host::from_load(store::load(self.config.store.as_ref(), Some(sealer)));
         // Revokes held only in memory before a recovery hold again; the file
-        // does not have them yet.
-        for id in std::mem::take(&mut self.carry_revokes) {
-            if loaded.revoke(&id).is_ok() {
+        // does not have them yet. Applied to every load, blocked or not, and
+        // kept until a save puts them on file: a blocked load has no records
+        // to revoke, and the next good load must still find them.
+        for id in &self.carry_revokes {
+            if loaded.revoke(id).is_ok() {
                 self.unsaved_revoke = true;
             }
         }
         *lock(&self.host)? = loaded;
         self.loaded = true;
         Ok(())
+    }
+
+    /// A save of every record succeeded: nothing is held only in memory now.
+    fn saved(&mut self) {
+        self.unsaved_revoke = false;
+        self.carry_revokes.clear();
     }
 
     /// After a panic left the state half-updated (see [`Guarded`]): stop
@@ -392,7 +404,11 @@ impl Runtime {
         self.audit = None;
         self.loaded = false;
         self.start_error = None;
-        self.carry_revokes.extend(revoked);
+        for id in revoked {
+            if !self.carry_revokes.contains(&id) {
+                self.carry_revokes.push(id);
+            }
+        }
         self.notify();
     }
 
@@ -602,7 +618,7 @@ impl Runtime {
             host.stored().iter().find(|record| record.id == id && !record.revoked).and_then(client_view).ok_or(code::UNKNOWN)?
         };
         // The save carried every record, an earlier unsaved revoke included.
-        self.unsaved_revoke = false;
+        self.saved();
         self.notify();
         Ok(view)
     }
@@ -642,7 +658,7 @@ impl Runtime {
         let saved = match result {
             Ok(()) => {
                 // Every record was saved, an earlier unsaved revoke included.
-                self.unsaved_revoke = false;
+                self.saved();
                 true
             }
             Err(ChangeError::RevokedNotSaved(_)) => {
@@ -663,7 +679,7 @@ impl Runtime {
         let result = lock(&self.host)?.save_now(self.config.store.as_ref(), Some(sealer));
         let saved = match result {
             Ok(()) => {
-                self.unsaved_revoke = false;
+                self.saved();
                 true
             }
             Err(ChangeError::StoreBlocked(_)) => return Err(code::BLOCKED),
@@ -1090,6 +1106,74 @@ mod tests {
         let records = store::load(&file, Some(&SEALER)).unwrap();
         assert!(records.iter().any(|record| record.id == second && record.revoked), "the revoke is on file now");
         assert!(records.iter().any(|record| record.id == first && !record.revoked));
+    }
+
+    #[test]
+    fn revokes_carried_over_a_recovery_survive_a_blocked_load_until_saved() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        rt.open_pairing(20).unwrap();
+        let (_, asked) = pair_frame(rt.host(), "Notes", 5, 21);
+        let second = asked["pair"]["id"].as_str().unwrap().to_owned();
+        rt.approve(&second, &[Topic::Node], R2Preset::Counts, 22).unwrap();
+        let good = file.0.lock().unwrap().0.clone().unwrap();
+        file.fail(true);
+        assert_eq!(rt.revoke(&second).unwrap(), Saved { saved: false });
+
+        let guarded = Guarded::new(rt);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            guarded.with(|_runtime| -> Result<(), &'static str> { panic!("a command that panics midway") })
+        }));
+        assert_eq!(guarded.with(|runtime| Ok(runtime.status(30))), Err(code::RECOVERED));
+
+        // The first load after the recovery is blocked: no records to revoke.
+        file.put(b"tampered");
+        assert_eq!(guarded.with(|runtime| Ok(runtime.status(31))).unwrap().store, "blocked");
+        assert_eq!(guarded.with(|runtime| runtime.set_enabled(true, 32)), Err(code::BLOCKED));
+        // The file is good again: the next load still revokes the client.
+        file.put(&good);
+        guarded.with(|runtime| runtime.set_enabled(true, 33)).unwrap();
+        assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &second, 34))).unwrap()["error"], "unknown client");
+        assert!(guarded.with(|runtime| Ok(hello(runtime, &first, 35))).unwrap()["challenge"].is_string());
+        assert!(guarded.with(|runtime| Ok(runtime.status(36))).unwrap().unsaved_revoke);
+
+        // Kept until a save works; then on file, and nothing is carried any more.
+        assert_eq!(guarded.with(|runtime| runtime.save_again()).unwrap(), Saved { saved: false });
+        file.fail(false);
+        assert_eq!(guarded.with(|runtime| runtime.save_again()).unwrap(), Saved { saved: true });
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().any(|record| record.id == second && record.revoked));
+        assert!(guarded.with(|runtime| Ok(runtime.carry_revokes.is_empty())).unwrap());
+    }
+
+    #[test]
+    fn revokes_carried_over_a_recovery_hold_after_starting_over_and_a_restored_file() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let dir = std::env::temp_dir().join(format!("bsm-{}-carry", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = runtime_with(dir.clone(), Some(&SEALER), &file, &counts);
+        let (id, _) = approved(&mut rt, R2Preset::Counts);
+        let good = file.0.lock().unwrap().0.clone().unwrap();
+        file.fail(true);
+        assert_eq!(rt.revoke(&id).unwrap(), Saved { saved: false });
+        let guarded = Guarded::new(rt);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            guarded.with(|_runtime| -> Result<(), &'static str> { panic!("a command that panics midway") })
+        }));
+        assert_eq!(guarded.with(|runtime| Ok(runtime.status(30))), Err(code::RECOVERED));
+
+        // Blocked, started over (no clients), then the old file comes back and is loaded on a restart-like reload.
+        file.put(b"tampered");
+        assert_eq!(guarded.with(|runtime| Ok(runtime.status(31))).unwrap().store, "blocked");
+        guarded.with(|runtime| runtime.reset_clients(true, 32)).unwrap();
+        file.put(&good);
+        guarded.with(|runtime| {
+            runtime.loaded = false;
+            runtime.set_enabled(true, 33)
+        }).unwrap();
+        assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &id, 34))).unwrap()["error"], "unknown client", "still refused");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
