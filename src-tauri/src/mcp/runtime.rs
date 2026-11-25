@@ -499,17 +499,23 @@ impl Runtime {
             host.close_pairing(now_ms);
             host.stored().iter().find(|record| record.id == id && !record.revoked).and_then(client_view).ok_or(code::UNKNOWN)?
         };
+        // The save carried every record, an earlier unsaved revoke included.
+        self.unsaved_revoke = false;
         self.notify();
         Ok(view)
     }
 
-    /// The owner denies the waiting request; the window closes.
+    /// The owner denies the waiting request. Its window closes; denying any
+    /// other id (unknown, or already settled) leaves an open window alone.
     pub fn deny(&mut self, id: &str, now_ms: u64) -> Result<bool, &'static str> {
         self.sealer()?;
         let denied = {
             let mut host = lock(&self.host)?;
+            let its_request = host.pairing_window(now_ms).and_then(|view| view.request).is_some_and(|shown| shown.id == id);
             let denied = host.deny(id, now_ms);
-            host.close_pairing(now_ms);
+            if its_request {
+                host.close_pairing(now_ms);
+            }
             denied
         };
         self.notify();
@@ -532,7 +538,11 @@ impl Runtime {
         self.ensure_loaded(false)?;
         let result = lock(&self.host)?.revoke_saved(self.config.store.as_ref(), Some(sealer), id);
         let saved = match result {
-            Ok(()) => true,
+            Ok(()) => {
+                // Every record was saved, an earlier unsaved revoke included.
+                self.unsaved_revoke = false;
+                true
+            }
             Err(ChangeError::RevokedNotSaved(_)) => {
                 self.unsaved_revoke = true;
                 false
@@ -907,6 +917,62 @@ mod tests {
         let records = store::load(&file, Some(&SEALER)).unwrap();
         assert!(records[0].revoked, "the revoke is on file");
         assert_eq!(rt.revoke("mcp-ffff"), Err(code::UNKNOWN));
+    }
+
+    #[test]
+    fn denying_another_id_leaves_the_owners_window_open() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        rt.set_enabled(true, 0).unwrap();
+        rt.open_pairing(0).unwrap();
+        // An empty window, then the same window with its request: a stale or unknown id changes nothing.
+        assert!(!rt.deny("mcp-stale", 1).unwrap());
+        assert!(rt.status(1).pairing_open_s.is_some(), "the empty window stays open");
+        let (_, asked) = pair_frame(rt.host(), "Desk", 3, 2);
+        let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+        assert!(!rt.deny("mcp-stale", 3).unwrap());
+        let status = rt.status(3);
+        assert_eq!((status.waiting, status.pairing_open_s.is_some()), (1, true), "the request still waits");
+        // Denying the window's own request ends it.
+        assert!(rt.deny(&id, 4).unwrap());
+        let status = rt.status(4);
+        assert_eq!((status.waiting, status.pairing_open_s), (0, None));
+    }
+
+    #[test]
+    fn any_later_save_clears_an_unsaved_revoke() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        file.fail(true);
+        assert_eq!(rt.revoke(&first).unwrap(), Saved { saved: false });
+        assert!(rt.status(10).unsaved_revoke);
+        file.fail(false);
+
+        // An approval saves every record, the revoke included.
+        rt.open_pairing(11).unwrap();
+        let (_, asked) = pair_frame(rt.host(), "Notes", 5, 12);
+        let second = asked["pair"]["id"].as_str().unwrap().to_owned();
+        rt.approve(&second, &[Topic::Node], R2Preset::Counts, 13).unwrap();
+        assert!(!rt.status(14).unsaved_revoke);
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().any(|record| record.id == first && record.revoked));
+
+        // So does a later revoke that saves; a save that fails clears nothing.
+        rt.open_pairing(15).unwrap();
+        let (_, asked) = pair_frame(rt.host(), "Third", 6, 16);
+        let third = asked["pair"]["id"].as_str().unwrap().to_owned();
+        rt.approve(&third, &[Topic::Node], R2Preset::Counts, 17).unwrap();
+        file.fail(true);
+        assert_eq!(rt.revoke(&second).unwrap(), Saved { saved: false });
+        rt.open_pairing(18).unwrap();
+        let (_, asked) = pair_frame(rt.host(), "Fourth", 7, 19);
+        assert_eq!(rt.approve(asked["pair"]["id"].as_str().unwrap(), &[Topic::Node], R2Preset::Counts, 20), Err(code::NOT_SAVED));
+        assert!(rt.status(20).unsaved_revoke, "a save that failed clears nothing");
+        file.fail(false);
+        assert_eq!(rt.revoke(&third).unwrap(), Saved { saved: true });
+        assert!(!rt.status(21).unsaved_revoke);
+        let records = store::load(&file, Some(&SEALER)).unwrap();
+        assert!(records.iter().all(|record| record.revoked), "every revoke is on file");
     }
 
     #[test]
