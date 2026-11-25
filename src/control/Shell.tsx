@@ -99,6 +99,8 @@ import {
   type MembraneEntry,
 } from './body';
 import type { Source } from './source';
+import { AiApps } from './AiApps';
+import { aiAppsAvailable, tauriAiApps } from './aiAppsApi';
 import {
   denom,
   setDenom,
@@ -665,7 +667,10 @@ export function ControlCenter(props: Props) {
     setIntroNotice(null);
     setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
   };
-  const [tab, setTab] = createSignal<'general' | 'body' | 'node' | 'devices' | 'wallet' | 'budget' | 'frontdoor'>('body');
+  const [tab, setTab] = createSignal<'general' | 'body' | 'node' | 'devices' | 'wallet' | 'budget' | 'frontdoor' | 'ai'>('body');
+  // Settings → AI apps: desktop builds with the host's AI apps commands only.
+  const [aiApps, setAiApps] = createSignal(false);
+  onMount(() => { void aiAppsAvailable().then(setAiApps); });
   // Organism view (O1): readings the organs are drawn from, each with its age.
   const [openedAt, setOpenedAt] = createSignal(Date.now());
   const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
@@ -2604,6 +2609,7 @@ export function ControlCenter(props: Props) {
             <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => { setTab('wallet'); setContextOpen(true); }}>{tr('uiWallet')}</button>
             <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>{tr('uiBudget')}</button>
             <button role="tab" aria-selected={tab() === 'frontdoor'} data-tab="frontdoor" onClick={() => { setTab('frontdoor'); setContextOpen(true); }}>{tr('uiProfile')}</button>
+            <Show when={aiApps()}><button role="tab" aria-selected={tab() === 'ai'} data-tab="ai" onClick={() => { setTab('ai'); setContextOpen(true); }}>{tr('uiAiApps')}</button></Show>
           </div>
           <button class="quiet context-toggle" data-settings-close data-ios-back="settings" onClick={() => setContextOpen(false)} aria-label={tr('uiCloseSettings')}>{tr('uiClose')}</button>
         </div>
@@ -2700,6 +2706,9 @@ export function ControlCenter(props: Props) {
           </Match>
           <Match when={tab() === 'frontdoor'}>
             <FrontDoorEditor source={source} now={now()} />
+          </Match>
+          <Match when={tab() === 'ai' && aiApps()}>
+            <AiApps api={tauriAiApps} />
           </Match>
         </Switch>
       </aside>
