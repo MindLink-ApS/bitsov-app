@@ -170,8 +170,8 @@ struct Delivery {
 /// through [`Host::commit`], which saves them sealed or undoes the change.
 #[derive(Default)]
 pub struct Host {
-    pub registry: Registry,
-    pub identities: Identities,
+    registry: Registry,
+    identities: Identities,
     pub pairing: Pairing,
     sessions: Sessions,
     pub audit: Vec<AuditRow>,
@@ -225,16 +225,19 @@ pub trait ReadSource {
     fn reads_for(&self, preset: R2Preset) -> Box<dyn Reads + '_>;
 }
 
-/// One fixed source for every client, whatever its preset (tests, and the
-/// single-preset callers of [`Host::on_frame`]).
+/// One fixed source for every client, whatever its preset ([`Host::on_frame`],
+/// tests only).
+#[cfg(test)]
 struct Fixed<'a>(&'a dyn Reads);
 
+#[cfg(test)]
 impl Reads for Fixed<'_> {
     fn read(&self, topic: Topic, since_ms: Option<u64>) -> Result<Value, ReadFailed> {
         self.0.read(topic, since_ms)
     }
 }
 
+#[cfg(test)]
 impl ReadSource for Fixed<'_> {
     fn reads_for(&self, _preset: R2Preset) -> Box<dyn Reads + '_> {
         Box::new(Fixed(self.0))
@@ -333,9 +336,10 @@ impl Host {
     }
 
     /// The owner approves a waiting pairing request with the topics and
-    /// preset chosen (at most `rounded`). Not saved: see [`Host::commit`].
+    /// preset chosen (at most `rounded`). Not saved: only ever called inside
+    /// [`Host::commit`], which saves it or undoes it, so it is not public.
     /// Refused when [`MAX_CLIENTS`] other clients are already kept.
-    pub fn approve(&mut self, id: &str, topics: &[Topic], preset: Preset, now_ms: u64) -> Result<(), ChangeError> {
+    pub(super) fn approve(&mut self, id: &str, topics: &[Topic], preset: Preset, now_ms: u64) -> Result<(), ChangeError> {
         if !r2_preset_allowed(preset) {
             return Err(ChangeError::PresetTooWide);
         }
@@ -500,7 +504,10 @@ impl Host {
         }
     }
 
-    /// Handle one frame with one read source for every client.
+    /// Handle one frame with one read source for every client, whatever its
+    /// preset. Tests only: the app reads through [`Host::on_frame_from`] (or
+    /// the split path), narrowed to each client's own preset.
+    #[cfg(test)]
     pub fn on_frame(&mut self, conn: &mut Conn, frame: &[u8], now_ms: u64, reads: &dyn Reads) -> Step {
         self.on_frame_from(conn, frame, now_ms, &Fixed(reads))
     }
