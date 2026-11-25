@@ -224,6 +224,13 @@ pub struct AuditPage {
     pub unreadable: u32,
 }
 
+/// How the tick thread is started (a test makes it fail).
+type SpawnTick = fn(Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>>;
+
+fn spawn_tick(work: Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>> {
+    std::thread::Builder::new().name("mcp-tick".into()).spawn(work)
+}
+
 struct Running {
     listener: Box<dyn Listener>,
     tick: Option<JoinHandle<()>>,
@@ -239,6 +246,7 @@ pub struct Runtime {
     running: Option<Running>,
     start_error: Option<&'static str>,
     unsaved_revoke: bool,
+    spawn_tick: SpawnTick,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, &'static str> {
@@ -290,6 +298,7 @@ impl Runtime {
             running: None,
             start_error: None,
             unsaved_revoke: false,
+            spawn_tick,
         }
     }
 
@@ -400,18 +409,23 @@ impl Runtime {
                 return Err(code::START_FAILED);
             }
         };
-        self.start_error = None;
         let stop_tick = Arc::new((Mutex::new(false), Condvar::new()));
-        let tick = {
+        let spawned = {
             let (host, stop, notify, clock) = (self.host.clone(), stop_tick.clone(), self.config.notify.clone(), self.config.clock.clone());
             // Taken now, not when the thread starts, so no change is missed.
             let seen = pairing_signature(&self.host, clock());
-            std::thread::Builder::new()
-                .name("mcp-tick".into())
-                .spawn(move || tick_loop(&host, &audit, &stop, notify.as_ref(), clock.as_ref(), seen))
-                .ok()
+            (self.spawn_tick)(Box::new(move || tick_loop(&host, &audit, &stop, notify.as_ref(), clock.as_ref(), seen)))
         };
-        self.running = Some(Running { listener, tick, stop_tick });
+        // Without the tick, audit rows would stay in memory and a request
+        // would never reach the window: fail closed.
+        let Ok(tick) = spawned else {
+            let mut listener = listener;
+            listener.stop();
+            self.start_error = Some(code::START_FAILED);
+            return Err(code::START_FAILED);
+        };
+        self.start_error = None;
+        self.running = Some(Running { listener, tick: Some(tick), stop_tick });
         self.notify();
         Ok(())
     }
@@ -499,6 +513,11 @@ impl Runtime {
         }
         let view = {
             let mut host = lock(&self.host)?;
+            // Only the open window's own request can be approved.
+            let its_request = host.pairing_window(now_ms).and_then(|view| view.request).is_some_and(|shown| shown.id == id);
+            if !its_request {
+                return Err(code::UNKNOWN);
+            }
             let result = host.commit(self.config.store.as_ref(), Some(sealer), |h| h.approve(id, topics, preset.preset(), now_ms));
             match result {
                 Ok(()) => {}
@@ -597,7 +616,8 @@ impl Runtime {
             let pairing = row.tool == HANDSHAKE_AUDIT_TOOL && (row.arguments == PAIRING_CLOSED || row.arguments == PAIRING_TAKEN);
             AuditView {
                 at_ms: row.at_ms,
-                client: name_of(&row.client),
+                // A refused pairing proved no key: its name is only what the caller declared.
+                client: if pairing { None } else { name_of(&row.client) },
                 tool: if pairing { PAIRING_REFUSED_TOOL.to_owned() } else { row.tool.clone() },
                 outcome: outcome_code(row.outcome),
             }
@@ -963,6 +983,52 @@ mod tests {
         let status = rt.status(0);
         assert_eq!((status.enabled, status.start_error), (false, Some(code::START_FAILED)));
         assert_eq!(counts.started.load(Ordering::SeqCst), 0, "nothing listens");
+    }
+
+    #[test]
+    fn a_tick_that_cannot_start_leaves_the_switch_off() {
+        fn no_thread(_work: Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>> {
+            Err(io::Error::other("no thread for this test"))
+        }
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        rt.spawn_tick = no_thread;
+        assert_eq!(rt.set_enabled(true, 0), Err(code::START_FAILED));
+        assert_eq!((counts.started.load(Ordering::SeqCst), counts.stopped.load(Ordering::SeqCst)), (1, 1), "the listener is stopped again");
+        let status = rt.status(0);
+        assert_eq!((status.enabled, status.start_error), (false, Some(code::START_FAILED)));
+        assert_eq!(rt.open_pairing(0), Err(code::UNAVAILABLE));
+        rt.spawn_tick = spawn_tick;
+        let status = rt.set_enabled(true, 1).unwrap();
+        assert_eq!((status.enabled, status.start_error), (true, None));
+    }
+
+    #[test]
+    fn only_the_open_windows_own_request_can_be_approved() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        rt.set_enabled(true, 0).unwrap();
+        // A request no window took (made directly on the host).
+        let stray = rt.host().lock().unwrap().pairing.request("Stray", &[1u8; 32], 1).unwrap().id;
+        assert_eq!(rt.approve(&stray, &[Topic::Node], R2Preset::Counts, 2), Err(code::UNKNOWN));
+        rt.open_pairing(3).unwrap();
+        assert_eq!(rt.approve(&stray, &[Topic::Node], R2Preset::Counts, 4), Err(code::UNKNOWN), "not this window's request");
+        assert!(rt.clients().unwrap().is_empty());
+        assert_eq!(file.0.lock().unwrap().0, None, "nothing was saved");
+    }
+
+    #[test]
+    fn a_refused_pairing_names_no_client_even_with_a_known_id_as_its_name() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (id, _) = approved(&mut rt, R2Preset::Counts);
+        let (_, refused) = pair_frame(rt.host(), &id, 9, 10);
+        assert_eq!(refused["error"], PAIRING_CLOSED);
+        assert_eq!(hello(&rt, "mcp-0000", 11)["error"], "unknown client");
+        let page = rt.audit(12).unwrap();
+        let pairing = page.rows.iter().find(|row| row.tool == PAIRING_REFUSED_TOOL).expect("the refused pairing");
+        assert_eq!(pairing.client, None, "a declared name proves nothing");
+        assert_eq!(page.rows.iter().filter(|row| row.client.is_some()).count(), 0);
     }
 
     #[test]

@@ -416,8 +416,11 @@ impl Host {
     }
 
     /// The owner opens a pairing window: for [`PAIRING_WINDOW_MS`] one `pair`
-    /// request may arrive. Opening again starts a new window.
+    /// request may arrive. Opening again starts a new window, and a request
+    /// the old one took that is still waiting is dropped first, so no request
+    /// outlives its window.
     pub fn open_pairing(&mut self, now_ms: u64) {
+        self.close_pairing(now_ms);
         self.window = Some(PairingWindow { until_ms: now_ms.saturating_add(PAIRING_WINDOW_MS), request: None, others_refused: 0 });
     }
 
@@ -1073,6 +1076,20 @@ mod tests {
         assert_eq!(host.pairing_window(12), None);
         assert!(!host.pairing.waiting(12).iter().any(|w| Some(w.id.as_str()) == asked["pair"]["id"].as_str()), "the cancelled request is dropped");
         assert_eq!(reply(&ask(&mut host, "Notes", 6, 13))["error"], PAIRING_CLOSED);
+    }
+
+    #[test]
+    fn opening_a_new_window_drops_the_old_windows_waiting_request() {
+        let mut host = Host::default();
+        host.open_pairing(0);
+        let old = reply(&ask(&mut host, "Desk", 1, 1));
+        let old = old["pair"]["id"].as_str().unwrap().to_owned();
+        host.open_pairing(2);
+        assert!(!host.pairing.waiting(2).iter().any(|w| w.id == old), "no request outlives its window");
+        let view = host.pairing_window(2).expect("the new window is open");
+        assert_eq!((view.request, view.others_refused), (None, 0));
+        assert!(reply(&ask(&mut host, "Notes", 2, 3))["pair"]["id"].is_string(), "the new window takes its own request");
+        assert_eq!(host.pairing.waiting(3).len(), 1);
     }
 
     #[test]
