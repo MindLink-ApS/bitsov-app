@@ -265,6 +265,15 @@ export class AudioStatsRecorder {
   received(codec: 'opus' | 'pcmu') { if (codec === 'opus') this.rxOpus++; else this.rxPcmu++; }
 
   /** The main-thread timer fired at `now`. */
+  /**
+   * The 20 ms timer starts now. The gap clock starts here, not at
+   * construction, so the engine's setup (context, worklet, codec probe) is
+   * not counted as a main-thread stall.
+   */
+  startTicking(now: number) {
+    this.lastTick = now;
+  }
+
   tick(now: number) {
     const gap = Math.max(0, now - this.lastTick);
     if (gap > this.loopGapMs) this.loopGapMs = gap;

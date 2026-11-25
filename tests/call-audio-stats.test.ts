@@ -106,6 +106,18 @@ describe('AudioStatsRecorder', () => {
     expect(r.close(16000, extras()).gaps).toMatchObject({ count: 1, maxMs: 10 });
   });
 
+  it('counts no setup time as a main-thread gap, and still catches a real gap after it', () => {
+    // The timer only starts once the audio graph is up, 3 s after the recorder.
+    const r = new AudioStatsRecorder(0);
+    r.startTicking(3000);
+    r.tick(3020); r.tick(3040);
+    expect(r.close(5000, extras()).loopGapMs).toBe(20);
+    const stalled = new AudioStatsRecorder(0);
+    stalled.startTicking(3000);
+    stalled.tick(3020); stalled.tick(3400);
+    expect(stalled.close(5000, extras()).loopGapMs).toBe(380);
+  });
+
   it('records the longest main-thread gap, across row boundaries', () => {
     const r = new AudioStatsRecorder(0);
     r.tick(20); r.tick(40);
@@ -242,6 +254,8 @@ describe('the engine feeds the recorder', () => {
       clock: () => now,
     });
     await audio.ready;
+    // The 20 ms timer starts with the audio graph, not before it.
+    expect(rows).toHaveLength(0);
     const capture = [...FakeWorkletNode.made].reverse().find((m) => m.name === 'bitsov-call-capture')!.node;
     const playout = [...FakeWorkletNode.made].reverse().find((m) => m.name === 'bitsov-call-playout')!.node;
     playout.port.postMessage.mockImplementation((message: { type: string }) => {
@@ -262,6 +276,28 @@ describe('the engine feeds the recorder', () => {
     await audio.close();
     expect(rows).toHaveLength(2);
     expect(rows[1]).toMatchObject({ partial: true, fromMs: 5000, toMs: 8000, jitter: null });
+  });
+
+  it('does not count a slow audio setup as a main-thread gap', async () => {
+    const rows: AudioStatRow[] = [];
+    // The worklet takes 3 s to load; the clock follows the fake timers.
+    const slow = () => Object.assign(new FakeContext(), { audioWorklet: { addModule: () => new Promise<void>((done) => setTimeout(done, 3000)) } });
+    const audio = createCallAudio({
+      stream: { getTracks: () => [], getAudioTracks: () => [], getVideoTracks: () => [] } as unknown as MediaStream,
+      transport: { send: () => {} },
+      audioContext: () => slow() as unknown as AudioContext,
+      workletUrl: 'worklet.js',
+      opus: false,
+      onStats: (row) => rows.push(row),
+      clock: () => Date.now(),
+    });
+    await vi.advanceTimersByTimeAsync(3000);
+    await audio.ready;
+    // One row: 5 s, plus the 500 ms the unanswered jitter read is given.
+    await vi.advanceTimersByTimeAsync(5600);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].loopGapMs).toBeLessThan(100);
+    await audio.close();
   });
 
   it('does not touch the payloads sent or run any timer when no sink is given', async () => {

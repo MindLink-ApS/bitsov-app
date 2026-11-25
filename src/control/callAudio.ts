@@ -395,6 +395,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     sayHello();
     if (rec) {
       rowTimer = setInterval(() => void closeRow(), ROW_MS);
+      rec.startTicking(clock());
       loopTimer = setInterval(() => rec.tick(clock()), 20);
     }
     helloTimer = setInterval(() => { if (peerCaps === null) sayHello(); else { clearInterval(helloTimer); helloTimer = undefined; } }, HELLO_INTERVAL_MS);
