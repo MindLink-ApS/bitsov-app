@@ -386,9 +386,9 @@ impl Runtime {
     /// After a panic left the state half-updated (see [`Guarded`]): stop
     /// everything and drop the in-memory state without saving or flushing it.
     fn recover_after_panic(&mut self) {
-        let revoked: Vec<String> = {
+        let revoked = {
             let host = self.host.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            host.stored().iter().filter(|record| record.revoked).map(|record| record.id.clone()).collect()
+            revokes_to_carry(&host)
         };
         if let Some(mut running) = self.running.take() {
             running.listener.stop();
@@ -738,6 +738,13 @@ impl Drop for Runtime {
         let now = (self.config.clock)();
         self.switch_off(now);
     }
+}
+
+/// The clients whose access a recovery must not give back: every client
+/// revoked in this host. The one place that reads them, so a change to how
+/// revocations are kept changes only this.
+fn revokes_to_carry(host: &Host) -> Vec<String> {
+    host.stored().iter().filter(|record| record.revoked).map(|record| record.id.clone()).collect()
 }
 
 fn client_view(record: &store::StoredClient) -> Option<ClientView> {
