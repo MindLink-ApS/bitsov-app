@@ -351,7 +351,7 @@ impl Host {
     /// Revoke in memory only: no new session, no further frame on a live one,
     /// and its key is dropped. The record stays, marked revoked. Use
     /// [`Host::revoke_saved`].
-    fn revoke(&mut self, id: &str) -> Result<(), ChangeError> {
+    pub(super) fn revoke(&mut self, id: &str) -> Result<(), ChangeError> {
         let record = self.stored.iter_mut().find(|record| record.id == id && !record.revoked).ok_or(ChangeError::UnknownClient)?;
         record.revoked = true;
         self.registry.revoke(id);
