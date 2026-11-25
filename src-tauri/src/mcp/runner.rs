@@ -79,6 +79,10 @@ pub enum Phase {
     Pairing,
     /// A client that proved its key.
     Ready,
+    /// Sending its last reply, then closing: for a pairing approval that
+    /// reply is the client's only copy of its secret, so a connection in this
+    /// phase is never closed to make room.
+    Closing,
 }
 
 impl Phase {
@@ -86,7 +90,8 @@ impl Phase {
         match conn {
             Conn::Ready { .. } => Self::Ready,
             Conn::Pairing { .. } => Self::Pairing,
-            Conn::Start | Conn::Challenged { .. } | Conn::Closed => Self::Handshake,
+            Conn::Start | Conn::Challenged { .. } => Self::Handshake,
+            Conn::Closed => Self::Closing,
         }
     }
 }
@@ -145,7 +150,7 @@ pub fn serve_timed<S: Read + ReadTimeout>(
     let mut conn = Conn::Start;
     loop {
         let until = match Phase::of(&conn) {
-            Phase::Handshake => Some(accepted + deadlines.handshake),
+            Phase::Handshake | Phase::Closing => Some(accepted + deadlines.handshake),
             Phase::Pairing => Some(accepted + deadlines.pairing),
             Phase::Ready => None,
         };
@@ -293,32 +298,29 @@ mod live {
     const HANDSHAKE: u8 = 0;
     const PAIRING: u8 = 1;
     const READY: u8 = 2;
+    const CLOSING: u8 = 3;
 
     fn phase_code(phase: Phase) -> u8 {
         match phase {
             Phase::Handshake => HANDSHAKE,
             Phase::Pairing => PAIRING,
             Phase::Ready => READY,
+            Phase::Closing => CLOSING,
         }
     }
 
     impl Live {
-        /// Close the connection that makes room: the oldest one still in the
+        /// The connection to close to make room: the oldest one still in the
         /// handshake, else the oldest one waiting for a pairing decision. A
-        /// ready client is never closed to make room. False if none may go.
-        fn make_room(&mut self) -> bool {
-            let oldest = [HANDSHAKE, PAIRING].into_iter().find_map(|wanted| {
+        /// ready client, or one sending its last reply (a pairing secret,
+        /// perhaps), is never closed to make room. `except` is never chosen.
+        fn to_make_room(&self, except: u64) -> Option<u64> {
+            [HANDSHAKE, PAIRING].into_iter().find_map(|wanted| {
                 self.conns.iter()
-                    .filter(|(_, conn)| conn.phase.load(Ordering::SeqCst) == wanted)
+                    .filter(|(key, conn)| **key != except && conn.phase.load(Ordering::SeqCst) == wanted)
                     .map(|(key, _)| *key)
                     .min()
-            });
-            let Some(oldest) = oldest else { return false };
-            // Its thread ends on the closed connection; its place is already free.
-            if let Some(closed) = self.conns.remove(&oldest) {
-                (closed.close)();
-            }
-            true
+            })
         }
     }
 
@@ -332,11 +334,12 @@ mod live {
             self.live.lock().map_or(0, |live| live.conns.len())
         }
 
-        /// At the cap: close the connection that makes room (see
-        /// [`Live::make_room`]). False if every live connection is ready.
+        /// Whether a live connection may make room for one more (see
+        /// [`Live::to_make_room`]). Nothing is closed here: [`admit`] closes
+        /// it once the new connection has started.
         #[cfg_attr(not(windows), allow(dead_code))]
-        pub(super) fn make_room(&self) -> bool {
-            self.live.lock().is_ok_and(|mut live| live.make_room())
+        pub(super) fn could_make_room(&self) -> bool {
+            self.live.lock().is_ok_and(|live| live.to_make_room(u64::MAX).is_some())
         }
 
         /// Close every live connection and wait for every connection thread.
@@ -359,8 +362,10 @@ mod live {
 
     /// Start serving a new connection on its own thread. When
     /// [`MAX_CONNECTIONS`] are already live, the connection that makes room
-    /// is closed first (see [`Live::make_room`]); if every live connection is
-    /// a ready client, the new one is closed at once.
+    /// is closed (see [`Live::to_make_room`]); if none may, the new one is
+    /// closed at once. Nothing is closed to make room until the new
+    /// connection is set up and its thread has started: if that fails, every
+    /// connection that was live stays live.
     ///
     /// `serve` runs on the connection's thread and hears its phase. What it
     /// returns (the connection's own handles) is dropped only after the place
@@ -376,11 +381,11 @@ mod live {
             return;
         };
         live.workers.retain(|worker| !worker.is_finished());
-        if live.conns.len() >= MAX_CONNECTIONS && !live.make_room() {
+        let key = live.next;
+        if live.conns.len() >= MAX_CONNECTIONS && live.to_make_room(key).is_none() {
             close();
             return;
         }
-        let key = live.next;
         live.next += 1;
         let phase = Arc::new(AtomicU8::new(HANDSHAKE));
         live.conns.insert(key, LiveConn { close, phase: phase.clone() });
@@ -394,11 +399,19 @@ mod live {
             drop(place);
             drop(kept);
         }));
+        // A failed spawn has already freed the new place; nothing was closed.
+        let Ok(worker) = spawned else { return };
         // Only the accept thread admits, and stop() joins it before it takes
         // the workers, so no worker can be missed here.
-        if let Ok(worker) = spawned {
-            if let Ok(mut live) = shared.live.lock() {
-                live.workers.push(worker);
+        let Ok(mut live) = shared.live.lock() else { return };
+        live.workers.push(worker);
+        if live.conns.len() > MAX_CONNECTIONS {
+            // Chosen again now: a phase may have moved on while the lock was
+            // released. If nothing may make room any more, the new one goes.
+            let closing = live.to_make_room(key).unwrap_or(key);
+            // Its thread ends on the closed connection; its place is free at once.
+            if let Some(closed) = live.conns.remove(&closing) {
+                (closed.close)();
             }
         }
     }
@@ -455,6 +468,21 @@ mod live {
         assert!(ended.is_err());
         assert!(shared.live.lock().unwrap().conns.is_empty(), "the place is free");
         assert_eq!((&client).read(&mut [0u8; 1]).unwrap(), 0, "the client sees the end");
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn room_is_made_by_the_oldest_handshake_then_pairing_never_ready_or_closing() {
+        let mut live = Live::default();
+        for (key, code) in [(1, READY), (2, CLOSING), (3, PAIRING), (4, HANDSHAKE), (5, PAIRING), (6, HANDSHAKE)] {
+            live.conns.insert(key, LiveConn { close: Box::new(|| {}), phase: Arc::new(AtomicU8::new(code)) });
+        }
+        assert_eq!(live.to_make_room(99), Some(4), "the oldest handshake first");
+        assert_eq!(live.to_make_room(4), Some(6), "never the one excepted");
+        live.conns.retain(|_, conn| conn.phase.load(Ordering::SeqCst) != HANDSHAKE);
+        assert_eq!(live.to_make_room(99), Some(3), "then the oldest pairing request");
+        live.conns.retain(|_, conn| conn.phase.load(Ordering::SeqCst) != PAIRING);
+        assert_eq!(live.to_make_room(99), None, "a ready or closing connection never makes room");
     }
 }
 
@@ -639,6 +667,50 @@ mod macos {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(test)]
+    #[test]
+    fn when_a_new_connection_cannot_start_no_live_connection_is_closed() {
+        use std::io::Read;
+        use super::MAX_CONNECTIONS;
+        use std::sync::atomic::AtomicUsize;
+        static STARTED: AtomicUsize = AtomicUsize::new(0);
+        fn eight_then_none(work: Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>> {
+            if STARTED.fetch_add(1, Ordering::SeqCst) < MAX_CONNECTIONS {
+                live::spawn_thread(work)
+            } else {
+                Err(io::Error::other("no more threads for this test"))
+            }
+        }
+        struct Unused;
+        impl ReadSource for Unused {
+            fn reads_for(&self, _preset: crate::mcp::store::R2Preset) -> Box<dyn crate::mcp::server::Reads + '_> {
+                unreachable!("no read in this test")
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("bsm-{}-nf", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut runner = Runner::start_spawning(&dir, Arc::new(Mutex::new(Host::default())), Arc::new(Unused), Deadlines::default(), eight_then_none).unwrap();
+        let socket = dir.join(unix::SOCKET_NAME);
+        let held: Vec<UnixStream> = (0..MAX_CONNECTIONS).map(|_| UnixStream::connect(&socket).unwrap()).collect();
+        let started = Instant::now();
+        while runner.live() < MAX_CONNECTIONS {
+            assert!(started.elapsed() < Duration::from_secs(10), "eight live connections");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Eight stalled handshakes could make room, but the ninth cannot start: it goes, they stay.
+        let ninth = UnixStream::connect(&socket).unwrap();
+        ninth.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        assert_eq!((&ninth).read(&mut [0u8; 1]).unwrap(), 0, "the ninth sees the end");
+        assert_eq!(runner.live(), MAX_CONNECTIONS, "no live connection was closed for it");
+        for stream in &held {
+            stream.set_nonblocking(true).unwrap();
+            let still_open = matches!((&*stream).read(&mut [0u8; 1]), Err(error) if error.kind() == io::ErrorKind::WouldBlock);
+            assert!(still_open, "a live connection was closed");
+        }
+        runner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn run_connection(shared: &Shared, stream: UnixStream, accepted: Instant, report: &dyn Fn(Phase)) {
         let Ok(read_half) = stream.try_clone() else { return };
         let mut reader = BufReader::new(read_half);
@@ -670,10 +742,13 @@ mod windows {
     use super::{now_ms, serve_timed, Deadlines};
 
     /// The Windows listener: this user's pipe (`bitsov_ffi`) and its threads.
-    /// The same deadlines, cap and make-room rule as on macOS: at the cap the
-    /// pipe asks the runner to make room before it refuses a client, and a
-    /// closed connection gives its pipe slot back at once, so the runner's
-    /// count and the pipe's agree. Dropping it is [`Runner::stop`].
+    /// The same deadlines, cap and make-room rule as on macOS. At the cap the
+    /// pipe asks the runner whether a connection may make room before it
+    /// refuses a client; if so, the client comes in as one over, and once its
+    /// thread has started the runner closes the connection that makes room
+    /// (or the new one). A closed connection gives its pipe slot back at
+    /// once, so the runner's count and the pipe's agree. Dropping it is
+    /// [`Runner::stop`].
     pub struct Runner {
         shared: Arc<Shared>,
         stopper: PipeStopper,
@@ -774,7 +849,7 @@ mod windows {
 
     fn accept_loop(shared: &Arc<Shared>, listener: &mut PipeListener) {
         loop {
-            let accepted = listener.accept_one_making_room(&mut || shared.make_room());
+            let accepted = listener.accept_one_making_room(&mut || shared.could_make_room());
             if shared.stopping.load(Ordering::SeqCst) {
                 return;
             }
@@ -1101,6 +1176,51 @@ mod tests {
             assert!(UnixStream::connect(dir.join(SOCKET_NAME)).is_err(), "nothing listens");
             runner.stop();
             let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// Writes, noted in one log with the phases.
+        struct Noting {
+            inner: UnixStream,
+            log: Arc<Mutex<Vec<String>>>,
+        }
+        impl Write for Noting {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let what = if bytes.windows(8).any(|w| w == b"\"secret\"") { "write secret" } else { "write" };
+                self.log.lock().unwrap().push(what.to_owned());
+                self.inner.write(bytes)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.inner.flush()
+            }
+        }
+
+        #[test]
+        fn a_connection_handing_over_a_pairing_secret_is_closing_before_the_write() {
+            let host = Arc::new(Mutex::new(Host::default()));
+            let (client, served) = UnixStream::pair().unwrap();
+            client.set_read_timeout(Some(WAIT)).unwrap();
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let server = {
+                let (host, log) = (host.clone(), log.clone());
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(served.try_clone().unwrap());
+                    let mut writer = Noting { inner: served, log: log.clone() };
+                    let report = move |phase: Phase| log.lock().unwrap().push(format!("{phase:?}"));
+                    serve_timed(&host, &Instant, &mut reader, &mut writer, &now_ms, Deadlines::default(), Clock::now(), &report)
+                })
+            };
+            let mut reader = BufReader::new(client.try_clone().unwrap());
+            let mut writer = client;
+            send(&mut writer, &json!({"pair": {"name": "Desk", "nonce": hex::encode([6u8; 32])}}).to_string());
+            let id = receive(&mut reader)["pair"]["id"].as_str().unwrap().to_owned();
+            host.lock().unwrap().commit(&MemFile::default(), Some(&TagSealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, now_ms())).unwrap();
+            send(&mut writer, r#"{"pair_status":true}"#);
+            assert_eq!(receive(&mut reader)["pair"], "approved");
+            server.join().unwrap().unwrap();
+            let log = log.lock().unwrap().clone();
+            let secret = log.iter().position(|entry| entry == "write secret").expect("the secret was written");
+            assert_eq!(log[secret - 1], "Closing", "never closed to make room while it hands over: {log:?}");
+            assert_eq!(log[..secret - 1], ["Pairing", "write"], "{log:?}");
         }
 
         /// A read source that panics while reading.

@@ -212,11 +212,13 @@ impl PipeListener {
     }
 
     /// [`Self::accept_one`], but when an admissible client (this user, not
-    /// elevated) finds every slot taken, `make_room` is asked first. It may
-    /// close a live connection ([`PipeCloser::close`] frees its slot at once)
-    /// and return true; the client is then admitted if a slot is free. It is
-    /// never called for a client that would be refused anyway.
-    pub fn accept_one_making_room(&mut self, make_room: &mut dyn FnMut() -> bool) -> io::Result<Option<PipeConnection>> {
+    /// elevated) finds every slot taken, `will_make_room` is asked whether the
+    /// caller will make room for it. If so, the client is admitted as one
+    /// over the cap, and the caller then closes a connection (this one if it
+    /// cannot start; [`PipeCloser::close`] gives a slot back at once). Never
+    /// more than one over: at [`MAX_CONNECTIONS`] + 1 every client is
+    /// refused. It is never asked about a client that would be refused anyway.
+    pub fn accept_one_making_room(&mut self, will_make_room: &mut dyn FnMut() -> bool) -> io::Result<Option<PipeConnection>> {
         let connected = match connect(&self.waiting, &self.connected, &self.stop.event) {
             Ok(connected) => connected,
             Err(error) => {
@@ -234,7 +236,7 @@ impl PipeListener {
         let admit = connected
             && client_is_owner(&self.waiting, &self.user)
             && (self.live_connections() < MAX_CONNECTIONS
-                || (make_room() && self.live_connections() < MAX_CONNECTIONS));
+                || (self.live_connections() == MAX_CONNECTIONS && will_make_room()));
         if !admit {
             // A disconnected instance takes no client until it is connected
             // again, so it is replaced: the new one is created first, so the
@@ -769,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn at_the_cap_make_room_may_close_a_connection_whose_slot_frees_at_once() {
+    fn at_the_cap_one_client_may_come_in_over_when_the_caller_makes_room() {
         let name = test_name();
         let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
         let mut clients = Vec::new();
@@ -783,16 +785,19 @@ mod tests {
         let mut asked = 0;
         assert!(listener.accept_one_making_room(&mut || { asked += 1; false }).unwrap().is_none());
         assert_eq!(asked, 1);
-        // Closing the oldest frees its slot at once, while its halves still exist.
-        let oldest = halves[0].0.closer();
+        // Agreeing admits one over the cap, and only one.
         let _next = client(&name).unwrap();
-        let admitted = listener.accept_one_making_room(&mut || { oldest.close(); true }).unwrap();
-        assert!(admitted.is_some(), "the room made is taken");
+        let over = listener.accept_one_making_room(&mut || true).unwrap().expect("one over");
+        assert_eq!(listener.live_connections(), MAX_CONNECTIONS + 1);
+        let _more = client(&name).unwrap();
+        assert!(listener.accept_one_making_room(&mut || panic!("not asked past one over")).unwrap().is_none());
+        // Closing the oldest gives its slot back at once, while its halves still exist.
+        halves[0].0.closer().close();
         assert_eq!(listener.live_connections(), MAX_CONNECTIONS);
         let mut buf = [0u8; 1];
         assert!(!matches!(clients[0].read(&mut buf), Ok(n) if n > 0), "the closed client is cut");
-        // Under the cap, make_room is never asked.
-        drop(admitted);
+        // Under the cap, the question is never asked.
+        drop(over);
         let _another = client(&name).unwrap();
         assert!(listener.accept_one_making_room(&mut || panic!("not at the cap")).unwrap().is_some());
     }
