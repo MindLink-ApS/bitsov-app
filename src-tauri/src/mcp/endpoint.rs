@@ -373,7 +373,7 @@ impl Host {
     /// Remove in memory only: no new session, no further frame on a live one,
     /// its key is dropped and its record leaves the list. Use
     /// [`Host::revoke_saved`].
-    fn revoke(&mut self, id: &str, now_ms: u64) -> Result<(), ChangeError> {
+    pub(super) fn revoke(&mut self, id: &str, now_ms: u64) -> Result<(), ChangeError> {
         let at = self.stored.iter().position(|record| record.id == id).ok_or(ChangeError::UnknownClient)?;
         let record = self.stored.remove(at);
         self.audit.push(AuditRow {

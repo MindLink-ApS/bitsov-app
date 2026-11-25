@@ -53,6 +53,9 @@ pub mod code {
     /// A removal is not on file yet: the endpoint stays off until it is.
     pub const REMOVAL_NOT_SAVED: &str = "removal_not_saved";
     pub const PAIRING_CLOSED: &str = "pairing_closed";
+    /// An earlier command failed midway (a panic); the switch was turned off
+    /// and the state is read again from the clients file. Returned once.
+    pub const RECOVERED: &str = "recovered";
 }
 
 /// The folder under the app's data directory: the socket, the clients file
@@ -252,6 +255,45 @@ pub struct Runtime {
     start_error: Option<&'static str>,
     unsaved_revoke: bool,
     spawn_tick: SpawnTick,
+    /// Clients revoked in memory when the state was dropped after a panic
+    /// ([`Guarded`]): revoked again after every load until a save succeeds,
+    /// so a recovery never gives back access a revoke took away. Cleared only
+    /// by a successful save: saves are refused while the file is blocked, so
+    /// the host saved was either loaded (these applied) or started over (no
+    /// client of the old file in it), and either way the file no longer
+    /// approves them. Whether a record for an id exists does not matter.
+    carry_revokes: Vec<String>,
+}
+
+/// The runtime behind its lock, recovering fail-safe after a panic.
+///
+/// A command that panics while it holds the lock leaves it poisoned, and the
+/// runtime may be half-updated. The next command then does not use that state
+/// for anything: the listener and the tick are stopped (the switch is off),
+/// the in-memory host and audit log are dropped without a save or a flush,
+/// the clients file is left untouched, and that command returns
+/// [`code::RECOVERED`] once. Later commands work normally and read the state
+/// again from the file. The one thing carried over is which clients were
+/// revoked in memory, since keeping a revoke can only take access away.
+pub struct Guarded(Mutex<Runtime>);
+
+impl Guarded {
+    pub fn new(runtime: Runtime) -> Self {
+        Guarded(Mutex::new(runtime))
+    }
+
+    /// Run `command` on the runtime, or recover from an earlier panic.
+    pub fn with<T>(&self, command: impl FnOnce(&mut Runtime) -> Result<T, &'static str>) -> Result<T, &'static str> {
+        match self.0.lock() {
+            Ok(mut runtime) => command(&mut runtime),
+            Err(poisoned) => {
+                let mut runtime = poisoned.into_inner();
+                runtime.recover_after_panic();
+                self.0.clear_poison();
+                Err(code::RECOVERED)
+            }
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, &'static str> {
@@ -305,6 +347,7 @@ impl Runtime {
             start_error: None,
             unsaved_revoke: false,
             spawn_tick,
+            carry_revokes: Vec::new(),
         }
     }
 
@@ -325,10 +368,55 @@ impl Runtime {
         if self.loaded && !(retry && blocked) {
             return Ok(());
         }
-        let loaded = Host::from_load(store::load(self.config.store.as_ref(), Some(sealer)));
+        let mut loaded = Host::from_load(store::load(self.config.store.as_ref(), Some(sealer)));
+        // Revokes held only in memory before a recovery hold again; the file
+        // does not have them yet. Applied to every load, blocked or not, and
+        // kept until a save puts them on file: a blocked load has no records
+        // to revoke, and the next good load must still find them.
+        let now = (self.config.clock)();
+        for id in &self.carry_revokes {
+            if loaded.revoke(id, now).is_ok() {
+                self.unsaved_revoke = true;
+            }
+        }
         *lock(&self.host)? = loaded;
         self.loaded = true;
         Ok(())
+    }
+
+    /// A save of every record succeeded: nothing is held only in memory now.
+    fn saved(&mut self) {
+        self.unsaved_revoke = false;
+        self.carry_revokes.clear();
+    }
+
+    /// After a panic left the state half-updated (see [`Guarded`]): stop
+    /// everything and drop the in-memory state without saving or flushing it.
+    fn recover_after_panic(&mut self) {
+        let revoked = {
+            let host = self.host.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            revokes_to_carry(&host)
+        };
+        if let Some(mut running) = self.running.take() {
+            running.listener.stop();
+            let (stopped, wake) = &*running.stop_tick;
+            *stopped.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            wake.notify_all();
+            if let Some(tick) = running.tick.take() {
+                let _ = tick.join();
+            }
+        }
+        // New locks, not the possibly poisoned ones.
+        self.host = Arc::new(Mutex::new(Host::default()));
+        self.audit = None;
+        self.loaded = false;
+        self.start_error = None;
+        for id in revoked {
+            if !self.carry_revokes.contains(&id) {
+                self.carry_revokes.push(id);
+            }
+        }
+        self.notify();
     }
 
     fn audit_log(&mut self) -> Result<Arc<Mutex<Log>>, &'static str> {
@@ -551,7 +639,7 @@ impl Runtime {
             host.stored().iter().find(|record| record.id == id).and_then(client_view).ok_or(code::UNKNOWN)?
         };
         // The save carried every record, an earlier unsaved revoke included.
-        self.unsaved_revoke = false;
+        self.saved();
         self.notify();
         Ok(view)
     }
@@ -593,7 +681,7 @@ impl Runtime {
         let saved = match result {
             Ok(()) => {
                 // Every record was saved, an earlier unsaved revoke included.
-                self.unsaved_revoke = false;
+                self.saved();
                 true
             }
             Err(ChangeError::RevokedNotSaved(_)) => {
@@ -622,7 +710,7 @@ impl Runtime {
         drop(host);
         let saved = match result {
             Ok(()) => {
-                self.unsaved_revoke = false;
+                self.saved();
                 if self.start_error == Some(code::REMOVAL_NOT_SAVED) {
                     self.start_error = None;
                 }
@@ -690,6 +778,15 @@ impl Drop for Runtime {
         let now = (self.config.clock)();
         self.switch_off(now);
     }
+}
+
+/// The clients whose access a recovery must not give back: every client
+/// removed in this host whose removal no save has carried yet (a saved
+/// removal has left the file, so a reload cannot give it back). The one
+/// place that reads them, so a change to how revocations are kept changes
+/// only this.
+fn revokes_to_carry(host: &Host) -> Vec<String> {
+    host.removed_unsaved().to_vec()
 }
 
 fn client_view(record: &store::StoredClient) -> Option<ClientView> {
@@ -1034,6 +1131,113 @@ mod tests {
     }
 
     #[test]
+    fn a_panic_mid_command_turns_the_switch_off_once_and_keeps_the_file_and_the_revokes() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        rt.open_pairing(20).unwrap();
+        let (_, asked) = pair_frame(rt.host(), "Notes", 5, 21);
+        let second = asked["pair"]["id"].as_str().unwrap().to_owned();
+        rt.approve(&second, &[Topic::Node], R2Preset::Counts, 22).unwrap();
+        file.fail(true);
+        assert_eq!(rt.revoke(&second).unwrap(), Saved { saved: false }, "revoked in memory only");
+        let on_file = file.0.lock().unwrap().0.clone();
+
+        let guarded = Guarded::new(rt);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            guarded.with(|_runtime| -> Result<(), &'static str> { panic!("a command that panics midway") })
+        }));
+        assert!(panicked.is_err());
+
+        assert_eq!(guarded.with(|runtime| Ok(runtime.status(30))), Err(code::RECOVERED), "said once");
+        assert_eq!(counts.stopped.load(Ordering::SeqCst), 1, "the listener is stopped");
+        assert_eq!(file.0.lock().unwrap().0, on_file, "the clients file is untouched");
+        let status = guarded.with(|runtime| Ok(runtime.status(31))).unwrap();
+        assert_eq!((status.enabled, status.clients, status.unsaved_revoke), (false, 1, true), "read again, the revoke kept");
+
+        // The removal is not on file: it stays off, and the removal still holds.
+        assert_eq!(guarded.with(|runtime| runtime.set_enabled(true, 32)), Err(code::REMOVAL_NOT_SAVED));
+        assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &second, 33))).unwrap()["error"], "unknown client");
+        assert!(guarded.with(|runtime| Ok(hello(runtime, &first, 34))).unwrap()["challenge"].is_string());
+        // Back on once the file agrees: the removal is saved first.
+        file.fail(false);
+        assert!(guarded.with(|runtime| runtime.set_enabled(true, 35)).unwrap().enabled);
+        assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &second, 36))).unwrap()["error"], "unknown client");
+        let records = store::load(&file, Some(&SEALER)).unwrap();
+        assert!(records.iter().all(|record| record.id != second), "the removal is on file now");
+        assert!(records.iter().any(|record| record.id == first));
+    }
+
+    #[test]
+    fn revokes_carried_over_a_recovery_survive_a_blocked_load_until_saved() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        rt.open_pairing(20).unwrap();
+        let (_, asked) = pair_frame(rt.host(), "Notes", 5, 21);
+        let second = asked["pair"]["id"].as_str().unwrap().to_owned();
+        rt.approve(&second, &[Topic::Node], R2Preset::Counts, 22).unwrap();
+        let good = file.0.lock().unwrap().0.clone().unwrap();
+        file.fail(true);
+        assert_eq!(rt.revoke(&second).unwrap(), Saved { saved: false });
+
+        let guarded = Guarded::new(rt);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            guarded.with(|_runtime| -> Result<(), &'static str> { panic!("a command that panics midway") })
+        }));
+        assert_eq!(guarded.with(|runtime| Ok(runtime.status(30))), Err(code::RECOVERED));
+
+        // The first load after the recovery is blocked: no records to revoke.
+        file.put(b"tampered");
+        assert_eq!(guarded.with(|runtime| Ok(runtime.status(31))).unwrap().store, "blocked");
+        assert_eq!(guarded.with(|runtime| runtime.set_enabled(true, 32)), Err(code::BLOCKED));
+        // The file is good again: the next load still removes the client, and
+        // the switch stays off while that removal cannot be saved.
+        file.put(&good);
+        assert_eq!(guarded.with(|runtime| runtime.set_enabled(true, 33)), Err(code::REMOVAL_NOT_SAVED));
+        assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &second, 34))).unwrap()["error"], "unknown client");
+        assert!(guarded.with(|runtime| Ok(hello(runtime, &first, 35))).unwrap()["challenge"].is_string());
+        assert!(guarded.with(|runtime| Ok(runtime.status(36))).unwrap().unsaved_revoke);
+
+        // Kept until a save works; then on file, and nothing is carried any more.
+        assert_eq!(guarded.with(|runtime| runtime.save_again()).unwrap(), Saved { saved: false });
+        file.fail(false);
+        assert_eq!(guarded.with(|runtime| runtime.save_again()).unwrap(), Saved { saved: true });
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().all(|record| record.id != second));
+        assert!(guarded.with(|runtime| Ok(runtime.carry_revokes.is_empty())).unwrap());
+    }
+
+    #[test]
+    fn revokes_carried_over_a_recovery_hold_after_starting_over_and_a_restored_file() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let dir = std::env::temp_dir().join(format!("bsm-{}-carry", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = runtime_with(dir.clone(), Some(&SEALER), &file, &counts);
+        let (id, _) = approved(&mut rt, R2Preset::Counts);
+        let good = file.0.lock().unwrap().0.clone().unwrap();
+        file.fail(true);
+        assert_eq!(rt.revoke(&id).unwrap(), Saved { saved: false });
+        let guarded = Guarded::new(rt);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            guarded.with(|_runtime| -> Result<(), &'static str> { panic!("a command that panics midway") })
+        }));
+        assert_eq!(guarded.with(|runtime| Ok(runtime.status(30))), Err(code::RECOVERED));
+
+        // Blocked, started over (no clients), then the old file comes back and is loaded on a restart-like reload.
+        file.put(b"tampered");
+        assert_eq!(guarded.with(|runtime| Ok(runtime.status(31))).unwrap().store, "blocked");
+        guarded.with(|runtime| runtime.reset_clients(true, 32)).unwrap();
+        file.put(&good);
+        assert_eq!(guarded.with(|runtime| {
+            runtime.loaded = false;
+            runtime.set_enabled(true, 33)
+        }), Err(code::REMOVAL_NOT_SAVED), "the old file lists the client: it stays off");
+        assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &id, 34))).unwrap()["error"], "unknown client", "still refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_tick_that_cannot_start_leaves_the_switch_off() {
         fn no_thread(_work: Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>> {
             Err(io::Error::other("no thread for this test"))
@@ -1243,6 +1447,91 @@ mod tests {
         assert!(!socket.exists(), "the socket is removed");
         assert_eq!(std::io::Read::read(&mut &client, &mut [0u8; 1]).unwrap(), 0, "the live connection is closed");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The switch over the real Windows pipe, with the real shim.
+    #[cfg(windows)]
+    mod windows_runtime_tests {
+        use super::*;
+        use crate::mcp::endpoint::read_frame;
+        use crate::mcp::runner::{now_ms, Deadlines, Runner};
+        use crate::mcp::server::MAX_FRAME_BYTES;
+        use bitsov_ffi::win_private::pipe::PipeHalf;
+        use std::io::{BufReader, Read, Write};
+
+        const WAIT: Duration = Duration::from_secs(10);
+        /// `ERROR_PIPE_BUSY`: every instance is taken for a moment.
+        const PIPE_BUSY: i32 = 231;
+
+        type Client = (BufReader<PipeHalf>, PipeHalf);
+
+        fn try_connect(name: &str) -> io::Result<Client> {
+            let start = std::time::Instant::now();
+            loop {
+                match bitsov_mcp::windows::connect(name) {
+                    Ok((reader, writer)) => {
+                        reader.set_read_timeout(Some(WAIT))?;
+                        return Ok((BufReader::new(reader), writer));
+                    }
+                    Err(error) if error.raw_os_error() == Some(PIPE_BUSY) && start.elapsed() < WAIT => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        fn lists_tools(client: &mut Client) -> usize {
+            client.1.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n").unwrap();
+            let frame = read_frame(&mut client.0, MAX_FRAME_BYTES).unwrap().expect("a reply");
+            let reply: Value = serde_json::from_slice(&frame).unwrap();
+            reply["result"]["tools"].as_array().map_or(0, Vec::len)
+        }
+
+        fn session(name: &str, key: &bitsov_mcp::ClientKey) -> Client {
+            let (mut reader, mut writer) = try_connect(name).unwrap();
+            bitsov_mcp::open_session(&mut reader, &mut writer, key).unwrap();
+            (reader, writer)
+        }
+
+        #[test]
+        fn the_switch_starts_and_stops_the_real_pipe() {
+            let name = format!(r"\\.\pipe\bitsov-mcp-rt-{}-onoff", std::process::id());
+            let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+            let dir = std::env::temp_dir().join(format!("bsm-{}-won", std::process::id()));
+            let mut rt = runtime_clocked(dir, Some(&SEALER), &file, &counts, Arc::new(now_ms));
+            let pipe = name.clone();
+            rt.config.start = Box::new(move |_, host, source| {
+                Ok(Box::new(Runner::start_named(&pipe, host, source, Deadlines::default())?) as Box<dyn Listener>)
+            });
+
+            rt.set_enabled(true, now_ms()).unwrap();
+            rt.open_pairing(now_ms()).unwrap();
+            let (mut reader, mut writer) = try_connect(&name).unwrap();
+            let outcome = bitsov_mcp::pair(&mut reader, &mut writer, "Desk assistant", &[8u8; 32], |_| {}, || {
+                let now = now_ms();
+                if let Some(waiting) = rt.pending(now).unwrap().first().cloned() {
+                    rt.approve(&waiting.id, &[Topic::Node], R2Preset::Counts, now).unwrap();
+                }
+                true
+            }).unwrap();
+            let bitsov_mcp::PairOutcome::Approved(key) = outcome else { panic!("approved") };
+            let mut live = session(&name, &key);
+            assert_eq!(lists_tools(&mut live), 1, "only the approved topic");
+
+            rt.set_enabled(false, now_ms()).unwrap();
+            assert!(matches!(live.0.read(&mut [0u8; 1]), Ok(0) | Err(_)), "the live session is closed");
+            let refused = match bitsov_mcp::windows::connect(&name) {
+                Err(_) => true,
+                Ok((mut reader, _)) => matches!(reader.read(&mut [0u8; 1]), Ok(0) | Err(_)),
+            };
+            assert!(refused, "nothing listens while off");
+
+            rt.set_enabled(true, now_ms()).unwrap();
+            let mut again = session(&name, &key);
+            assert_eq!(lists_tools(&mut again), 1, "on again, the same client works");
+            rt.set_enabled(false, now_ms()).unwrap();
+        }
     }
 
     #[test]
