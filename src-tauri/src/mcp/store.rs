@@ -92,7 +92,8 @@ pub fn r2_preset_allowed(preset: Preset) -> bool {
 /// A preset an R2 client may have: counts or rounded, never exact. The read
 /// path takes only this type, so `exact` cannot reach a client's reads at
 /// all (ADR A1 §1.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum R2Preset {
     Counts,
     Rounded,

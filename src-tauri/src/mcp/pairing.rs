@@ -34,6 +34,8 @@ pub struct Shown {
     pub id: String,
     pub name: String,
     pub code: [&'static str; 6],
+    /// When the request lapses unless the owner approves it.
+    pub expires_ms: u64,
 }
 
 /// What the shim gets back on a request.
@@ -102,7 +104,7 @@ impl Pairing {
     pub fn waiting(&mut self, now_ms: u64) -> Vec<Shown> {
         self.prune(now_ms);
         let mut shown: Vec<Shown> = self.pending.iter()
-            .map(|(id, request)| Shown { id: id.clone(), name: request.name.clone(), code: request.code })
+            .map(|(id, request)| Shown { id: id.clone(), name: request.name.clone(), code: request.code, expires_ms: request.expires_ms })
             .collect();
         shown.sort_by(|a, b| a.id.cmp(&b.id));
         shown
@@ -159,7 +161,7 @@ mod tests {
         let (mut pairing, mut registry, mut identities) = (Pairing::default(), Registry::default(), Identities::default());
         let asked = pairing.request("Desk assistant", &SHIM, 0).unwrap();
         assert_eq!(asked.code, code(&SHIM, &asked.host_nonce, "Desk assistant"), "the shim can compute the same code");
-        assert_eq!(pairing.waiting(1), vec![Shown { id: asked.id.clone(), name: "Desk assistant".into(), code: asked.code }]);
+        assert_eq!(pairing.waiting(1), vec![Shown { id: asked.id.clone(), name: "Desk assistant".into(), code: asked.code, expires_ms: REQUEST_TTL_MS }]);
 
         let issued = pairing.approve(&asked.id, &[Topic::Node, Topic::Inbox], 2, &mut registry, &mut identities).unwrap();
         let client = registry.active(&asked.id).expect("in the registry");

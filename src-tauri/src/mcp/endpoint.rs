@@ -43,6 +43,14 @@ pub const HANDSHAKE_AUDIT_TOOL: &str = "handshake";
 /// How long an approved client's secret waits to be collected.
 pub const DELIVERY_TTL_MS: u64 = 5 * 60_000;
 
+/// How long a pairing window the owner opens stays open for a request.
+pub const PAIRING_WINDOW_MS: u64 = 2 * 60_000;
+
+/// The audit reason for a `pair` frame outside an owner-opened window.
+pub const PAIRING_CLOSED: &str = "pairing closed";
+/// The audit reason for a second `pair` frame in one window.
+pub const PAIRING_TAKEN: &str = "pairing request already made";
+
 /// Where one connection stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Conn {
@@ -167,6 +175,38 @@ pub struct Host {
     /// Set when the clients file was there but did not load: nothing is saved
     /// over it until the owner chooses to start over ([`Host::start_over`]).
     blocked: Option<StoreError>,
+    /// The pairing window the owner opened, if any (ADR A1 §1.4, D7 B1).
+    window: Option<PairingWindow>,
+}
+
+/// A pairing window: open for one request until `until_ms`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PairingWindow {
+    until_ms: u64,
+    /// The one request this window took.
+    request: Option<String>,
+    /// Later `pair` frames refused while this window was open.
+    others_refused: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowState {
+    /// No window, or it ended.
+    Closed,
+    /// Open, and no request yet.
+    Open,
+    /// Its one request is waiting for the owner.
+    Taken,
+}
+
+/// The pairing window as the owner sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowView {
+    /// Until when a request may arrive (no request yet), or until when the
+    /// request waits (a request came).
+    pub until_ms: u64,
+    pub request: Option<super::pairing::Shown>,
+    pub others_refused: u8,
 }
 
 /// Where a ready client's reads come from, narrowed to that client's preset
@@ -366,6 +406,59 @@ impl Host {
         self.pairing.deny(id, now_ms)
     }
 
+    /// Save the current records as they are (the owner's "save again" after
+    /// a revoke that was not saved). Refused while saving is blocked.
+    pub fn save_now(&self, io: &dyn FileIo, sealer: Option<&dyn Sealer>) -> Result<(), ChangeError> {
+        if let Some(error) = &self.blocked {
+            return Err(ChangeError::StoreBlocked(error.clone()));
+        }
+        store::save(io, sealer, &self.stored).map_err(ChangeError::Store)
+    }
+
+    /// The owner opens a pairing window: for [`PAIRING_WINDOW_MS`] one `pair`
+    /// request may arrive. Opening again starts a new window.
+    pub fn open_pairing(&mut self, now_ms: u64) {
+        self.window = Some(PairingWindow { until_ms: now_ms.saturating_add(PAIRING_WINDOW_MS), request: None, others_refused: 0 });
+    }
+
+    /// The window ends: the owner cancelled, approved or denied, or the switch
+    /// went off. A request it took that is still waiting is dropped.
+    pub fn close_pairing(&mut self, now_ms: u64) {
+        if let Some(PairingWindow { request: Some(id), .. }) = self.window.take() {
+            self.pairing.deny(&id, now_ms);
+        }
+    }
+
+    /// The open window, if any. A window ends by itself when its time passes
+    /// without a request, or when its request lapses or is settled.
+    pub fn pairing_window(&mut self, now_ms: u64) -> Option<WindowView> {
+        if self.window_state(now_ms) == WindowState::Closed {
+            self.window = None;
+            return None;
+        }
+        let window = self.window.as_ref()?;
+        let waiting = self.pairing.waiting(now_ms);
+        let request = window.request.as_ref().and_then(|id| waiting.into_iter().find(|shown| &shown.id == id));
+        let until_ms = request.as_ref().map_or(window.until_ms, |shown| shown.expires_ms);
+        Some(WindowView { until_ms, request, others_refused: window.others_refused })
+    }
+
+    fn window_state(&mut self, now_ms: u64) -> WindowState {
+        let Some(window) = &self.window else { return WindowState::Closed };
+        match &window.request {
+            None if now_ms < window.until_ms => WindowState::Open,
+            None => WindowState::Closed,
+            Some(id) => {
+                let id = id.clone();
+                if self.pairing.waiting(now_ms).iter().any(|shown| shown.id == id) {
+                    WindowState::Taken
+                } else {
+                    WindowState::Closed
+                }
+            }
+        }
+    }
+
     /// Handle one frame with one read source for every client.
     pub fn on_frame(&mut self, conn: &mut Conn, frame: &[u8], now_ms: u64, reads: &dyn Reads) -> Step {
         self.on_frame_from(conn, frame, now_ms, &Fixed(reads))
@@ -464,11 +557,26 @@ impl Host {
                     return Step::refuse("pairing with this app is closed; pair with your box");
                 }
                 let request = &message["pair"];
+                // Only inside a window the owner opened, and one request per window.
+                let declared = request.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
+                match self.window_state(now_ms) {
+                    WindowState::Closed => return self.refuse_audited(&declared, PAIRING_CLOSED, now_ms),
+                    WindowState::Taken => {
+                        if let Some(window) = self.window.as_mut() {
+                            window.others_refused = window.others_refused.saturating_add(1);
+                        }
+                        return self.refuse_audited(&declared, PAIRING_TAKEN, now_ms);
+                    }
+                    WindowState::Open => {}
+                }
                 let (Some(name), Some(nonce)) = (request.get("name").and_then(Value::as_str), request.get("nonce").and_then(hex32)) else {
                     return Step::refuse("bad pair request");
                 };
                 match self.pairing.request(name, &nonce, now_ms) {
                     Ok(asked) => {
+                        if let Some(window) = self.window.as_mut() {
+                            window.request = Some(asked.id.clone());
+                        }
                         *conn = Conn::Pairing { id: asked.id.clone() };
                         Step::send(json!({ "pair": { "id": asked.id, "host_nonce": hex::encode(asked.host_nonce), "code": asked.code } }))
                     }
@@ -578,6 +686,7 @@ mod tests {
     /// Pair a client through the endpoint, the way the shim does. Returns (id, secret).
     fn paired(host: &mut Host, topics: &[Topic]) -> (String, [u8; 32]) {
         let mut conn = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
         let id = asked["pair"]["id"].as_str().unwrap().to_owned();
         assert_eq!(asked["pair"]["code"].as_array().unwrap().len(), 6);
@@ -655,6 +764,7 @@ mod tests {
         let (file, sealer) = (MemFile::default(), TagSealer);
         let mut host = Host::default();
         let mut conn = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
         let id = asked["pair"]["id"].as_str().unwrap().to_owned();
         host.commit(&file, Some(&sealer), |h| h.approve(&id, &[Topic::Node], Preset::Rounded, 1)).unwrap();
@@ -676,6 +786,7 @@ mod tests {
         let file = MemFile { fail_write: true, ..MemFile::default() };
         let mut host = Host::default();
         let mut conn = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
         let id = asked["pair"]["id"].as_str().unwrap().to_owned();
         let error = host.commit(&file, Some(&TagSealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, 1)).unwrap_err();
@@ -695,6 +806,7 @@ mod tests {
         let (file, sealer) = (MemFile::default(), TagSealer);
         let mut host = Host::default();
         let mut conn = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
         let id = asked["pair"]["id"].as_str().unwrap().to_owned();
         assert_eq!(host.commit(&file, Some(&sealer), |h| h.approve(&id, &[Topic::Node], Preset::Exact, 1)), Err(ChangeError::PresetTooWide));
@@ -719,6 +831,7 @@ mod tests {
     /// Pair, approve with a save, collect the secret, open a session.
     fn approved_and_ready(host: &mut Host, file: &MemFile) -> (String, [u8; 32], Conn) {
         let mut conn = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
         let id = asked["pair"]["id"].as_str().unwrap().to_owned();
         host.commit(file, Some(&TagSealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, 1)).unwrap();
@@ -743,6 +856,7 @@ mod tests {
         // The next successful save carries the revocation.
         file.fail_write = false;
         let mut conn = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Other", "nonce": hex::encode([4u8; 32])}})), 50, &Fake));
         let other = asked["pair"]["id"].as_str().unwrap().to_owned();
         host.commit(&file, Some(&TagSealer), |h| h.approve(&other, &[Topic::Node], Preset::Counts, 51)).unwrap();
@@ -759,6 +873,7 @@ mod tests {
         let mut host = Host::from_load(loaded);
         assert!(host.blocked().is_some());
         let mut conn = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
         let id = asked["pair"]["id"].as_str().unwrap().to_owned();
         assert!(matches!(host.commit(&file, Some(&TagSealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, 1)), Err(ChangeError::StoreBlocked(_))));
@@ -778,6 +893,7 @@ mod tests {
         let challenge = reply(&host.on_frame(&mut conn, &frame(json!({"hello": id})), 60, &Fake));
         let challenge: [u8; 32] = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap().try_into().unwrap();
         let mut other = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut other, &frame(json!({"pair": {"name": "Notes", "nonce": hex::encode([5u8; 32])}})), 61, &Fake));
         let waiting = asked["pair"]["id"].as_str().unwrap().to_owned();
         assert_eq!(host.commit(&file, Some(&TagSealer), |h| h.approve(&waiting, &[Topic::Node], Preset::Exact, 62)), Err(ChangeError::PresetTooWide));
@@ -796,6 +912,7 @@ mod tests {
         assert_eq!(reply(&host.on_frame(&mut conn, &frame(json!({"pair_status": true})), 4, &Fake))["pair"], "gone");
 
         let mut conn = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Late", "nonce": hex::encode([4u8; 32])}})), 0, &Fake));
         let late = asked["pair"]["id"].as_str().unwrap().to_owned();
         host.approve(&late, &[Topic::Node], Preset::Counts, 1).unwrap();
@@ -905,10 +1022,88 @@ mod tests {
         assert_eq!(host.audit.last().unwrap().outcome, Outcome::Read, "the read that ran is still audited");
     }
 
+    fn ask(host: &mut Host, name: &str, nonce: u8, at: u64) -> Step {
+        let mut conn = Conn::Start;
+        host.on_frame(&mut conn, &frame(json!({"pair": {"name": name, "nonce": hex::encode([nonce; 32])}})), at, &Fake)
+    }
+
+    #[test]
+    fn a_pair_request_outside_an_owner_opened_window_is_refused_and_audited() {
+        let mut host = Host::default();
+        let step = ask(&mut host, "Sneaky", 1, 0);
+        assert!(step.close);
+        assert_eq!(reply(&step)["error"], PAIRING_CLOSED);
+        assert!(host.pairing.waiting(0).is_empty(), "nothing waits for the owner");
+        assert_eq!(host.pairing_window(0), None);
+        let row = host.audit.last().unwrap();
+        assert_eq!((row.client.as_str(), row.tool.as_str(), row.arguments.as_str(), row.outcome), ("Sneaky", HANDSHAKE_AUDIT_TOOL, PAIRING_CLOSED, Outcome::NotAuthorised));
+
+        // A window that passed without a request is closed again.
+        host.open_pairing(10);
+        assert!(host.pairing_window(10 + PAIRING_WINDOW_MS - 1).is_some());
+        assert_eq!(reply(&ask(&mut host, "Late", 2, 10 + PAIRING_WINDOW_MS))["error"], PAIRING_CLOSED);
+        assert_eq!(host.pairing_window(10 + PAIRING_WINDOW_MS), None);
+    }
+
+    #[test]
+    fn a_window_takes_one_request_and_refuses_and_counts_the_others() {
+        let mut host = Host::default();
+        host.open_pairing(0);
+        let first = reply(&ask(&mut host, "Desk", 1, 5));
+        let id = first["pair"]["id"].as_str().unwrap().to_owned();
+        for (n, name) in ["Other", "Desk"].iter().enumerate() {
+            let step = ask(&mut host, name, 3 + n as u8, 6);
+            assert_eq!(reply(&step)["error"], PAIRING_TAKEN);
+            assert!(step.close);
+        }
+        let view = host.pairing_window(7).expect("open");
+        assert_eq!(view.others_refused, 2);
+        let shown = view.request.expect("the first request");
+        assert_eq!((shown.id.as_str(), shown.name.as_str()), (id.as_str(), "Desk"));
+        assert_eq!(shown.expires_ms, 5 + super::super::pairing::REQUEST_TTL_MS);
+        assert_eq!(view.until_ms, shown.expires_ms, "with a request, the window lasts as long as it waits");
+        assert_eq!(host.pairing.waiting(7).len(), 1, "only the first waits");
+        assert_eq!(host.audit.iter().filter(|row| row.arguments == PAIRING_TAKEN).count(), 2);
+
+        // The window closes when its request lapses, or when the owner closes it.
+        assert_eq!(host.pairing_window(5 + super::super::pairing::REQUEST_TTL_MS), None);
+        host.open_pairing(10);
+        let asked = reply(&ask(&mut host, "Notes", 6, 11));
+        host.close_pairing(12);
+        assert_eq!(host.pairing_window(12), None);
+        assert!(!host.pairing.waiting(12).iter().any(|w| Some(w.id.as_str()) == asked["pair"]["id"].as_str()), "the cancelled request is dropped");
+        assert_eq!(reply(&ask(&mut host, "Notes", 6, 13))["error"], PAIRING_CLOSED);
+    }
+
+    #[test]
+    fn an_approved_request_ends_its_window() {
+        let mut host = Host::default();
+        let (_, _) = paired(&mut host, &[Topic::Node]);
+        assert_eq!(host.pairing_window(4), None, "settled");
+        assert_eq!(reply(&ask(&mut host, "Again", 9, 5))["error"], PAIRING_CLOSED);
+    }
+
+    #[test]
+    fn save_now_saves_the_records_and_is_refused_while_blocked() {
+        let mut host = Host::default();
+        let (id, _) = paired(&mut host, &[Topic::Node]);
+        let failing = MemFile { fail_write: true, ..MemFile::default() };
+        assert!(matches!(host.revoke_saved(&failing, Some(&TagSealer), &id), Err(ChangeError::RevokedNotSaved(_))));
+        assert!(matches!(host.save_now(&failing, Some(&TagSealer)), Err(ChangeError::Store(_))));
+        let file = MemFile::default();
+        host.save_now(&file, Some(&TagSealer)).unwrap();
+        let records = crate::mcp::store::load(&file, Some(&TagSealer)).unwrap();
+        assert!(records[0].revoked, "the revoke is on file now");
+
+        let blocked = Host::from_load(Err(StoreError::Unreadable));
+        assert!(matches!(blocked.save_now(&file, Some(&TagSealer)), Err(ChangeError::StoreBlocked(_))));
+    }
+
     #[test]
     fn a_denied_request_ends_and_oversized_or_garbled_frames_close() {
         let mut host = Host::default();
         let mut conn = Conn::Start;
+        host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Notes", "nonce": hex::encode([5u8; 32])}})), 0, &Fake));
         assert!(host.deny(asked["pair"]["id"].as_str().unwrap(), 1));
         assert_eq!(reply(&host.on_frame(&mut conn, &frame(json!({"pair_status": true})), 2, &Fake))["pair"], "gone");
@@ -916,6 +1111,7 @@ mod tests {
         for bad in [vec![b' '; MAX_FRAME_BYTES + 1], b"not json".to_vec(), br#"{"hello":"a","extra":1}"#.to_vec(),
             frame(json!({"pair": {"name": "x", "nonce": "short"}}))] {
             let mut conn = Conn::Start;
+            host.open_pairing(0);
             assert!(host.on_frame(&mut conn, &bad, 0, &Fake).close);
             assert_eq!(conn, Conn::Closed);
         }
@@ -973,6 +1169,7 @@ mod tests {
         }
 
         let host = Arc::new(Mutex::new(Host::default()));
+        host.lock().unwrap().open_pairing(100);
         let (ours, theirs) = UnixStream::pair().unwrap();
         let server = serve(host.clone(), theirs);
         let mut reader = BufReader::new(ours.try_clone().unwrap());
