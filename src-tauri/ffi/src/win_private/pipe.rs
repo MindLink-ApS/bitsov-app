@@ -67,6 +67,9 @@ const _: () = assert!(
     policy::MCP_PIPE_MODE == PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS
 );
 
+/// The pipe's instance limit (see [`instance`]): twice the cap plus two.
+const MAX_INSTANCES: u32 = 2 * MAX_CONNECTIONS as u32 + 2;
+
 /// Buffer size each way: one full frame.
 const BUFFER_BYTES: u32 = 64 * 1024;
 
@@ -278,9 +281,12 @@ fn instance(name: &[u16], descriptor: &SecurityDescriptor, first: bool) -> io::R
             name.as_ptr(),
             open_mode,
             policy::MCP_PIPE_MODE,
-            // The cap, plus the instance that waits for the next client, plus
-            // its replacement while a refused client is being dropped.
-            MAX_CONNECTIONS as u32 + 2,
+            // Server handles, not clients: the client cap is the slot count.
+            // Room for the cap plus one admitted over it while room is made,
+            // the instance that waits for the next client, its replacement
+            // while a refused client is being dropped, and connections already
+            // closed whose threads have not yet let go of their handles.
+            MAX_INSTANCES,
             BUFFER_BYTES,
             BUFFER_BYTES,
             0,
