@@ -30,7 +30,7 @@ use super::identity::Identities;
 use super::pairing::{PairError, Pairing};
 use super::server::{ReadFailed, Reads, MAX_FRAME_BYTES};
 use super::session::{clean, AuditRow, Begun, Outcome, Registry, Sessions, MAX_CLIENT_NAME};
-use super::store::{self, r2_preset_allowed, FileIo, StoreError, StoredClient, R2_PAIRING_OPEN};
+use super::store::{self, r2_preset_allowed, FileIo, R2Preset, StoreError, StoredClient, R2_PAIRING_OPEN};
 use crate::ai::{Preset, Topic};
 use crate::at_rest::Sealer;
 
@@ -100,7 +100,7 @@ pub enum Begin {
 #[derive(Debug)]
 pub struct Pending {
     begun: Begun,
-    preset: Preset,
+    preset: R2Preset,
     frame: Vec<u8>,
 }
 
@@ -170,9 +170,10 @@ pub struct Host {
 }
 
 /// Where a ready client's reads come from, narrowed to that client's preset
-/// (counts by default, at most rounded).
+/// (counts by default, at most rounded). The preset is an [`R2Preset`], so
+/// `exact` cannot be asked for here.
 pub trait ReadSource {
-    fn reads_for(&self, preset: Preset) -> Box<dyn Reads + '_>;
+    fn reads_for(&self, preset: R2Preset) -> Box<dyn Reads + '_>;
 }
 
 /// One fixed source for every client, whatever its preset (tests, and the
@@ -186,7 +187,7 @@ impl Reads for Fixed<'_> {
 }
 
 impl ReadSource for Fixed<'_> {
-    fn reads_for(&self, _preset: Preset) -> Box<dyn Reads + '_> {
+    fn reads_for(&self, _preset: R2Preset) -> Box<dyn Reads + '_> {
         Box::new(Fixed(self.0))
     }
 }
@@ -271,10 +272,13 @@ impl Host {
         &self.stored
     }
 
-    /// The preset a client's reads are narrowed to.
-    pub fn preset(&self, client: &str) -> Preset {
+    /// The preset a client's reads are narrowed to: counts or rounded. A
+    /// record that somehow holds a wider preset gets counts (such a record is
+    /// never authorised anyway, see [`Host::from_stored`]).
+    pub fn preset(&self, client: &str) -> R2Preset {
         self.stored.iter().find(|record| record.id == client && !record.revoked)
-            .map_or(super::broker::DEFAULT_PRESET, |record| record.preset)
+            .and_then(|record| R2Preset::new(record.preset))
+            .unwrap_or(super::broker::DEFAULT_PRESET)
     }
 
     /// The owner approves a waiting pairing request with the topics and
@@ -615,8 +619,8 @@ mod tests {
     /// Reads that say which preset they were narrowed to.
     struct ByPreset;
     impl ReadSource for ByPreset {
-        fn reads_for(&self, preset: Preset) -> Box<dyn Reads + '_> {
-            struct Tagged(Preset);
+        fn reads_for(&self, preset: R2Preset) -> Box<dyn Reads + '_> {
+            struct Tagged(R2Preset);
             impl Reads for Tagged {
                 fn read(&self, _topic: Topic, _since_ms: Option<u64>) -> Result<Value, ReadFailed> {
                     Ok(json!({ "preset": format!("{:?}", self.0) }))
@@ -624,6 +628,21 @@ mod tests {
             }
             Box::new(Tagged(preset))
         }
+    }
+
+    #[test]
+    fn every_stored_preset_reaches_the_read_path_as_counts_or_rounded() {
+        let mut host = Host::default();
+        let (id, _) = paired(&mut host, &[Topic::Node]);
+        let record = host.stored()[0].clone();
+        for (stored, read) in [(Preset::Counts, R2Preset::Counts), (Preset::Rounded, R2Preset::Rounded), (Preset::Exact, R2Preset::Counts)] {
+            // An exact record cannot be approved or loaded; forge one directly anyway.
+            let host = Host::from_stored(vec![StoredClient { preset: stored, ..record.clone() }]);
+            assert_eq!(host.preset(&id), read, "{stored:?}");
+            assert!(matches!(host.preset(&id).preset(), Preset::Counts | Preset::Rounded));
+            assert_eq!(host.registry.active(&id).is_some(), stored != Preset::Exact, "an exact record is never authorised");
+        }
+        assert_eq!(Host::default().preset("mcp-unknown"), R2Preset::Counts);
     }
 
     fn call_read_node(host: &mut Host, conn: &mut Conn, at: u64, source: &dyn ReadSource) -> Value {

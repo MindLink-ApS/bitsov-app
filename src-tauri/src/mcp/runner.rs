@@ -11,23 +11,101 @@
 //! audit row). A slow read on one connection therefore never holds up another
 //! connection's handshake or reads.
 //!
-//! [`serve`] is the per-connection loop and is the same on every platform.
+//! [`serve`] and [`serve_timed`] are the per-connection loops and are the
+//! same on every platform. [`serve_timed`] adds the [`Deadlines`]: nothing
+//! between frames for [`IDLE_TIMEOUT`], a frame not finished within
+//! [`FRAME_DEADLINE`] of its first byte, or a connection not ready within
+//! [`HANDSHAKE_DEADLINE`] of its accept (a pairing request: within
+//! [`PAIRING_DEADLINE`]) closes the connection.
+//!
 //! On macOS, [`Runner`] owns the listener: one thread accepts, one thread
-//! serves each connection, at most [`MAX_CONNECTIONS`] are live (more are
-//! closed at once), a connection idle for [`IDLE_TIMEOUT`] is closed, and
-//! [`Runner::stop`] closes everything and removes the socket file.
+//! serves each connection with the deadlines, and at most [`MAX_CONNECTIONS`]
+//! are live. At the cap the oldest connection still in the handshake makes
+//! room, then the oldest pairing request; a ready client never does, and when
+//! all are ready a new connection is closed at once. [`Runner::stop`] closes
+//! everything and removes the socket file.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use super::endpoint::MAX_CONNECTIONS;
-use super::endpoint::{read_frame, Begin, Conn, Host, ReadSource};
+use super::endpoint::{read_frame, Begin, Conn, Host, ReadSource, Step};
+use super::pairing::REQUEST_TTL_MS;
 use super::server::MAX_FRAME_BYTES;
 
-/// A connection that sends nothing for this long is closed.
+/// A connection that sends nothing between frames for this long is closed.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Once the first byte of a frame arrives, the whole line must follow
+/// within this, however slowly the bytes come.
+pub const FRAME_DEADLINE: Duration = Duration::from_secs(10);
+/// A connection that has not proved a client key this long after it was
+/// accepted is closed.
+pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
+/// A connection waiting for the owner's pairing decision may stay this long
+/// after it was accepted (the pairing request's own lifetime). It must still
+/// send its frames within [`FRAME_DEADLINE`] and [`IDLE_TIMEOUT`].
+pub const PAIRING_DEADLINE: Duration = Duration::from_millis(REQUEST_TTL_MS);
+
+/// The deadlines one connection lives by (see the constants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deadlines {
+    pub idle: Duration,
+    pub frame: Duration,
+    pub handshake: Duration,
+    pub pairing: Duration,
+}
+
+impl Default for Deadlines {
+    fn default() -> Self {
+        Self { idle: IDLE_TIMEOUT, frame: FRAME_DEADLINE, handshake: HANDSHAKE_DEADLINE, pairing: PAIRING_DEADLINE }
+    }
+}
+
+impl Deadlines {
+    fn any_zero(&self) -> bool {
+        [self.idle, self.frame, self.handshake, self.pairing].iter().any(Duration::is_zero)
+    }
+}
+
+/// Where a connection stands, for its deadline and for the connection cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Not yet proved a client key.
+    Handshake,
+    /// Waiting for the owner's pairing decision.
+    Pairing,
+    /// A client that proved its key.
+    Ready,
+    /// Sending its last reply, then closing: for a pairing approval that
+    /// reply is the client's only copy of its secret, so a connection in this
+    /// phase is never closed to make room.
+    Closing,
+}
+
+impl Phase {
+    fn of(conn: &Conn) -> Self {
+        match conn {
+            Conn::Ready { .. } => Self::Ready,
+            Conn::Pairing { .. } => Self::Pairing,
+            Conn::Start | Conn::Challenged { .. } => Self::Handshake,
+            Conn::Closed => Self::Closing,
+        }
+    }
+}
+
+/// A stream whose read timeout can be set before each read.
+pub trait ReadTimeout {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+}
+
+#[cfg(unix)]
+impl ReadTimeout for std::os::unix::net::UnixStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        std::os::unix::net::UnixStream::set_read_timeout(self, timeout)
+    }
+}
 
 /// Serve one connection until the client hangs up, a frame closes it, or an
 /// I/O error (an over-long line, the idle timeout) ends it. The host is
@@ -43,27 +121,117 @@ pub fn serve(
 ) -> io::Result<()> {
     let mut conn = Conn::Start;
     while let Some(frame) = read_frame(reader, MAX_FRAME_BYTES)? {
-        let begun = {
-            let mut host = lock(host)?;
-            host.begin_frame(&mut conn, &frame, now_ms())
-        };
-        let step = match begun {
-            Begin::Done(step) => step,
-            Begin::Read(pending) => {
-                let read = pending.read(source);
-                let mut host = lock(host)?;
-                host.finish_frame(&mut conn, pending, read)
-            }
-        };
-        if let Some(reply) = &step.reply {
-            writer.write_all(reply)?;
-            writer.flush()?;
-        }
-        if step.close {
+        let step = handle_frame(host, source, &mut conn, &frame, now_ms())?;
+        if !send(writer, &step)? {
             break;
         }
     }
     Ok(())
+}
+
+/// [`serve`] with deadlines (see [`Deadlines`]). The read timeout is set
+/// before every read: between frames it is the idle timeout, once a frame has
+/// begun it is what is left of the frame deadline, and before the client is
+/// ready neither may run past the handshake (or pairing) deadline counted from
+/// `accepted`. `phase` hears where the connection stands after every frame,
+/// before the reply is written.
+#[allow(clippy::too_many_arguments)]
+pub fn serve_timed<S: Read + ReadTimeout>(
+    host: &Mutex<Host>,
+    source: &dyn ReadSource,
+    reader: &mut BufReader<S>,
+    writer: &mut impl Write,
+    now_ms: &dyn Fn() -> u64,
+    deadlines: Deadlines,
+    accepted: Instant,
+    phase: &dyn Fn(Phase),
+) -> io::Result<()> {
+    let mut conn = Conn::Start;
+    loop {
+        let until = match Phase::of(&conn) {
+            Phase::Handshake | Phase::Closing => Some(accepted + deadlines.handshake),
+            Phase::Pairing => Some(accepted + deadlines.pairing),
+            Phase::Ready => None,
+        };
+        let Some(frame) = read_frame_by(reader, MAX_FRAME_BYTES, deadlines, until)? else { return Ok(()) };
+        let step = handle_frame(host, source, &mut conn, &frame, now_ms())?;
+        phase(Phase::of(&conn));
+        if !send(writer, &step)? {
+            return Ok(());
+        }
+    }
+}
+
+/// One frame through the host: locked for the start and the end, not for the read.
+fn handle_frame(host: &Mutex<Host>, source: &dyn ReadSource, conn: &mut Conn, frame: &[u8], now_ms: u64) -> io::Result<Step> {
+    let begun = {
+        let mut host = lock(host)?;
+        host.begin_frame(conn, frame, now_ms)
+    };
+    Ok(match begun {
+        Begin::Done(step) => step,
+        Begin::Read(pending) => {
+            let read = pending.read(source);
+            let mut host = lock(host)?;
+            host.finish_frame(conn, pending, read)
+        }
+    })
+}
+
+/// Write the step's reply. False when the connection is to close.
+fn send(writer: &mut impl Write, step: &Step) -> io::Result<bool> {
+    if let Some(reply) = &step.reply {
+        writer.write_all(reply)?;
+        writer.flush()?;
+    }
+    Ok(!step.close)
+}
+
+/// [`read_frame`] with deadlines: the first byte must come within the idle
+/// timeout, the rest of the line within the frame deadline from that byte,
+/// and neither past `until`. A passed deadline is an error (the connection
+/// closes). At the end of the stream a partial line is a frame, as in
+/// [`read_frame`].
+fn read_frame_by<S: Read + ReadTimeout>(
+    reader: &mut BufReader<S>,
+    max: usize,
+    deadlines: Deadlines,
+    until: Option<Instant>,
+) -> io::Result<Option<Vec<u8>>> {
+    let cap = |at: Instant| until.map_or(at, |until| at.min(until));
+    let mut by = cap(Instant::now() + deadlines.idle);
+    let mut frame: Option<Vec<u8>> = None;
+    loop {
+        let left = by.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "deadline passed"));
+        }
+        reader.get_ref().set_read_timeout(Some(left))?;
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if available.is_empty() {
+            return Ok(frame);
+        }
+        if frame.is_none() {
+            by = cap(Instant::now() + deadlines.frame);
+        }
+        let (take, ends) = match available.iter().position(|&byte| byte == b'\n') {
+            Some(at) => (at, true),
+            None => (available.len(), false),
+        };
+        let buf = frame.get_or_insert_with(Vec::new);
+        buf.extend_from_slice(&available[..take]);
+        reader.consume(if ends { take + 1 } else { take });
+        if buf.len() > max {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+        }
+        if ends {
+            return Ok(frame);
+        }
+    }
 }
 
 fn lock(host: &Mutex<Host>) -> io::Result<MutexGuard<'_, Host>> {
@@ -88,30 +256,65 @@ mod macos {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::super::endpoint::{unix, Host, ReadSource};
-    use super::{now_ms, serve, IDLE_TIMEOUT, MAX_CONNECTIONS};
+    use super::{now_ms, serve_timed, Deadlines, Phase, MAX_CONNECTIONS};
 
     struct Shared {
         host: Arc<Mutex<Host>>,
         source: Arc<dyn ReadSource + Send + Sync>,
-        idle: Duration,
+        deadlines: Deadlines,
         stopping: AtomicBool,
         live: Mutex<Live>,
         spawn: Spawn,
     }
 
-    /// The live connections (a handle each, to close them on stop) and their
-    /// threads. Its own lock, never the host's.
+    /// The live connections (a handle each, to close them on stop or to make
+    /// room) and their threads. Its own lock, never the host's.
     #[derive(Default)]
     struct Live {
         next: u64,
-        streams: HashMap<u64, UnixStream>,
+        streams: HashMap<u64, LiveConn>,
         workers: Vec<JoinHandle<()>>,
+    }
+
+    struct LiveConn {
+        stream: UnixStream,
+        /// The connection's [`Phase`], as its thread last reported it.
+        phase: Arc<AtomicU8>,
+    }
+
+    const HANDSHAKE: u8 = 0;
+    const PAIRING: u8 = 1;
+    const READY: u8 = 2;
+    const CLOSING: u8 = 3;
+
+    fn phase_code(phase: Phase) -> u8 {
+        match phase {
+            Phase::Handshake => HANDSHAKE,
+            Phase::Pairing => PAIRING,
+            Phase::Ready => READY,
+            Phase::Closing => CLOSING,
+        }
+    }
+
+    impl Live {
+        /// The connection to close to make room: the oldest one still in the
+        /// handshake, else the oldest one waiting for a pairing decision. A
+        /// ready client, or one sending its last reply (a pairing secret,
+        /// perhaps), is never closed to make room. `except` is never chosen.
+        fn to_make_room(&self, except: u64) -> Option<u64> {
+            [HANDSHAKE, PAIRING].into_iter().find_map(|wanted| {
+                self.streams.iter()
+                    .filter(|(key, conn)| **key != except && conn.phase.load(Ordering::SeqCst) == wanted)
+                    .map(|(key, _)| *key)
+                    .min()
+            })
+        }
     }
 
     /// The macOS listener: the owner-only socket in `dir` and its threads.
@@ -123,9 +326,10 @@ mod macos {
     }
 
     impl Runner {
-        /// Bind in `dir` ([`unix::bind`]) and start accepting.
+        /// Bind in `dir` ([`unix::bind`]) and start accepting, with the
+        /// default [`Deadlines`].
         pub fn start(dir: &Path, host: Arc<Mutex<Host>>, source: Arc<dyn ReadSource + Send + Sync>) -> io::Result<Self> {
-            Self::start_with_idle(dir, host, source, IDLE_TIMEOUT)
+            Self::start_with(dir, host, source, Deadlines::default())
         }
 
         /// [`Runner::start`] with another idle timeout (tests).
@@ -135,22 +339,32 @@ mod macos {
             source: Arc<dyn ReadSource + Send + Sync>,
             idle: Duration,
         ) -> io::Result<Self> {
-            Self::start_spawning(dir, host, source, idle, spawn_thread)
+            Self::start_with(dir, host, source, Deadlines { idle, ..Deadlines::default() })
+        }
+
+        /// [`Runner::start`] with other deadlines (tests). None may be zero.
+        pub fn start_with(
+            dir: &Path,
+            host: Arc<Mutex<Host>>,
+            source: Arc<dyn ReadSource + Send + Sync>,
+            deadlines: Deadlines,
+        ) -> io::Result<Self> {
+            Self::start_spawning(dir, host, source, deadlines, spawn_thread)
         }
 
         fn start_spawning(
             dir: &Path,
             host: Arc<Mutex<Host>>,
             source: Arc<dyn ReadSource + Send + Sync>,
-            idle: Duration,
+            deadlines: Deadlines,
             spawn: Spawn,
         ) -> io::Result<Self> {
-            if idle.is_zero() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "the idle timeout must not be zero"));
+            if deadlines.any_zero() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "a deadline must not be zero"));
             }
             let listener = unix::bind(dir)?;
             let socket = dir.join(unix::SOCKET_NAME);
-            let shared = Arc::new(Shared { host, source, idle, stopping: AtomicBool::new(false), live: Mutex::default(), spawn });
+            let shared = Arc::new(Shared { host, source, deadlines, stopping: AtomicBool::new(false), live: Mutex::default(), spawn });
             let accepting = shared.clone();
             let accept = std::thread::Builder::new()
                 .name("mcp-accept".into())
@@ -186,8 +400,8 @@ mod macos {
             }
             let workers = match self.shared.live.lock() {
                 Ok(mut live) => {
-                    for stream in live.streams.values() {
-                        let _ = stream.shutdown(Shutdown::Both);
+                    for conn in live.streams.values() {
+                        let _ = conn.stream.shutdown(Shutdown::Both);
                     }
                     std::mem::take(&mut live.workers)
                 }
@@ -229,35 +443,52 @@ mod macos {
         }
     }
 
-    /// Start serving a new connection, or close it at once when
-    /// [`MAX_CONNECTIONS`] are already live.
+    /// Start serving a new connection. When [`MAX_CONNECTIONS`] are already
+    /// live, the oldest connection that is not ready (one still in the
+    /// handshake first, then one waiting for a pairing decision) is closed to
+    /// make room; if every live connection is a ready client, the new one is
+    /// closed at once.
+    ///
+    /// Nothing is closed to make room until the new connection is fully set
+    /// up and its thread has started: if any step fails, every connection
+    /// that was live stays live.
     fn admit(shared: &Arc<Shared>, stream: UnixStream) {
-        let Ok(mut live) = shared.live.lock() else { return };
-        live.workers.retain(|worker| !worker.is_finished());
-        if live.streams.len() >= MAX_CONNECTIONS {
-            let _ = stream.shutdown(Shutdown::Both);
-            return;
-        }
-        if stream.set_read_timeout(Some(shared.idle)).is_err() || stream.set_write_timeout(Some(shared.idle)).is_err() {
+        let accepted = Instant::now();
+        if stream.set_write_timeout(Some(shared.deadlines.idle)).is_err() {
             return;
         }
         let Ok(handle) = stream.try_clone() else { return };
+        let Ok(mut live) = shared.live.lock() else { return };
+        live.workers.retain(|worker| !worker.is_finished());
         let key = live.next;
+        if live.streams.len() >= MAX_CONNECTIONS && live.to_make_room(key).is_none() {
+            let _ = stream.shutdown(Shutdown::Both);
+            return;
+        }
         live.next += 1;
-        live.streams.insert(key, handle);
+        let phase = Arc::new(AtomicU8::new(HANDSHAKE));
+        live.streams.insert(key, LiveConn { stream: handle, phase: phase.clone() });
         let place = Place { shared: shared.clone(), key };
         // The thread is spawned with the lock released: if the spawn fails,
         // the place is dropped here and its drop takes this same lock.
         drop(live);
         let spawned = (shared.spawn)(Box::new(move || {
-            run_connection(&place.shared, stream);
+            run_connection(&place.shared, stream, accepted, &phase);
             drop(place);
         }));
+        // A failed spawn has already freed the new place; nothing was closed.
+        let Ok(worker) = spawned else { return };
         // Only the accept thread admits, and stop() joins it before it takes
         // the workers, so no worker can be missed here.
-        if let Ok(worker) = spawned {
-            if let Ok(mut live) = shared.live.lock() {
-                live.workers.push(worker);
+        let Ok(mut live) = shared.live.lock() else { return };
+        live.workers.push(worker);
+        if live.streams.len() > MAX_CONNECTIONS {
+            // Chosen again now: a phase may have moved on while the lock was
+            // released. If nothing may make room any more, the new one goes.
+            let closing = live.to_make_room(key).unwrap_or(key);
+            // Its thread ends on the closed socket; its place is free at once.
+            if let Some(closed) = live.streams.remove(&closing) {
+                let _ = closed.stream.shutdown(Shutdown::Both);
             }
         }
     }
@@ -280,8 +511,8 @@ mod macos {
     impl Drop for Place {
         fn drop(&mut self) {
             let mut live = self.shared.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(stream) = live.streams.remove(&self.key) {
-                let _ = stream.shutdown(Shutdown::Both);
+            if let Some(conn) = live.streams.remove(&self.key) {
+                let _ = conn.stream.shutdown(Shutdown::Both);
             }
         }
     }
@@ -292,7 +523,7 @@ mod macos {
         use std::io::Read;
         struct Unused;
         impl ReadSource for Unused {
-            fn reads_for(&self, _preset: crate::ai::Preset) -> Box<dyn crate::mcp::server::Reads + '_> {
+            fn reads_for(&self, _preset: crate::mcp::store::R2Preset) -> Box<dyn crate::mcp::server::Reads + '_> {
                 unreachable!("no read in this test")
             }
         }
@@ -301,12 +532,12 @@ mod macos {
         let shared = Arc::new(Shared {
             host: Arc::new(Mutex::new(Host::default())),
             source: Arc::new(Unused),
-            idle: IDLE_TIMEOUT,
+            deadlines: Deadlines::default(),
             stopping: AtomicBool::new(false),
             live: Mutex::default(),
             spawn: spawn_thread,
         });
-        shared.live.lock().unwrap().streams.insert(7, served);
+        shared.live.lock().unwrap().streams.insert(7, LiveConn { stream: served, phase: Arc::new(AtomicU8::new(HANDSHAKE)) });
         let place = Place { shared: shared.clone(), key: 7 };
         let ended = std::thread::spawn(move || {
             let _place = place;
@@ -326,13 +557,13 @@ mod macos {
         }
         struct Unused;
         impl ReadSource for Unused {
-            fn reads_for(&self, _preset: crate::ai::Preset) -> Box<dyn crate::mcp::server::Reads + '_> {
+            fn reads_for(&self, _preset: crate::mcp::store::R2Preset) -> Box<dyn crate::mcp::server::Reads + '_> {
                 unreachable!("no read in this test")
             }
         }
         let dir = std::env::temp_dir().join(format!("bsm-{}-sf", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let runner = Runner::start_spawning(&dir, Arc::new(Mutex::new(Host::default())), Arc::new(Unused), IDLE_TIMEOUT, no_threads).unwrap();
+        let runner = Runner::start_spawning(&dir, Arc::new(Mutex::new(Host::default())), Arc::new(Unused), Deadlines::default(), no_threads).unwrap();
         // On a thread with a deadline, so a deadlock fails the test instead of hanging it.
         let (done, finished) = std::sync::mpsc::channel();
         let socket = dir.join(unix::SOCKET_NAME);
@@ -354,11 +585,73 @@ mod macos {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn run_connection(shared: &Shared, stream: UnixStream) {
+    #[cfg(test)]
+    #[test]
+    fn room_is_made_by_the_oldest_handshake_then_pairing_never_ready_or_closing() {
+        let mut live = Live::default();
+        let mut peers = Vec::new();
+        for (key, code) in [(1, READY), (2, CLOSING), (3, PAIRING), (4, HANDSHAKE), (5, PAIRING), (6, HANDSHAKE)] {
+            let (ours, theirs) = UnixStream::pair().unwrap();
+            peers.push(ours);
+            live.streams.insert(key, LiveConn { stream: theirs, phase: Arc::new(AtomicU8::new(code)) });
+        }
+        assert_eq!(live.to_make_room(99), Some(4), "the oldest handshake first");
+        assert_eq!(live.to_make_room(4), Some(6), "never the one excepted");
+        live.streams.retain(|_, conn| conn.phase.load(Ordering::SeqCst) != HANDSHAKE);
+        assert_eq!(live.to_make_room(99), Some(3), "then the oldest pairing request");
+        live.streams.retain(|_, conn| conn.phase.load(Ordering::SeqCst) != PAIRING);
+        assert_eq!(live.to_make_room(99), None, "a ready or closing connection never makes room");
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn when_a_new_connection_cannot_start_no_live_connection_is_closed() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicUsize;
+        static STARTED: AtomicUsize = AtomicUsize::new(0);
+        fn eight_then_none(work: Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>> {
+            if STARTED.fetch_add(1, Ordering::SeqCst) < MAX_CONNECTIONS {
+                spawn_thread(work)
+            } else {
+                Err(io::Error::other("no more threads for this test"))
+            }
+        }
+        struct Unused;
+        impl ReadSource for Unused {
+            fn reads_for(&self, _preset: crate::mcp::store::R2Preset) -> Box<dyn crate::mcp::server::Reads + '_> {
+                unreachable!("no read in this test")
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("bsm-{}-nf", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut runner = Runner::start_spawning(&dir, Arc::new(Mutex::new(Host::default())), Arc::new(Unused), Deadlines::default(), eight_then_none).unwrap();
+        let socket = dir.join(unix::SOCKET_NAME);
+        let held: Vec<UnixStream> = (0..MAX_CONNECTIONS).map(|_| UnixStream::connect(&socket).unwrap()).collect();
+        let started = Instant::now();
+        while runner.live() < MAX_CONNECTIONS {
+            assert!(started.elapsed() < Duration::from_secs(10), "eight live connections");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Eight stalled handshakes could make room, but the ninth cannot start: it goes, they stay.
+        let ninth = UnixStream::connect(&socket).unwrap();
+        ninth.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        assert_eq!((&ninth).read(&mut [0u8; 1]).unwrap(), 0, "the ninth sees the end");
+        assert_eq!(runner.live(), MAX_CONNECTIONS, "no live connection was closed for it");
+        for stream in &held {
+            stream.set_nonblocking(true).unwrap();
+            let still_open = matches!((&*stream).read(&mut [0u8; 1]), Err(error) if error.kind() == io::ErrorKind::WouldBlock);
+            assert!(still_open, "a live connection was closed");
+        }
+        runner.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn run_connection(shared: &Shared, stream: UnixStream, accepted: Instant, phase: &AtomicU8) {
         let Ok(read_half) = stream.try_clone() else { return };
         let mut reader = BufReader::new(read_half);
         let mut writer = stream;
-        let _ = serve(&shared.host, shared.source.as_ref(), &mut reader, &mut writer, &now_ms);
+        let report = |now: Phase| phase.store(phase_code(now), Ordering::SeqCst);
+        let _ = serve_timed(&shared.host, shared.source.as_ref(), &mut reader, &mut writer, &now_ms, shared.deadlines, accepted, &report);
         let _ = writer.shutdown(Shutdown::Both);
     }
 }
@@ -378,7 +671,7 @@ mod tests {
         }
     }
     impl ReadSource for Instant {
-        fn reads_for(&self, _preset: crate::ai::Preset) -> Box<dyn Reads + '_> {
+        fn reads_for(&self, _preset: crate::mcp::store::R2Preset) -> Box<dyn Reads + '_> {
             Box::new(Instant)
         }
     }
@@ -491,36 +784,146 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
+        fn start_with(dir: &Path, deadlines: Deadlines) -> Runner {
+            Runner::start_with(dir, Arc::new(Mutex::new(Host::default())), Arc::new(Instant), deadlines).unwrap()
+        }
+
+        fn short(idle_ms: u64, frame_ms: u64, handshake_ms: u64) -> Deadlines {
+            let ms = Duration::from_millis;
+            Deadlines { idle: ms(idle_ms), frame: ms(frame_ms), handshake: ms(handshake_ms), pairing: Duration::from_secs(5) }
+        }
+
+        fn ask_pairing(dir: &Path) -> (BufReader<UnixStream>, UnixStream) {
+            let (mut reader, mut writer) = connect(dir);
+            send(&mut writer, &json!({"pair": {"name": "Notes", "nonce": hex::encode([5u8; 32])}}).to_string());
+            assert!(receive(&mut reader)["pair"]["id"].is_string());
+            (reader, writer)
+        }
+
+        fn lists_tools(reader: &mut BufReader<UnixStream>, writer: &mut UnixStream) -> bool {
+            send(writer, r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#);
+            receive(reader)["result"]["tools"].is_array()
+        }
+
         #[test]
-        fn the_ninth_connection_is_closed_at_once() {
+        fn at_the_cap_stalled_handshakes_make_room_first_and_a_ready_client_never_does() {
             let dir = dir("cap");
             let mut runner = start(&dir, Arc::new(Instant), IDLE_TIMEOUT);
-            let mut held: Vec<_> = (0..MAX_CONNECTIONS).map(|_| connect(&dir)).collect();
+            let key = pair(&runner, &dir);
+            let (mut waiting_r, mut waiting_w) = ask_pairing(&dir);
+            let (mut ready_r, mut ready_w) = session(&dir, &key);
+            let mut stalled: Vec<_> = (0..MAX_CONNECTIONS - 2).map(|_| connect(&dir)).collect();
             wait_until("eight live connections", || runner.live() == MAX_CONNECTIONS);
-            let (_, mut ninth) = connect(&dir);
-            assert!(closed_by_app(&mut ninth), "the ninth is closed");
-            assert_eq!(runner.live(), MAX_CONNECTIONS);
 
-            // The eight are still served, and a freed place can be used again.
-            let (reader, writer) = &mut held[0];
-            send(writer, r#"{"hello":"mcp-00"}"#);
-            assert_eq!(receive(reader)["error"], "unknown client");
-            wait_until("a place to free up", || runner.live() == MAX_CONNECTIONS - 1);
-            let (mut reader, mut writer) = connect(&dir);
-            send(&mut writer, r#"{"hello":"mcp-01"}"#);
-            assert_eq!(receive(&mut reader)["error"], "unknown client");
+            // A ninth: the oldest stalled handshake is closed to make room, and the ninth is served.
+            let (mut ninth_r, mut ninth_w) = connect(&dir);
+            assert!(closed_by_app(&mut stalled[0].1), "the oldest handshake made room");
+            assert!(lists_tools(&mut ready_r, &mut ready_w), "the ready client keeps working");
+            send(&mut waiting_w, r#"{"pair_status":true}"#);
+            assert_eq!(receive(&mut waiting_r)["pair"], "waiting", "the pairing request is kept while handshakes can go");
+            send(&mut ninth_w, r#"{"hello":"mcp-00"}"#);
+            assert_eq!(receive(&mut ninth_r)["error"], "unknown client", "the ninth was served");
+
+            // Only ready clients and the pairing request left: the pairing request makes room.
+            drop(stalled);
+            wait_until("two live connections", || runner.live() == 2);
+            let mut sessions: Vec<_> = (0..MAX_CONNECTIONS - 2).map(|_| session(&dir, &key)).collect();
+            assert_eq!(runner.live(), MAX_CONNECTIONS);
+            let mut last = session(&dir, &key);
+            assert_eq!(read_frame(&mut waiting_r, MAX_FRAME_BYTES).unwrap(), None, "the pairing request made room");
+            assert!(lists_tools(&mut last.0, &mut last.1));
+
+            // Eight ready clients: a new connection is closed at once, and all eight keep working.
+            let (_, mut refused) = connect(&dir);
+            assert!(closed_by_app(&mut refused), "no ready client is closed to make room");
+            assert_eq!(runner.live(), MAX_CONNECTIONS);
+            assert!(lists_tools(&mut ready_r, &mut ready_w));
+            for (reader, writer) in &mut sessions {
+                assert!(lists_tools(reader, writer));
+            }
             runner.stop();
             let _ = std::fs::remove_dir_all(&dir);
         }
 
         #[test]
-        fn an_idle_connection_is_closed() {
-            let dir = dir("idle");
-            let mut runner = start(&dir, Arc::new(Instant), Duration::from_millis(200));
+        fn a_frame_trickled_a_byte_at_a_time_is_closed_at_the_frame_deadline() {
+            let dir = dir("loris");
+            let mut runner = start_with(&dir, short(5_000, 300, 5_000));
+            let (_, mut writer) = connect(&dir);
+            let mut watch = writer.try_clone().unwrap();
             let started = Clock::now();
-            let (_, mut quiet) = connect(&dir);
-            assert!(closed_by_app(&mut quiet), "the idle connection is closed");
-            assert!(started.elapsed() >= Duration::from_millis(200));
+            // A byte every 50 ms and never a newline: each read is well inside the idle timeout.
+            let trickle = std::thread::spawn(move || {
+                for _ in 0..100 {
+                    if writer.write_all(b"x").is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
+            assert!(closed_by_app(&mut watch), "the trickling connection is closed");
+            let took = started.elapsed();
+            assert!(took >= Duration::from_millis(300) && took < Duration::from_secs(3), "{took:?}");
+            trickle.join().unwrap();
+            wait_until("no live connection", || runner.live() == 0);
+            runner.stop();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_connection_that_never_finishes_the_handshake_is_closed_but_a_pairing_request_may_wait() {
+            let dir = dir("hs");
+            let mut runner = start_with(&dir, short(5_000, 5_000, 300));
+            let key = pair(&runner, &dir);
+
+            // Silent from the start, and challenged but never signing: both closed at the handshake deadline.
+            let started = Clock::now();
+            let (_, mut silent) = connect(&dir);
+            let (mut reader, mut writer) = connect(&dir);
+            send(&mut writer, &json!({"hello": key.id}).to_string());
+            assert!(receive(&mut reader)["challenge"].is_string());
+            assert!(closed_by_app(&mut silent));
+            assert_eq!(read_frame(&mut reader, MAX_FRAME_BYTES).unwrap(), None);
+            assert!(started.elapsed() < Duration::from_secs(3), "well before the idle timeout");
+
+            // A pairing request that keeps asking is not held to the handshake deadline.
+            let (mut waiting_r, mut waiting_w) = ask_pairing(&dir);
+            for _ in 0..6 {
+                std::thread::sleep(Duration::from_millis(100));
+                send(&mut waiting_w, r#"{"pair_status":true}"#);
+                assert_eq!(receive(&mut waiting_r)["pair"], "waiting");
+            }
+            runner.stop();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_ready_client_outlives_the_handshake_deadline_and_a_slow_whole_frame_is_served() {
+            let dir = dir("rdy");
+            let mut runner = start_with(&dir, short(5_000, 1_000, 300));
+            let key = pair(&runner, &dir);
+            let (mut reader, mut writer) = session(&dir, &key);
+            std::thread::sleep(Duration::from_millis(600));
+            assert!(lists_tools(&mut reader, &mut writer), "past the handshake deadline");
+            // One frame in two parts, 200 ms apart: inside the frame deadline.
+            writer.write_all(br#"{"jsonrpc":"2.0","id":8,"#).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            writer.write_all(b"\"method\":\"ping\"}\n").unwrap();
+            assert_eq!(receive(&mut reader)["result"], json!({}));
+            runner.stop();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn an_idle_ready_client_is_closed() {
+            let dir = dir("idle");
+            let mut runner = start_with(&dir, short(300, 5_000, 5_000));
+            let key = pair(&runner, &dir);
+            let (mut reader, mut writer) = session(&dir, &key);
+            assert!(lists_tools(&mut reader, &mut writer));
+            let started = Clock::now();
+            assert_eq!(read_frame(&mut reader, MAX_FRAME_BYTES).unwrap(), None, "the idle session is closed");
+            assert!(started.elapsed() >= Duration::from_millis(250));
             wait_until("no live connection", || runner.live() == 0);
             runner.stop();
             let _ = std::fs::remove_dir_all(&dir);
@@ -547,6 +950,51 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
+        /// Writes, noted in one log with the phases.
+        struct Noting {
+            inner: UnixStream,
+            log: Arc<Mutex<Vec<String>>>,
+        }
+        impl Write for Noting {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let what = if bytes.windows(8).any(|w| w == b"\"secret\"") { "write secret" } else { "write" };
+                self.log.lock().unwrap().push(what.to_owned());
+                self.inner.write(bytes)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.inner.flush()
+            }
+        }
+
+        #[test]
+        fn a_connection_handing_over_a_pairing_secret_is_closing_before_the_write() {
+            let host = Arc::new(Mutex::new(Host::default()));
+            let (client, served) = UnixStream::pair().unwrap();
+            client.set_read_timeout(Some(WAIT)).unwrap();
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let server = {
+                let (host, log) = (host.clone(), log.clone());
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(served.try_clone().unwrap());
+                    let mut writer = Noting { inner: served, log: log.clone() };
+                    let report = move |phase: Phase| log.lock().unwrap().push(format!("{phase:?}"));
+                    serve_timed(&host, &Instant, &mut reader, &mut writer, &now_ms, Deadlines::default(), Clock::now(), &report)
+                })
+            };
+            let mut reader = BufReader::new(client.try_clone().unwrap());
+            let mut writer = client;
+            send(&mut writer, &json!({"pair": {"name": "Desk", "nonce": hex::encode([6u8; 32])}}).to_string());
+            let id = receive(&mut reader)["pair"]["id"].as_str().unwrap().to_owned();
+            host.lock().unwrap().commit(&MemFile::default(), Some(&TagSealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, now_ms())).unwrap();
+            send(&mut writer, r#"{"pair_status":true}"#);
+            assert_eq!(receive(&mut reader)["pair"], "approved");
+            server.join().unwrap().unwrap();
+            let log = log.lock().unwrap().clone();
+            let secret = log.iter().position(|entry| entry == "write secret").expect("the secret was written");
+            assert_eq!(log[secret - 1], "Closing", "never closed to make room while it hands over: {log:?}");
+            assert_eq!(log[..secret - 1], ["Pairing", "write"], "{log:?}");
+        }
+
         /// A read source that panics while reading.
         struct Panicking;
         impl Reads for Panicking {
@@ -555,7 +1003,7 @@ mod tests {
             }
         }
         impl ReadSource for Panicking {
-            fn reads_for(&self, _preset: Preset) -> Box<dyn Reads + '_> {
+            fn reads_for(&self, _preset: crate::mcp::store::R2Preset) -> Box<dyn Reads + '_> {
                 Box::new(Panicking)
             }
         }
@@ -563,7 +1011,7 @@ mod tests {
         /// A read source that panics before it can read at all.
         struct PanickingSource;
         impl ReadSource for PanickingSource {
-            fn reads_for(&self, _preset: Preset) -> Box<dyn Reads + '_> {
+            fn reads_for(&self, _preset: crate::mcp::store::R2Preset) -> Box<dyn Reads + '_> {
                 panic!("a source that panics");
             }
         }
@@ -624,7 +1072,7 @@ mod tests {
             }
         }
         impl ReadSource for Gate {
-            fn reads_for(&self, _preset: Preset) -> Box<dyn Reads + '_> {
+            fn reads_for(&self, _preset: crate::mcp::store::R2Preset) -> Box<dyn Reads + '_> {
                 Box::new(GateRef(self))
             }
         }
