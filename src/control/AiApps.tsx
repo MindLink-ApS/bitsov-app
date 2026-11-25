@@ -81,6 +81,13 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
     }
   }
 
+  // An "Add an AI app" call still on its way to the host.
+  let opening: Promise<unknown> | null = null;
+  const closePairing = () => props.api.closePairing().then(() => undefined, (error: unknown) => {
+    // Nothing is left on screen to say it: keep the code for diagnosis.
+    console.warn('mcp_close_pairing', errorCode(error));
+  });
+
   onMount(() => {
     void refresh();
     const stopListening = props.api.onChanged(() => void refresh());
@@ -91,7 +98,10 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
       clearInterval(poll);
       clearInterval(second);
       // A pairing window is open only while the owner is on this screen.
-      if (status()?.pairing_open_s != null) void props.api.closePairing().catch(() => {});
+      // Always close (the host's close is idempotent), whatever this screen
+      // last read; and close again once an open still on its way settles.
+      void closePairing();
+      if (opening) void opening.then(closePairing, closePairing);
     });
   });
 
@@ -165,7 +175,11 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
           <p class="hint" data-ai-howto>{t('mcpHowTo')}</p>
           <Show when={full()}><p class="hint" data-ai-full>{t('mcpTooMany', MCP_MAX_CLIENTS)}</p></Show>
           <button type="button" class="primary ai-apps-add" data-ai-add disabled={busy() || full()}
-            onClick={() => void act(() => props.api.openPairing())}>{t('mcpAdd')}</button>
+            onClick={() => void act(() => {
+              const open = props.api.openPairing();
+              opening = open;
+              return open.finally(() => { if (opening === open) opening = null; });
+            })}>{t('mcpAdd')}</button>
         </>}>
           <p role="status" data-ai-window>{t('mcpWindowOpen', clock(windowLeft()))}</p>
           <p class="hint">{t('mcpHowTo')}</p>

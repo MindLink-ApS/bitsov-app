@@ -24,6 +24,7 @@ const CLIENT: McpClient = { id: 'mcp-aa', name: 'Desk helper', topics: ['node', 
 /** A fake host: state the test sets, calls the screen makes. */
 function host(start: Partial<McpStatus> = {}, extra: { pending?: McpPending[]; clients?: McpClient[] } = {}) {
   const state = { status: { ...OFF, ...start }, pending: extra.pending ?? [], clients: extra.clients ?? [] };
+  const listeners: (() => void)[] = [];
   const api = {
     status: vi.fn(async () => state.status),
     setEnabled: vi.fn(async (on: boolean) => { state.status = { ...state.status, enabled: on }; return state.status; }),
@@ -44,9 +45,11 @@ function host(start: Partial<McpStatus> = {}, extra: { pending?: McpPending[]; c
     stopAll: vi.fn(async () => { state.status = { ...state.status, enabled: false, pairing_open_s: null }; return state.status; }),
     audit: vi.fn(async (): Promise<McpAuditPage> => ({ rows: [], unreadable: 0 })),
     resetClients: vi.fn(async () => { state.status = { ...state.status, store: 'empty' }; return state.status; }),
-    onChanged: vi.fn(() => () => {}),
+    onChanged: vi.fn((changed: () => void) => { listeners.push(changed); return () => { listeners.splice(listeners.indexOf(changed), 1); }; }),
   } satisfies AiAppsApi;
-  return { api, state };
+  /** The host's `mcp-changed` event. */
+  const fire = () => { for (const changed of [...listeners]) changed(); };
+  return { api, state, fire };
 }
 
 async function show(api: AiAppsApi) {
@@ -301,6 +304,92 @@ describe('Settings → AI apps', () => {
     await vi.waitFor(() => expect($<HTMLInputElement>('[data-ai-switch]')!.checked).toBe(false));
     expect(api.stopAll).toHaveBeenCalledOnce();
     expect($('[data-ai-client="mcp-aa"]')).not.toBeNull();
+  });
+
+  it('nothing is approved without the owner’s click, and a new request clears the choices made for the old one', async () => {
+    const { api, state, fire } = host({ enabled: true, pairing_open_s: 100, waiting: 1 }, { pending: [REQUEST] });
+    await show(api);
+    await vi.waitFor(() => expect($('[data-ai-request]')).not.toBeNull());
+    toggle('[data-ai-topic="node"]');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-ai-approve]')!.disabled).toBe(false));
+    // Host events and reads alone never approve.
+    fire();
+    fire();
+    await vi.waitFor(() => expect(api.pending.mock.calls.length).toBeGreaterThan(2));
+    expect(api.approve).not.toHaveBeenCalled();
+    // Another request replaces the first: its words show, nothing is ticked, Approve is off again.
+    const other = { ...REQUEST, id: 'mcp-ffeeddccbbaa9988', words: ['copper', 'willow', 'meadow', 'signal', 'harbor', 'violet'] };
+    state.pending = [other];
+    fire();
+    await vi.waitFor(() => expect($('[data-ai-request]')!.getAttribute('data-ai-request')).toBe(other.id));
+    expect($$('[data-ai-words] li').map(li => li.textContent)).toEqual(other.words);
+    expect($$('[data-ai-topic]').every(el => !(el as HTMLInputElement).checked)).toBe(true);
+    expect($<HTMLButtonElement>('[data-ai-approve]')!.disabled).toBe(true);
+    expect(api.approve).not.toHaveBeenCalled();
+    toggle('[data-ai-topic="prices"]');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-ai-approve]')!.disabled).toBe(false));
+    click('[data-ai-approve]');
+    await vi.waitFor(() => expect(api.approve).toHaveBeenCalledOnce());
+    expect(api.approve).toHaveBeenCalledWith(other.id, ['prices'], 'counts');
+  });
+
+  it('after a failure midway, the screen says the switch was turned off and the list read again', async () => {
+    const { api, state } = host();
+    api.setEnabled.mockImplementationOnce(async () => {
+      state.status = { ...state.status, enabled: false, start_error: 'recovered' };
+      throw 'recovered';
+    });
+    await show(api);
+    toggle('[data-ai-switch]');
+    await vi.waitFor(() => expect($('[data-ai-note="err"]')).not.toBeNull());
+    expect($('[data-ai-note="err"]')!.textContent).toBe(appEn.mcpRecovered);
+    expect($<HTMLInputElement>('[data-ai-switch]')!.checked).toBe(false);
+    dispose?.(); mount.remove();
+    // Read later from the status alone, it says the same.
+    const again = host({ start_error: 'recovered' });
+    await show(again.api);
+    expect($('[data-ai-start-error]')!.textContent).toBe(appEn.mcpRecovered);
+    setLanguagePref('da');
+    expect($('[data-ai-start-error]')!.textContent).toBe(appDa.mcpRecovered);
+  });
+
+  it('leaving the screen closes the pairing window even when it had not read one open', async () => {
+    const { api } = host({ enabled: true });
+    await show(api);
+    dispose!();
+    dispose = undefined;
+    expect(api.closePairing).toHaveBeenCalledOnce();
+  });
+
+  it('leaving while “Add an AI app” is still on its way closes the window once it has opened', async () => {
+    const { api, state } = host({ enabled: true });
+    let finish!: () => void;
+    api.openPairing.mockImplementationOnce(() => new Promise(resolve => {
+      finish = () => { state.status = { ...state.status, pairing_open_s: 120 }; resolve(state.status); };
+    }));
+    await show(api);
+    click('[data-ai-add]');
+    expect(api.openPairing).toHaveBeenCalledOnce();
+    dispose!();
+    dispose = undefined;
+    expect(api.closePairing).toHaveBeenCalledTimes(1);
+    finish();
+    await vi.waitFor(() => expect(api.closePairing).toHaveBeenCalledTimes(2));
+    expect(state.status.pairing_open_s).toBeNull();
+  });
+
+  it('a close that fails on the way out is kept for diagnosis, not dropped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { api } = host({ enabled: true, pairing_open_s: 90 });
+      api.closePairing.mockRejectedValueOnce('unavailable');
+      await show(api);
+      dispose!();
+      dispose = undefined;
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('mcp_close_pairing', 'unavailable'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('leaving the screen closes an open pairing window', async () => {

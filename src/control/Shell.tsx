@@ -2707,7 +2707,8 @@ export function ControlCenter(props: Props) {
           <Match when={tab() === 'frontdoor'}>
             <FrontDoorEditor source={source} now={now()} />
           </Match>
-          <Match when={tab() === 'ai' && aiApps()}>
+          {/* Mounted only while Settings is open: closing Settings closes a pairing window. */}
+          <Match when={tab() === 'ai' && aiApps() && contextOpen()}>
             <AiApps api={tauriAiApps} />
           </Match>
         </Switch>
