@@ -12697,6 +12697,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             ];
             #[cfg(feature = "call-seal")]
             let handler = with_call_seal_commands(handler);
+            #[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+            let handler = with_mcp_commands(handler);
             #[cfg(target_os = "ios")]
             let handler = guard_ios_startup(handler);
             handler
@@ -12749,6 +12751,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             }
             #[cfg(target_os = "android")]
             bitsov_app::at_rest::install(Arc::new(device_key::KeystoreSealer))?;
+            // After the sealer: the MCP runtime reads it. The switch stays off.
+            #[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+            install_mcp(app)?;
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(bootstrap_node(handle));
             tauri::async_runtime::spawn(live_bridge(app.handle().clone()));
@@ -13085,6 +13090,292 @@ fn with_call_seal_commands<R: tauri::Runtime>(
             seal(invoke)
         } else {
             app(invoke)
+        }
+    }
+}
+
+// ---- MCP: AI apps on this computer (feature `mcp-grant`, desktop only)
+//
+// The owner's switch and the pairing window, over `bitsov_app::mcp::runtime`.
+// Every command runs only in the main window and answers short error codes.
+// Nothing listens until the owner turns the switch on; it is off at every start.
+
+/// The commands of the MCP runtime. Registered only with `mcp-grant` on desktop.
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+const MCP_COMMANDS: [&str; 13] = [
+    "mcp_status",
+    "mcp_set_enabled",
+    "mcp_open_pairing",
+    "mcp_close_pairing",
+    "mcp_pending",
+    "mcp_approve",
+    "mcp_deny",
+    "mcp_clients",
+    "mcp_revoke",
+    "mcp_save_again",
+    "mcp_stop_all",
+    "mcp_audit",
+    "mcp_reset_clients",
+];
+
+/// The event that tells the main window to fetch the MCP state again (no payload).
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+const MCP_CHANGED_EVENT: &str = "mcp-changed";
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+struct McpState(Mutex<bitsov_app::mcp::runtime::Runtime>);
+
+/// Reads for an MCP client: the assistant's own broker read with the paired
+/// token, narrowed to the client's preset (counts or rounded).
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+struct McpNodeReads(AppHandle<tauri::Wry>);
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+impl bitsov_app::mcp::endpoint::ReadSource for McpNodeReads {
+    fn reads_for(&self, preset: bitsov_app::mcp::store::R2Preset) -> Box<dyn bitsov_app::mcp::server::Reads + '_> {
+        let app = self.0.clone();
+        Box::new(bitsov_app::mcp::broker::BrokerReads::with_preset(
+            move |topic, since_ms| {
+                let state = app.state::<NodeState>();
+                // A connection thread, not the async runtime: blocking here is fine.
+                tauri::async_runtime::block_on(ai_read_topic(state.inner(), topic, since_ms))
+                    .unwrap_or(ai::TopicRead::Unavailable { topic, reason: ai::NoRead::NodeUnreachable })
+            },
+            preset,
+        ))
+    }
+}
+
+/// Set up the MCP runtime (switch off) and grant its commands to the main
+/// window only. Call after the platform sealer is installed.
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+fn install_mcp(app: &tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error::Error>> {
+    use bitsov_app::mcp::runtime::{Config, Runtime, DIR_NAME};
+    let dir = app.path().app_data_dir()?.join(DIR_NAME);
+    let handle = app.handle().clone();
+    let notify = Arc::new(move || {
+        let _ = handle.emit_to(MAIN_WINDOW_LABEL, MCP_CHANGED_EVENT, ());
+    });
+    let source = Arc::new(McpNodeReads(app.handle().clone()));
+    app.manage(McpState(Mutex::new(Runtime::new(Config::for_app(dir, source, notify)))));
+    let mut capability = tauri::ipc::CapabilityBuilder::new("mcp").window(MAIN_WINDOW_LABEL);
+    for command in MCP_COMMANDS {
+        capability = capability.permission(format!("allow-{}", command.replace('_', "-")));
+    }
+    app.add_capability(capability)?;
+    Ok(())
+}
+
+/// The MCP commands, only with `mcp-grant` on desktop. Everything else goes
+/// to the app's handler unchanged.
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+fn with_mcp_commands(
+    app: impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    let mcp: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        mcp_status,
+        mcp_set_enabled,
+        mcp_open_pairing,
+        mcp_close_pairing,
+        mcp_pending,
+        mcp_approve,
+        mcp_deny,
+        mcp_clients,
+        mcp_revoke,
+        mcp_save_again,
+        mcp_stop_all,
+        mcp_audit,
+        mcp_reset_clients
+    ];
+    move |invoke| {
+        if MCP_COMMANDS.contains(&invoke.message.command()) {
+            mcp(invoke)
+        } else {
+            app(invoke)
+        }
+    }
+}
+
+/// The main window only, as a short code.
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+fn mcp_main_window(window: &WebviewWindow<tauri::Wry>) -> Result<(), String> {
+    reject_sealed_window(window).map_err(|_| bitsov_app::mcp::runtime::code::MAIN_WINDOW_ONLY.to_owned())
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+fn mcp_runtime<'a>(state: &'a tauri::State<'_, McpState>) -> Result<std::sync::MutexGuard<'a, bitsov_app::mcp::runtime::Runtime>, String> {
+    state.0.lock().map_err(|_| bitsov_app::mcp::runtime::code::UNAVAILABLE.to_owned())
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+fn mcp_now() -> u64 {
+    bitsov_app::mcp::runner::now_ms()
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_status(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>) -> Result<bitsov_app::mcp::runtime::Status, String> {
+    mcp_main_window(&window)?;
+    Ok(mcp_runtime(&state)?.status(mcp_now()))
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_set_enabled(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>, on: bool) -> Result<bitsov_app::mcp::runtime::Status, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.set_enabled(on, mcp_now()).map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_open_pairing(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>) -> Result<bitsov_app::mcp::runtime::Status, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.open_pairing(mcp_now()).map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_close_pairing(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>) -> Result<bitsov_app::mcp::runtime::Status, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.close_pairing(mcp_now()).map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_pending(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>) -> Result<Vec<bitsov_app::mcp::runtime::PendingView>, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.pending(mcp_now()).map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_approve(
+    window: WebviewWindow<tauri::Wry>,
+    state: tauri::State<'_, McpState>,
+    id: String,
+    topics: Vec<ai::Topic>,
+    preset: bitsov_app::mcp::store::R2Preset,
+) -> Result<bitsov_app::mcp::runtime::ClientView, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.approve(&id, &topics, preset, mcp_now()).map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_deny(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>, id: String) -> Result<bool, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.deny(&id, mcp_now()).map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_clients(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>) -> Result<Vec<bitsov_app::mcp::runtime::ClientView>, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.clients().map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_revoke(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>, id: String) -> Result<bitsov_app::mcp::runtime::Saved, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.revoke(&id).map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_save_again(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>) -> Result<bitsov_app::mcp::runtime::Saved, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.save_again().map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_stop_all(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>) -> Result<bitsov_app::mcp::runtime::Status, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.stop_all(mcp_now()).map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_audit(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>) -> Result<bitsov_app::mcp::runtime::AuditPage, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.audit(mcp_now()).map_err(String::from)
+}
+
+#[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
+#[tauri::command(rename_all = "snake_case")]
+async fn mcp_reset_clients(window: WebviewWindow<tauri::Wry>, state: tauri::State<'_, McpState>, confirm: bool) -> Result<bitsov_app::mcp::runtime::Status, String> {
+    mcp_main_window(&window)?;
+    mcp_runtime(&state)?.reset_clients(confirm, mcp_now()).map_err(String::from)
+}
+// ---- end MCP
+
+#[cfg(test)]
+mod mcp_command_tests {
+    //! The MCP commands: main window only, short codes, one list everywhere.
+
+    fn source(path: &str) -> String {
+        std::fs::read_to_string(format!("{}/{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    fn section() -> String {
+        let app = source("src/app.rs");
+        let start = app.find("// ---- MCP: AI apps on this computer").expect("MCP section");
+        let end = app[start..].find("// ---- end MCP").expect("MCP section end");
+        app[start..start + end].to_owned()
+    }
+
+    fn quoted(text: &str, marker: &str) -> Vec<String> {
+        let start = text.find(marker).unwrap_or_else(|| panic!("missing {marker}")) + marker.len();
+        let end = start + text[start..].find(']').expect("list end");
+        text[start..end].split('"').skip(1).step_by(2).map(str::to_owned).collect()
+    }
+
+    fn commands() -> Vec<String> {
+        quoted(&section(), "const MCP_COMMANDS: [&str; 13] = [")
+    }
+
+    #[test]
+    fn every_mcp_command_checks_the_main_window_first() {
+        let section = section();
+        assert!(section.contains("reject_sealed_window(window).map_err(|_| bitsov_app::mcp::runtime::code::MAIN_WINDOW_ONLY"));
+        for command in commands() {
+            let start = section.find(&format!("async fn {command}(")).unwrap_or_else(|| panic!("missing async fn {command}"));
+            let body = &section[start..];
+            let open = body.find(") -> Result<").expect("returns a Result");
+            let first = body[open..].lines().nth(1).unwrap_or_default().trim();
+            assert_eq!(first, "mcp_main_window(&window)?;", "{command} must check the window first");
+        }
+        assert!(super::window_may_run_privileged_command(super::MAIN_WINDOW_LABEL));
+        assert!(!super::window_may_run_privileged_command("assistant"));
+    }
+
+    #[test]
+    fn the_command_lists_agree_and_the_grant_is_the_main_window_only() {
+        let listed = commands();
+        assert_eq!(listed.len(), 13);
+        assert_eq!(quoted(&source("build.rs"), "const MCP_COMMANDS: &[&str] = &["), listed, "build.rs");
+        let section = section();
+        let handler = &section[section.find("generate_handler![").expect("handler")..];
+        let handler = &handler[..handler.find(']').unwrap()];
+        for command in &listed {
+            assert!(handler.contains(command.as_str()), "{command} is not in the MCP handler");
+        }
+        assert!(section.contains("CapabilityBuilder::new(\"mcp\").window(MAIN_WINDOW_LABEL)"));
+        assert!(!section.contains(".windows("), "granted to one window only");
+        // No capability file grants them: only the runtime grant above does.
+        for entry in std::fs::read_dir(format!("{}/capabilities", env!("CARGO_MANIFEST_DIR"))).unwrap() {
+            let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            assert!(!text.contains("allow-mcp-"), "a capability file names an MCP permission");
+        }
+    }
+
+    #[test]
+    fn errors_are_short_codes() {
+        use bitsov_app::mcp::runtime::code;
+        for value in [code::MAIN_WINDOW_ONLY, code::UNAVAILABLE, code::BLOCKED, code::START_FAILED, code::UNKNOWN,
+            code::NO_TOPICS, code::PRESET_TOO_WIDE, code::NOT_SAVED, code::PAIRING_CLOSED] {
+            assert!(value.chars().all(|c| c.is_ascii_lowercase() || c == '_'), "{value}");
         }
     }
 }
