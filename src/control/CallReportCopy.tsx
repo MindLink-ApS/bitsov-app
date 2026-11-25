@@ -6,6 +6,7 @@ import { createEffect, createSignal, on, Show } from 'solid-js';
 import { t as tr } from '../i18n';
 import type { CallView } from './call';
 import { callReport } from './callReport';
+import { audioStats } from './callAudioStats';
 
 export function CallReportCopy(props: {
   view: CallView;
@@ -22,7 +23,7 @@ export function CallReportCopy(props: {
   const copy = async () => {
     const write = props.copy ?? ((text: string) => navigator.clipboard.writeText(text));
     try {
-      await write(callReport({ view: props.view, routed: props.routed, endedAt: endedAt() }));
+      await write(callReport({ view: props.view, routed: props.routed, endedAt: endedAt(), audioRows: audioStats.rows(props.view.callId) }));
       setCopied('yes');
     } catch { setCopied('no'); }
   };

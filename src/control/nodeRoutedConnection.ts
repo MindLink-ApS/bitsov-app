@@ -20,6 +20,7 @@
  * a direct path to the peer app: the connection state follows the node link.
  */
 import type { CallAudio, CallAudioDiagnostics, MediaTransport } from './callAudio';
+import { audioStats } from './callAudioStats';
 import type { CallVideo, VideoTransport } from './callVideo';
 import type { CallSeal, MediaBridge, MediaLink } from './mediaBridge';
 import { isVideoFrame } from './videoFrame';
@@ -364,7 +365,12 @@ export class NodeRoutedConnection {
     let audio: CallAudio | null = null;
     // A fatal audio error mid-call (a codec that cannot recover, a crashed worklet) ends the call like a failed start.
     const onFatal = () => { if (audio && this.audio === audio) this.audioFailed(); };
-    audio = this.deps.audio(this.stream ?? emptyStream(), { send: (payload) => this.deps.bridge.send(payload) }, onFatal);
+    audio = this.deps.audio(this.stream ?? emptyStream(), {
+      send: (payload) => this.deps.bridge.send(payload),
+      queueStats: () => this.deps.bridge.stats?.() ?? Promise.resolve(null),
+      // Local numbers about this call's audio, kept in memory for the call report only.
+      report: (row) => audioStats.add(callId, row),
+    }, onFatal);
     this.audio = audio;
     if (this.muted) audio.setMuted(true);
     audio.ready.then(

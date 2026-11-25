@@ -125,6 +125,7 @@
     "allow-call-media-send",
     "allow-call-media-video-send",
     "allow-call-media-close",
+    "allow-call-media-stats",
     "allow-porch-quote",
     "allow-porch-read",
     "allow-porch-cards",

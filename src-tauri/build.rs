@@ -139,6 +139,7 @@ fn main() {
             "call_media_send",
             "call_media_video_send",
             "call_media_close",
+            "call_media_stats",
             "porch_quote",
             "porch_read",
             "porch_cards",
