@@ -144,11 +144,12 @@ fn outcome_code(outcome: Outcome) -> &'static str {
         Outcome::Refused => "refused",
         Outcome::RateLimited => "rate_limited",
         Outcome::NotAuthorised => "not_authorised",
+        Outcome::Removed => "removed",
     }
 }
 
 fn outcome_parse(code: &str) -> Option<Outcome> {
-    [Outcome::Read, Outcome::ReadFailed, Outcome::Refused, Outcome::RateLimited, Outcome::NotAuthorised]
+    [Outcome::Read, Outcome::ReadFailed, Outcome::Refused, Outcome::RateLimited, Outcome::NotAuthorised, Outcome::Removed]
         .into_iter()
         .find(|o| outcome_code(*o) == code)
 }
@@ -275,7 +276,8 @@ impl<'s, I: AppendIo> AuditLog<'s, I> {
 
     fn bucket_of(&self, row: &AuditRow) -> Option<Bucket> {
         match row.outcome {
-            Outcome::Read | Outcome::ReadFailed => None,
+            // The owner's removals are rare and never come from a client.
+            Outcome::Read | Outcome::ReadFailed | Outcome::Removed => None,
             Outcome::NotAuthorised => Some(Bucket::NotAuthorised),
             Outcome::Refused | Outcome::RateLimited => {
                 let client = Bucket::Client(cap(&row.client, MAX_CLIENT));

@@ -31,7 +31,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use super::audit_log::{self, AppendIo, AuditLog, TailBytes, SHOW_ROWS};
-use super::endpoint::{ChangeError, Host, ReadSource, HANDSHAKE_AUDIT_TOOL, PAIRING_CLOSED, PAIRING_TAKEN};
+use super::endpoint::{ChangeError, Host, ReadSource, HANDSHAKE_AUDIT_TOOL, PAIRING_CLOSED, PAIRING_TAKEN, REMOVED_AUDIT_TOOL};
 use super::pairing::PairError;
 use super::session::{Audit, Outcome};
 use super::store::{self, FileIo, R2Preset};
@@ -48,6 +48,10 @@ pub mod code {
     pub const NO_TOPICS: &str = "no_topics";
     pub const PRESET_TOO_WIDE: &str = "preset_too_wide";
     pub const NOT_SAVED: &str = "not_saved";
+    /// Already the most clients kept: the owner removes one first.
+    pub const TOO_MANY_CLIENTS: &str = "too_many_clients";
+    /// A removal is not on file yet: the endpoint stays off until it is.
+    pub const REMOVAL_NOT_SAVED: &str = "removal_not_saved";
     pub const PAIRING_CLOSED: &str = "pairing_closed";
     /// An earlier command failed midway (a panic); the switch was turned off
     /// and the state is read again from the clients file. Returned once.
@@ -177,9 +181,10 @@ pub struct Status {
     pub pairing_open_s: Option<u16>,
     /// Requests waiting for the owner (at most one per window).
     pub waiting: u8,
-    /// Approved clients not revoked.
+    /// Approved clients.
     pub clients: u8,
-    /// A revoke holds in memory but is not on file yet.
+    /// A removal holds in memory but is not on file yet. The endpoint stays
+    /// off until a save carries it (`start_error` is `removal_not_saved`).
     pub unsaved_revoke: bool,
 }
 
@@ -306,6 +311,7 @@ fn outcome_code(outcome: Outcome) -> &'static str {
         Outcome::Refused => "refused",
         Outcome::RateLimited => "rate_limited",
         Outcome::NotAuthorised => "not_authorised",
+        Outcome::Removed => "removed",
     }
 }
 
@@ -367,8 +373,9 @@ impl Runtime {
         // does not have them yet. Applied to every load, blocked or not, and
         // kept until a save puts them on file: a blocked load has no records
         // to revoke, and the next good load must still find them.
+        let now = (self.config.clock)();
         for id in &self.carry_revokes {
-            if loaded.revoke(id).is_ok() {
+            if loaded.revoke(id, now).is_ok() {
                 self.unsaved_revoke = true;
             }
         }
@@ -377,10 +384,15 @@ impl Runtime {
         Ok(())
     }
 
-    /// A save of every record succeeded: nothing is held only in memory now.
+    /// A save of every record succeeded: nothing is held only in memory now,
+    /// so a "removal not saved" start error no longer holds either. Every
+    /// path that ends in a save that worked calls this.
     fn saved(&mut self) {
         self.unsaved_revoke = false;
         self.carry_revokes.clear();
+        if self.start_error == Some(code::REMOVAL_NOT_SAVED) {
+            self.start_error = None;
+        }
     }
 
     /// After a panic left the state half-updated (see [`Guarded`]): stop
@@ -444,7 +456,7 @@ impl Runtime {
         }
         let Ok(mut host) = self.host.lock() else { return unavailable };
         let window = host.pairing_window(now_ms);
-        let active = host.stored().iter().filter(|record| !record.revoked).count();
+        let active = host.stored().len();
         Status {
             platform: "ok",
             enabled: self.running.is_some(),
@@ -484,6 +496,20 @@ impl Runtime {
         self.ensure_loaded(true)?;
         if lock(&self.host)?.blocked().is_some() {
             return Err(code::BLOCKED);
+        }
+        // A removal that is not on file: try once more, and stay off if the
+        // file still lists the removed client.
+        if self.unsaved_revoke {
+            let sealer = self.sealer()?;
+            let mut host = lock(&self.host)?;
+            if host.save_now(self.config.store.as_ref(), Some(sealer)).is_err() {
+                drop(host);
+                self.start_error = Some(code::REMOVAL_NOT_SAVED);
+                return Err(code::REMOVAL_NOT_SAVED);
+            }
+            host.saved();
+            drop(host);
+            self.saved();
         }
         let Ok(audit) = self.audit_log() else {
             self.start_error = Some(code::START_FAILED);
@@ -611,11 +637,12 @@ impl Runtime {
                 Err(ChangeError::StoreBlocked(_)) => return Err(code::BLOCKED),
                 Err(ChangeError::Store(_)) => return Err(code::NOT_SAVED),
                 Err(ChangeError::PresetTooWide) => return Err(code::PRESET_TOO_WIDE),
+                Err(ChangeError::TooManyClients) => return Err(code::TOO_MANY_CLIENTS),
                 Err(ChangeError::Pair(PairError::Unknown) | ChangeError::UnknownClient) => return Err(code::UNKNOWN),
                 Err(_) => return Err(code::NOT_SAVED),
             }
             host.close_pairing(now_ms);
-            host.stored().iter().find(|record| record.id == id && !record.revoked).and_then(client_view).ok_or(code::UNKNOWN)?
+            host.stored().iter().find(|record| record.id == id).and_then(client_view).ok_or(code::UNKNOWN)?
         };
         // The save carried every record, an earlier unsaved revoke included.
         self.saved();
@@ -640,21 +667,23 @@ impl Runtime {
         Ok(denied)
     }
 
-    /// The approved clients, revoked ones left out.
+    /// The approved clients.
     pub fn clients(&mut self) -> Result<Vec<ClientView>, &'static str> {
         self.sealer()?;
         self.ensure_loaded(false)?;
         let host = lock(&self.host)?;
-        Ok(host.stored().iter().filter(|record| !record.revoked).filter_map(client_view).collect())
+        Ok(host.stored().iter().filter_map(client_view).collect())
     }
 
-    /// The owner removes a client. Access is cut at once in memory; if the
-    /// file could not be saved, `saved: false` and the status says so until
-    /// a later save works ([`Runtime::save_again`]).
+    /// The owner removes a client. Access is cut at once in memory and the
+    /// record leaves the file. If the file could not be saved, `saved: false`,
+    /// the endpoint switches off and stays off until a later save works
+    /// ([`Runtime::save_again`], or switching on, which tries again).
     pub fn revoke(&mut self, id: &str) -> Result<Saved, &'static str> {
         let sealer = self.sealer()?;
         self.ensure_loaded(false)?;
-        let result = lock(&self.host)?.revoke_saved(self.config.store.as_ref(), Some(sealer), id);
+        let now = (self.config.clock)();
+        let result = lock(&self.host)?.revoke_saved(self.config.store.as_ref(), Some(sealer), id, now);
         let saved = match result {
             Ok(()) => {
                 // Every record was saved, an earlier unsaved revoke included.
@@ -663,6 +692,9 @@ impl Runtime {
             }
             Err(ChangeError::RevokedNotSaved(_)) => {
                 self.unsaved_revoke = true;
+                // The file still lists the client: nothing listens until it agrees.
+                self.switch_off(now);
+                self.start_error = Some(code::REMOVAL_NOT_SAVED);
                 false
             }
             Err(_) => return Err(code::UNKNOWN),
@@ -676,7 +708,12 @@ impl Runtime {
         let sealer = self.sealer()?;
         // Never save before the file was read: an empty host would replace it.
         self.ensure_loaded(false)?;
-        let result = lock(&self.host)?.save_now(self.config.store.as_ref(), Some(sealer));
+        let mut host = lock(&self.host)?;
+        let result = host.save_now(self.config.store.as_ref(), Some(sealer));
+        if result.is_ok() {
+            host.saved();
+        }
+        drop(host);
         let saved = match result {
             Ok(()) => {
                 self.saved();
@@ -698,7 +735,13 @@ impl Runtime {
         drain(&self.host, &log, now_ms);
         let tail = lock(&log)?.last(SHOW_ROWS).map_err(|_| code::UNAVAILABLE)?;
         let host = lock(&self.host)?;
-        let name_of = |client: &str| host.stored().iter().find(|record| record.id == client).map(|record| record.name.clone());
+        // A removed client's record has left the file; its removal row keeps the name.
+        let removed: std::collections::HashMap<&str, &str> = tail.rows.iter()
+            .filter(|row| row.outcome == Outcome::Removed && row.tool == REMOVED_AUDIT_TOOL)
+            .map(|row| (row.client.as_str(), row.arguments.as_str()))
+            .collect();
+        let name_of = |client: &str| host.stored().iter().find(|record| record.id == client).map(|record| record.name.clone())
+            .or_else(|| removed.get(client).map(|name| (*name).to_owned()));
         let rows = tail.rows.iter().rev().map(|row| {
             let pairing = row.tool == HANDSHAKE_AUDIT_TOOL && (row.arguments == PAIRING_CLOSED || row.arguments == PAIRING_TAKEN);
             AuditView {
@@ -741,10 +784,12 @@ impl Drop for Runtime {
 }
 
 /// The clients whose access a recovery must not give back: every client
-/// revoked in this host. The one place that reads them, so a change to how
-/// revocations are kept changes only this.
+/// removed in this host whose removal no save has carried yet (a saved
+/// removal has left the file, so a reload cannot give it back). The one
+/// place that reads them, so a change to how revocations are kept changes
+/// only this.
 fn revokes_to_carry(host: &Host) -> Vec<String> {
-    host.stored().iter().filter(|record| record.revoked).map(|record| record.id.clone()).collect()
+    host.removed_unsaved().to_vec()
 }
 
 fn client_view(record: &store::StoredClient) -> Option<ClientView> {
@@ -936,14 +981,22 @@ mod tests {
         assert_eq!(rt.clients().unwrap().iter().map(|c| c.id.clone()).collect::<Vec<_>>(), std::slice::from_ref(&id), "clients stay on file");
         assert_eq!(off.clients, 1);
 
-        // Back on: the same clients, without a second load that could undo an unsaved revoke.
+        // A removal that is not on file keeps it off until the file agrees,
+        // without a second load that could undo the removal.
+        rt.set_enabled(true, 12).unwrap();
         file.fail(true);
         assert_eq!(rt.revoke(&id).unwrap(), Saved { saved: false });
+        assert_eq!(counts.stopped.load(Ordering::SeqCst), 2, "the endpoint closed");
+        let status = rt.status(12);
+        assert_eq!((status.enabled, status.unsaved_revoke, status.clients, status.start_error), (false, true, 0, Some(code::REMOVAL_NOT_SAVED)));
+        assert_eq!(rt.set_enabled(true, 12), Err(code::REMOVAL_NOT_SAVED), "stays off while the file still lists it");
+        assert_eq!(counts.started.load(Ordering::SeqCst), 2);
+        file.fail(false);
         let on = rt.set_enabled(true, 12).unwrap();
-        assert!(on.enabled && on.unsaved_revoke);
-        assert_eq!(on.clients, 0, "the revoke still holds");
+        assert!(on.enabled && !on.unsaved_revoke && on.start_error.is_none());
+        assert!(store::load(&file, Some(&SEALER)).unwrap().is_empty(), "switching on saved the removal first");
         assert!(!rt.stop_all(13).unwrap().enabled);
-        assert_eq!(counts.stopped.load(Ordering::SeqCst), 2);
+        assert_eq!(counts.stopped.load(Ordering::SeqCst), 3);
 
         // A listener that cannot start leaves it off and says so.
         counts.refuse_start.store(true, Ordering::SeqCst);
@@ -1041,9 +1094,10 @@ mod tests {
         assert_eq!(rt.save_again().unwrap(), Saved { saved: false });
         file.fail(false);
         assert_eq!(rt.save_again().unwrap(), Saved { saved: true });
-        assert!(!rt.status(7).unsaved_revoke);
+        let status = rt.status(7);
+        assert!(!status.unsaved_revoke && status.start_error.is_none());
         let records = store::load(&file, Some(&SEALER)).unwrap();
-        assert!(records[0].revoked, "the revoke is on file");
+        assert!(records.is_empty(), "the removal is on file");
         assert_eq!(rt.revoke("mcp-ffff"), Err(code::UNKNOWN));
     }
 
@@ -1104,15 +1158,17 @@ mod tests {
         let status = guarded.with(|runtime| Ok(runtime.status(31))).unwrap();
         assert_eq!((status.enabled, status.clients, status.unsaved_revoke), (false, 1, true), "read again, the revoke kept");
 
-        // Back on: the revoke still holds, the other client still works.
-        guarded.with(|runtime| runtime.set_enabled(true, 32)).unwrap();
+        // The removal is not on file: it stays off, and the removal still holds.
+        assert_eq!(guarded.with(|runtime| runtime.set_enabled(true, 32)), Err(code::REMOVAL_NOT_SAVED));
         assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &second, 33))).unwrap()["error"], "unknown client");
         assert!(guarded.with(|runtime| Ok(hello(runtime, &first, 34))).unwrap()["challenge"].is_string());
+        // Back on once the file agrees: the removal is saved first.
         file.fail(false);
-        assert_eq!(guarded.with(|runtime| runtime.save_again()).unwrap(), Saved { saved: true });
+        assert!(guarded.with(|runtime| runtime.set_enabled(true, 35)).unwrap().enabled);
+        assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &second, 36))).unwrap()["error"], "unknown client");
         let records = store::load(&file, Some(&SEALER)).unwrap();
-        assert!(records.iter().any(|record| record.id == second && record.revoked), "the revoke is on file now");
-        assert!(records.iter().any(|record| record.id == first && !record.revoked));
+        assert!(records.iter().all(|record| record.id != second), "the removal is on file now");
+        assert!(records.iter().any(|record| record.id == first));
     }
 
     #[test]
@@ -1138,9 +1194,10 @@ mod tests {
         file.put(b"tampered");
         assert_eq!(guarded.with(|runtime| Ok(runtime.status(31))).unwrap().store, "blocked");
         assert_eq!(guarded.with(|runtime| runtime.set_enabled(true, 32)), Err(code::BLOCKED));
-        // The file is good again: the next load still revokes the client.
+        // The file is good again: the next load still removes the client, and
+        // the switch stays off while that removal cannot be saved.
         file.put(&good);
-        guarded.with(|runtime| runtime.set_enabled(true, 33)).unwrap();
+        assert_eq!(guarded.with(|runtime| runtime.set_enabled(true, 33)), Err(code::REMOVAL_NOT_SAVED));
         assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &second, 34))).unwrap()["error"], "unknown client");
         assert!(guarded.with(|runtime| Ok(hello(runtime, &first, 35))).unwrap()["challenge"].is_string());
         assert!(guarded.with(|runtime| Ok(runtime.status(36))).unwrap().unsaved_revoke);
@@ -1149,7 +1206,7 @@ mod tests {
         assert_eq!(guarded.with(|runtime| runtime.save_again()).unwrap(), Saved { saved: false });
         file.fail(false);
         assert_eq!(guarded.with(|runtime| runtime.save_again()).unwrap(), Saved { saved: true });
-        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().any(|record| record.id == second && record.revoked));
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().all(|record| record.id != second));
         assert!(guarded.with(|runtime| Ok(runtime.carry_revokes.is_empty())).unwrap());
     }
 
@@ -1175,10 +1232,10 @@ mod tests {
         assert_eq!(guarded.with(|runtime| Ok(runtime.status(31))).unwrap().store, "blocked");
         guarded.with(|runtime| runtime.reset_clients(true, 32)).unwrap();
         file.put(&good);
-        guarded.with(|runtime| {
+        assert_eq!(guarded.with(|runtime| {
             runtime.loaded = false;
             runtime.set_enabled(true, 33)
-        }).unwrap();
+        }), Err(code::REMOVAL_NOT_SAVED), "the old file lists the client: it stays off");
         assert_eq!(guarded.with(|runtime| Ok(hello(runtime, &id, 34))).unwrap()["error"], "unknown client", "still refused");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1254,35 +1311,113 @@ mod tests {
         let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
         let mut rt = runtime(&file, &counts);
         let (first, _) = approved(&mut rt, R2Preset::Counts);
+        rt.open_pairing(5).unwrap();
+        let (_, asked) = pair_frame(rt.host(), "Notes", 5, 6);
+        let second = asked["pair"]["id"].as_str().unwrap().to_owned();
+        rt.approve(&second, &[Topic::Node], R2Preset::Counts, 7).unwrap();
+
         file.fail(true);
         assert_eq!(rt.revoke(&first).unwrap(), Saved { saved: false });
         assert!(rt.status(10).unsaved_revoke);
-        file.fail(false);
-
-        // An approval saves every record, the revoke included.
-        rt.open_pairing(11).unwrap();
-        let (_, asked) = pair_frame(rt.host(), "Notes", 5, 12);
-        let second = asked["pair"]["id"].as_str().unwrap().to_owned();
-        rt.approve(&second, &[Topic::Node], R2Preset::Counts, 13).unwrap();
-        assert!(!rt.status(14).unsaved_revoke);
-        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().any(|record| record.id == first && record.revoked));
-
-        // So does a later revoke that saves; a save that fails clears nothing.
-        rt.open_pairing(15).unwrap();
-        let (_, asked) = pair_frame(rt.host(), "Third", 6, 16);
-        let third = asked["pair"]["id"].as_str().unwrap().to_owned();
-        rt.approve(&third, &[Topic::Node], R2Preset::Counts, 17).unwrap();
-        file.fail(true);
+        // A second removal that fails changes nothing more; one that saves carries both.
         assert_eq!(rt.revoke(&second).unwrap(), Saved { saved: false });
-        rt.open_pairing(18).unwrap();
-        let (_, asked) = pair_frame(rt.host(), "Fourth", 7, 19);
-        assert_eq!(rt.approve(asked["pair"]["id"].as_str().unwrap(), &[Topic::Node], R2Preset::Counts, 20), Err(code::NOT_SAVED));
-        assert!(rt.status(20).unsaved_revoke, "a save that failed clears nothing");
         file.fail(false);
-        assert_eq!(rt.revoke(&third).unwrap(), Saved { saved: true });
-        assert!(!rt.status(21).unsaved_revoke);
-        let records = store::load(&file, Some(&SEALER)).unwrap();
-        assert!(records.iter().all(|record| record.revoked), "every revoke is on file");
+        assert_eq!(rt.save_again().unwrap(), Saved { saved: true });
+        assert!(!rt.status(11).unsaved_revoke);
+        assert!(store::load(&file, Some(&SEALER)).unwrap().is_empty(), "every removal is on file");
+        assert!(rt.set_enabled(true, 12).unwrap().enabled);
+    }
+
+    #[test]
+    fn any_save_that_works_clears_the_removal_not_saved_error() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        let add = |rt: &mut Runtime, name: &str, n: u8, at: u64| {
+            rt.set_enabled(true, at).unwrap();
+            rt.open_pairing(at).unwrap();
+            let (_, asked) = pair_frame(rt.host(), name, n, at);
+            let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+            rt.approve(&id, &[Topic::Node], R2Preset::Counts, at).unwrap();
+            id
+        };
+        let second = add(&mut rt, "Notes", 5, 10);
+        let third = add(&mut rt, "Third", 6, 11);
+
+        // A removal that fails, then a removal of another client that saves.
+        file.fail(true);
+        assert_eq!(rt.revoke(&first).unwrap(), Saved { saved: false });
+        assert_eq!(rt.status(20).start_error, Some(code::REMOVAL_NOT_SAVED));
+        file.fail(false);
+        assert_eq!(rt.revoke(&second).unwrap(), Saved { saved: true });
+        let status = rt.status(21);
+        assert_eq!((status.start_error, status.unsaved_revoke), (None, false));
+
+        // A removal that fails, then an approval that saves.
+        file.fail(true);
+        assert_eq!(rt.revoke(&third).unwrap(), Saved { saved: false });
+        assert_eq!(rt.status(30).start_error, Some(code::REMOVAL_NOT_SAVED));
+        file.fail(false);
+        // The switch saves the pending removal first: approving needs it on.
+        let _ = add(&mut rt, "Fourth", 7, 31);
+        let status = rt.status(32);
+        assert_eq!((status.start_error, status.unsaved_revoke), (None, false));
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().all(|r| r.id != first && r.id != second && r.id != third));
+    }
+
+    #[test]
+    fn an_approval_that_saves_clears_the_removal_not_saved_error() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        // The removal fails and the switch goes off.
+        file.fail(true);
+        assert_eq!(rt.revoke(&first).unwrap(), Saved { saved: false });
+        assert_eq!(rt.status(11).start_error, Some(code::REMOVAL_NOT_SAVED));
+        file.fail(false);
+        // Approving a request (its window opened on the host, the switch being
+        // off) saves every record, the removal included.
+        rt.host().lock().unwrap().open_pairing(12);
+        let (_, asked) = pair_frame(rt.host(), "Notes", 6, 12);
+        let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+        rt.approve(&id, &[Topic::Node], R2Preset::Counts, 13).unwrap();
+        let status = rt.status(14);
+        assert_eq!((status.start_error, status.unsaved_revoke), (None, false));
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().all(|r| r.id != first));
+    }
+
+    #[test]
+    fn switching_on_saves_a_pending_removal_and_clears_the_error_and_the_carry() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        file.fail(true);
+        assert_eq!(rt.revoke(&first).unwrap(), Saved { saved: false });
+        rt.carry_revokes.push(first.clone());
+        assert_eq!(rt.set_enabled(true, 20), Err(code::REMOVAL_NOT_SAVED));
+        file.fail(false);
+        let status = rt.set_enabled(true, 21).unwrap();
+        assert!(status.enabled);
+        assert_eq!((status.start_error, status.unsaved_revoke), (None, false));
+        assert!(rt.carry_revokes.is_empty(), "the carried removals clear at once");
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().all(|r| r.id != first));
+    }
+
+    #[test]
+    fn approving_past_the_cap_is_refused_with_its_own_code() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let _ = approved(&mut rt, R2Preset::Counts);
+        for n in 1..store::MAX_CLIENTS {
+            rt.open_pairing(10).unwrap();
+            let (_, asked) = pair_frame(rt.host(), "Desk", 10 + n as u8, 11);
+            rt.approve(asked["pair"]["id"].as_str().unwrap(), &[Topic::Node], R2Preset::Counts, 12).unwrap();
+        }
+        rt.open_pairing(20).unwrap();
+        let (_, asked) = pair_frame(rt.host(), "One more", 99, 21);
+        let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(rt.approve(&id, &[Topic::Node], R2Preset::Counts, 22), Err(code::TOO_MANY_CLIENTS));
+        assert_eq!(rt.status(22).clients as usize, store::MAX_CLIENTS);
     }
 
     #[test]
@@ -1336,6 +1471,7 @@ mod tests {
         assert_eq!(seen, [
             (None, HANDSHAKE_AUDIT_TOOL, "not_authorised"),
             (Some("Desk".to_owned()), HANDSHAKE_AUDIT_TOOL, "not_authorised"),
+            (Some("Desk".to_owned()), REMOVED_AUDIT_TOOL, "removed"),
             (Some("Desk".to_owned()), "read_node", "read"),
         ], "newest first; a removed client keeps its name");
         assert_eq!(page.unreadable, 0);

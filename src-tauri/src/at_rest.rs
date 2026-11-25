@@ -46,6 +46,11 @@ mod windows;
 #[cfg(windows)]
 pub use windows::install_windows;
 
+/// The largest plaintext every platform sealer accepts: the Apple enclave
+/// bridge and Windows DPAPI both refuse more. Callers that seal a list (the
+/// MCP clients file) must stay under it.
+pub const MAX_PLAINTEXT: usize = 4096;
+
 /// The client Ed25519 seed (`pairing::key`).
 pub const CLIENT_SEED_PURPOSE: &str = "client-ed25519-seed-v1";
 
@@ -103,6 +108,11 @@ mod tests {
         for enclave in [|| true, || false] {
             assert!(!super::macos::MacSealer::with_probe(enclave).allows_plaintext_fallback());
         }
+    }
+
+    #[test]
+    fn the_shared_plaintext_limit_is_the_enclave_bridge_limit() {
+        assert_eq!(super::MAX_PLAINTEXT, bitsov_ffi::pairing_sealer::MAX_PLAIN);
     }
 }
 

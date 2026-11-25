@@ -3,7 +3,8 @@
 use std::ffi::CString;
 use zeroize::Zeroizing;
 
-const MAX_PLAIN: usize = 4096;
+/// The largest plaintext the bridge seals (the app's `at_rest::MAX_PLAINTEXT`).
+pub const MAX_PLAIN: usize = 4096;
 const MAX_SEALED: usize = 16384;
 
 unsafe extern "C" {

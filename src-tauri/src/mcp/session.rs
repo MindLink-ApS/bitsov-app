@@ -90,6 +90,8 @@ pub enum Outcome {
     RateLimited,
     /// Unknown or revoked client; nothing was read.
     NotAuthorised,
+    /// The owner removed this client (a host row, never a client's call).
+    Removed,
 }
 
 /// One audit row. Tool name and arguments are as the client sent them,
