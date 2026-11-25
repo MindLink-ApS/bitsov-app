@@ -5,7 +5,10 @@
 //! as a small MCP server of its own with one tool, [`TOOL`]. Calling it sends
 //! the pairing request to BitSov and returns the six words as the tool's
 //! result, which the AI app shows in its chat, next to the plain steps. The
-//! owner compares them with the words BitSov shows before approving.
+//! owner compares them with the request BitSov is showing and approves it
+//! there. Only a refusal (no window open) or a request that has ended tells
+//! the owner to open 'Add an AI app': opening it again while a request waits
+//! would end that request.
 //!
 //! The request then waits on its own thread, polling the app. Calling the tool
 //! again reports where it stands: waiting (with the words again), approved
@@ -196,7 +199,7 @@ impl Server {
             return ("Pairing cannot start: no thread available.".to_owned(), true);
         }
         (format!(
-            "BitSov got a pairing request from \"{}\".\n\nIn BitSov, press 'Add an AI app' first. Approve only if BitSov shows these six words:\n\n    {}\n\nIf the words are different, choose Deny. When you have decided, call {TOOL} again to finish.",
+            "BitSov got a pairing request from \"{}\" and is showing it now. Compare these six words with the request in BitSov, and approve it there only if they are the same:\n\n    {}\n\nIf the words are different, choose Deny. When you have decided, call {TOOL} again to finish.",
             clean_name(&name),
             words.join(" ")
         ), false)
@@ -210,7 +213,7 @@ const NOT_APPROVED: &str = "BitSov did not approve this request (it was denied, 
 const EXPIRED: &str = "The request expired before it was approved. To try again, press 'Add an AI app' in BitSov, then call pair_with_bitsov again.";
 
 fn waiting_text(words: &[&'static str; 6]) -> String {
-    format!("Still waiting for your answer in BitSov. Approve only if BitSov shows these six words:\n\n    {}\n\nThen call {TOOL} again.", words.join(" "))
+    format!("Still waiting for your answer in BitSov. Compare these six words with the request BitSov is showing now, and approve it there only if they are the same:\n\n    {}\n\nThen call {TOOL} again.", words.join(" "))
 }
 
 fn tool() -> Value {
@@ -416,8 +419,8 @@ mod tests {
         let nonce: [u8; 32] = hex::decode(first["nonce"].as_str().unwrap()).unwrap().try_into().unwrap();
         let words = pair_code(&nonce, &[3u8; 32], "Desk app").join(" ");
         assert!(text.contains(&words), "{text}");
-        assert!(text.contains("press 'Add an AI app' first"), "{text}");
-        assert!(text.contains("Approve only if BitSov shows these six words"), "{text}");
+        assert!(text.contains("approve it there only if they are the same"), "{text}");
+        assert!(!text.contains("Add an AI app"), "a waiting request would end if the window were opened again: {text}");
 
         let (text, failed) = call_until(&mut h.server, "Approved.");
         assert!(!failed);
@@ -440,6 +443,7 @@ mod tests {
         assert!(!failed);
         assert!(text.starts_with("Still waiting"), "{text}");
         assert!(text.contains(&words), "{text}");
+        assert!(!first.contains("Add an AI app") && !text.contains("Add an AI app"), "{first}\n{text}");
         h.server.ended.store(true, Ordering::SeqCst);
     }
 
@@ -461,6 +465,7 @@ mod tests {
             let (text, failed) = call(&mut h.server, json!({}));
             assert!(failed);
             assert_eq!(text, WINDOW_CLOSED, "{reason}");
+            assert!(text.contains("Open 'Add an AI app' in BitSov first"), "{reason}");
         }
         let mut h = fixture(Vec::new(), None, false);
         let (text, failed) = call(&mut h.server, json!({}));

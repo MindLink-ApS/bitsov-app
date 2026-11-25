@@ -950,8 +950,9 @@ mod tests {
         assert!(!failed, "{text}");
         let shown = host.lock().unwrap().pairing.waiting(now_ms()).first().cloned().expect("a request in the app");
         assert!(text.contains(&shown.code.join(" ")), "the chat shows the app's words: {text}");
+        assert!(!text.contains("Add an AI app"), "opening it again would end this request: {text}");
         let (text, _) = call(3);
-        assert!(text.starts_with("Still waiting"), "{text}");
+        assert!(text.starts_with("Still waiting") && !text.contains("Add an AI app"), "{text}");
 
         // The owner approves; the tool reports it and the key is saved, never shown.
         let now = now_ms();
