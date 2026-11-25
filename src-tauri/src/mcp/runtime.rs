@@ -384,10 +384,15 @@ impl Runtime {
         Ok(())
     }
 
-    /// A save of every record succeeded: nothing is held only in memory now.
+    /// A save of every record succeeded: nothing is held only in memory now,
+    /// so a "removal not saved" start error no longer holds either. Every
+    /// path that ends in a save that worked calls this.
     fn saved(&mut self) {
         self.unsaved_revoke = false;
         self.carry_revokes.clear();
+        if self.start_error == Some(code::REMOVAL_NOT_SAVED) {
+            self.start_error = None;
+        }
     }
 
     /// After a panic left the state half-updated (see [`Guarded`]): stop
@@ -503,7 +508,8 @@ impl Runtime {
                 return Err(code::REMOVAL_NOT_SAVED);
             }
             host.saved();
-            self.unsaved_revoke = false;
+            drop(host);
+            self.saved();
         }
         let Ok(audit) = self.audit_log() else {
             self.start_error = Some(code::START_FAILED);
@@ -711,9 +717,6 @@ impl Runtime {
         let saved = match result {
             Ok(()) => {
                 self.saved();
-                if self.start_error == Some(code::REMOVAL_NOT_SAVED) {
-                    self.start_error = None;
-                }
                 true
             }
             Err(ChangeError::StoreBlocked(_)) => return Err(code::BLOCKED),
@@ -1323,6 +1326,81 @@ mod tests {
         assert!(!rt.status(11).unsaved_revoke);
         assert!(store::load(&file, Some(&SEALER)).unwrap().is_empty(), "every removal is on file");
         assert!(rt.set_enabled(true, 12).unwrap().enabled);
+    }
+
+    #[test]
+    fn any_save_that_works_clears_the_removal_not_saved_error() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        let add = |rt: &mut Runtime, name: &str, n: u8, at: u64| {
+            rt.set_enabled(true, at).unwrap();
+            rt.open_pairing(at).unwrap();
+            let (_, asked) = pair_frame(rt.host(), name, n, at);
+            let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+            rt.approve(&id, &[Topic::Node], R2Preset::Counts, at).unwrap();
+            id
+        };
+        let second = add(&mut rt, "Notes", 5, 10);
+        let third = add(&mut rt, "Third", 6, 11);
+
+        // A removal that fails, then a removal of another client that saves.
+        file.fail(true);
+        assert_eq!(rt.revoke(&first).unwrap(), Saved { saved: false });
+        assert_eq!(rt.status(20).start_error, Some(code::REMOVAL_NOT_SAVED));
+        file.fail(false);
+        assert_eq!(rt.revoke(&second).unwrap(), Saved { saved: true });
+        let status = rt.status(21);
+        assert_eq!((status.start_error, status.unsaved_revoke), (None, false));
+
+        // A removal that fails, then an approval that saves.
+        file.fail(true);
+        assert_eq!(rt.revoke(&third).unwrap(), Saved { saved: false });
+        assert_eq!(rt.status(30).start_error, Some(code::REMOVAL_NOT_SAVED));
+        file.fail(false);
+        // The switch saves the pending removal first: approving needs it on.
+        let _ = add(&mut rt, "Fourth", 7, 31);
+        let status = rt.status(32);
+        assert_eq!((status.start_error, status.unsaved_revoke), (None, false));
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().all(|r| r.id != first && r.id != second && r.id != third));
+    }
+
+    #[test]
+    fn an_approval_that_saves_clears_the_removal_not_saved_error() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        // The removal fails and the switch goes off.
+        file.fail(true);
+        assert_eq!(rt.revoke(&first).unwrap(), Saved { saved: false });
+        assert_eq!(rt.status(11).start_error, Some(code::REMOVAL_NOT_SAVED));
+        file.fail(false);
+        // Approving a request (its window opened on the host, the switch being
+        // off) saves every record, the removal included.
+        rt.host().lock().unwrap().open_pairing(12);
+        let (_, asked) = pair_frame(rt.host(), "Notes", 6, 12);
+        let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+        rt.approve(&id, &[Topic::Node], R2Preset::Counts, 13).unwrap();
+        let status = rt.status(14);
+        assert_eq!((status.start_error, status.unsaved_revoke), (None, false));
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().all(|r| r.id != first));
+    }
+
+    #[test]
+    fn switching_on_saves_a_pending_removal_and_clears_the_error_and_the_carry() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        let (first, _) = approved(&mut rt, R2Preset::Counts);
+        file.fail(true);
+        assert_eq!(rt.revoke(&first).unwrap(), Saved { saved: false });
+        rt.carry_revokes.push(first.clone());
+        assert_eq!(rt.set_enabled(true, 20), Err(code::REMOVAL_NOT_SAVED));
+        file.fail(false);
+        let status = rt.set_enabled(true, 21).unwrap();
+        assert!(status.enabled);
+        assert_eq!((status.start_error, status.unsaved_revoke), (None, false));
+        assert!(rt.carry_revokes.is_empty(), "the carried removals clear at once");
+        assert!(store::load(&file, Some(&SEALER)).unwrap().iter().all(|r| r.id != first));
     }
 
     #[test]
