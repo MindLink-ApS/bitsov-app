@@ -29,7 +29,7 @@
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -66,6 +66,9 @@ const _: () = assert!(policy::MCP_PIPE_FIRST_INSTANCE == FILE_FLAG_FIRST_PIPE_IN
 const _: () = assert!(
     policy::MCP_PIPE_MODE == PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS
 );
+
+/// The pipe's instance limit (see [`instance`]): twice the cap plus two.
+const MAX_INSTANCES: u32 = 2 * MAX_CONNECTIONS as u32 + 2;
 
 /// Buffer size each way: one full frame.
 const BUFFER_BYTES: u32 = 64 * 1024;
@@ -170,6 +173,18 @@ impl PipeListener {
         Self::bind_named(user, &name)
     }
 
+    /// Like [`Self::bind`], under another name in the same family,
+    /// `\\.\pipe\bitsov-mcp-<suffix>` (tests run several listeners in one
+    /// process). The same DACL, flags and checks apply.
+    pub fn bind_at(name: &str) -> io::Result<Self> {
+        const FAMILY: &str = r"\\.\pipe\bitsov-mcp-";
+        let suffix = name.strip_prefix(FAMILY).unwrap_or("");
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a BitSov MCP pipe name"));
+        }
+        Self::bind_named(current_user()?, name)
+    }
+
     fn bind_named(user: UserSid, name: &str) -> io::Result<Self> {
         let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let descriptor = SecurityDescriptor::private(&user, ObjectKind::File)?;
@@ -196,6 +211,17 @@ impl PipeListener {
     /// this user, elevated, over the cap, or already gone). Once stopped, an
     /// error of kind [`io::ErrorKind::ConnectionAborted`].
     pub fn accept_one(&mut self) -> io::Result<Option<PipeConnection>> {
+        self.accept_one_making_room(&mut || false)
+    }
+
+    /// [`Self::accept_one`], but when an admissible client (this user, not
+    /// elevated) finds every slot taken, `will_make_room` is asked whether the
+    /// caller will make room for it. If so, the client is admitted as one
+    /// over the cap, and the caller then closes a connection (this one if it
+    /// cannot start; [`PipeCloser::close`] gives a slot back at once). Never
+    /// more than one over: at [`MAX_CONNECTIONS`] + 1 every client is
+    /// refused. It is never asked about a client that would be refused anyway.
+    pub fn accept_one_making_room(&mut self, will_make_room: &mut dyn FnMut() -> bool) -> io::Result<Option<PipeConnection>> {
         let connected = match connect(&self.waiting, &self.connected, &self.stop.event) {
             Ok(connected) => connected,
             Err(error) => {
@@ -211,8 +237,9 @@ impl PipeListener {
             }
         };
         let admit = connected
-            && self.live_connections() < MAX_CONNECTIONS
-            && client_is_owner(&self.waiting, &self.user);
+            && client_is_owner(&self.waiting, &self.user)
+            && (self.live_connections() < MAX_CONNECTIONS
+                || (self.live_connections() == MAX_CONNECTIONS && will_make_room()));
         if !admit {
             // A disconnected instance takes no client until it is connected
             // again, so it is replaced: the new one is created first, so the
@@ -254,9 +281,12 @@ fn instance(name: &[u16], descriptor: &SecurityDescriptor, first: bool) -> io::R
             name.as_ptr(),
             open_mode,
             policy::MCP_PIPE_MODE,
-            // The cap, plus the instance that waits for the next client, plus
-            // its replacement while a refused client is being dropped.
-            MAX_CONNECTIONS as u32 + 2,
+            // Server handles, not clients: the client cap is the slot count.
+            // Room for the cap plus one admitted over it while room is made,
+            // the instance that waits for the next client, its replacement
+            // while a refused client is being dropped, and connections already
+            // closed whose threads have not yet let go of their handles.
+            MAX_INSTANCES,
             BUFFER_BYTES,
             BUFFER_BYTES,
             0,
@@ -396,7 +426,9 @@ struct SharedPipe {
     /// Set by [`Self::close`], never reset. Every pending operation waits on
     /// it next to its own event, so one issued after the close still ends.
     closing: OwnedHandle,
-    _slot: Option<Arc<()>>,
+    /// The server connection's slot: given back on close (the client is cut
+    /// then) or when both halves are dropped, whichever comes first.
+    slot: Mutex<Option<Arc<()>>>,
 }
 
 impl SharedPipe {
@@ -406,7 +438,7 @@ impl SharedPipe {
             server,
             closed: AtomicBool::new(false),
             closing: manual_reset_event()?,
-            _slot: slot,
+            slot: Mutex::new(slot),
         }))
     }
 
@@ -428,6 +460,8 @@ impl SharedPipe {
         // SAFETY: a valid handle; a null `OVERLAPPED` cancels every operation
         // on it. Each issuer still waits for its own operation to land.
         unsafe { CancelIoEx(handle, std::ptr::null()) };
+        // The client is cut and nothing more moves on this pipe: its slot is free.
+        drop(self.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take());
     }
 
     fn is_closed(&self) -> bool {
@@ -497,9 +531,9 @@ pub struct PipeHalf {
     pipe: Arc<SharedPipe>,
     event: OwnedHandle,
     /// `INFINITE`, or the milliseconds a read may wait.
-    read_timeout_ms: u32,
+    read_timeout_ms: AtomicU32,
     /// `INFINITE`, or the milliseconds a write may wait.
-    write_timeout_ms: u32,
+    write_timeout_ms: AtomicU32,
 }
 
 impl std::fmt::Debug for PipeHalf {
@@ -510,7 +544,7 @@ impl std::fmt::Debug for PipeHalf {
 
 impl PipeHalf {
     fn new(pipe: Arc<SharedPipe>) -> io::Result<Self> {
-        Ok(Self { pipe, event: manual_reset_event()?, read_timeout_ms: INFINITE, write_timeout_ms: INFINITE })
+        Ok(Self { pipe, event: manual_reset_event()?, read_timeout_ms: AtomicU32::new(INFINITE), write_timeout_ms: AtomicU32::new(INFINITE) })
     }
 
     /// How long one `read` call may wait for data. `None` (the default) waits
@@ -522,8 +556,8 @@ impl PipeHalf {
     /// inside each timeout keeps a frame read going. A caller that needs an
     /// idle or whole-frame deadline keeps its own clock and closes the
     /// connection ([`Self::closer`]).
-    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        self.read_timeout_ms = timeout_ms(timeout)?;
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.read_timeout_ms.store(timeout_ms(timeout)?, Ordering::Relaxed);
         Ok(())
     }
 
@@ -532,8 +566,8 @@ impl PipeHalf {
     /// time is cancelled and fails with [`io::ErrorKind::TimedOut`]; part of
     /// the buffer may have gone out, so the caller should close the
     /// connection. A zero duration is refused.
-    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        self.write_timeout_ms = timeout_ms(timeout)?;
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.write_timeout_ms.store(timeout_ms(timeout)?, Ordering::Relaxed);
         Ok(())
     }
 
@@ -615,7 +649,7 @@ impl io::Read for PipeHalf {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let len = buf.len().min(u32::MAX as usize) as u32;
         let ptr = buf.as_mut_ptr();
-        let wait_ms = self.read_timeout_ms;
+        let wait_ms = self.read_timeout_ms.load(Ordering::Relaxed);
         // SAFETY: `ptr` is valid for `len` bytes until `complete` returns.
         self.complete(wait_ms, |handle, overlapped| unsafe { ReadFile(handle, ptr, len, std::ptr::null_mut(), overlapped) })
     }
@@ -626,7 +660,7 @@ impl io::Write for PipeHalf {
         let len = buf.len().min(u32::MAX as usize) as u32;
         let ptr = buf.as_ptr();
         // SAFETY: `ptr` is valid for `len` bytes until `complete` returns.
-        let wait_ms = self.write_timeout_ms;
+        let wait_ms = self.write_timeout_ms.load(Ordering::Relaxed);
         let written = self.complete(wait_ms, |handle, overlapped| unsafe { WriteFile(handle, ptr, len, std::ptr::null_mut(), overlapped) })?;
         if written == 0 && len > 0 {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the other end closed the connection"));
@@ -740,6 +774,47 @@ mod tests {
         drop(connections.pop());
         let _again = client(&name).unwrap();
         assert!(listener.accept_one().unwrap().is_some(), "a freed slot takes a new client");
+    }
+
+    #[test]
+    fn at_the_cap_one_client_may_come_in_over_when_the_caller_makes_room() {
+        let name = test_name();
+        let mut listener = PipeListener::bind_named(current_user().unwrap(), &name).unwrap();
+        let mut clients = Vec::new();
+        let mut halves = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            clients.push(client(&name).unwrap());
+            halves.push(listener.accept_one().unwrap().expect("under the cap").split().unwrap());
+        }
+        // Asked once at the cap; declining refuses the client.
+        let _late = client(&name).unwrap();
+        let mut asked = 0;
+        assert!(listener.accept_one_making_room(&mut || { asked += 1; false }).unwrap().is_none());
+        assert_eq!(asked, 1);
+        // Agreeing admits one over the cap, and only one.
+        let _next = client(&name).unwrap();
+        let over = listener.accept_one_making_room(&mut || true).unwrap().expect("one over");
+        assert_eq!(listener.live_connections(), MAX_CONNECTIONS + 1);
+        let _more = client(&name).unwrap();
+        assert!(listener.accept_one_making_room(&mut || panic!("not asked past one over")).unwrap().is_none());
+        // Closing the oldest gives its slot back at once, while its halves still exist.
+        halves[0].0.closer().close();
+        assert_eq!(listener.live_connections(), MAX_CONNECTIONS);
+        let mut buf = [0u8; 1];
+        assert!(!matches!(clients[0].read(&mut buf), Ok(n) if n > 0), "the closed client is cut");
+        // Under the cap, the question is never asked.
+        drop(over);
+        let _another = client(&name).unwrap();
+        assert!(listener.accept_one_making_room(&mut || panic!("not at the cap")).unwrap().is_some());
+    }
+
+    #[test]
+    fn bind_at_takes_only_names_in_the_apps_family() {
+        assert!(PipeListener::bind_at(r"\\.\pipe\other-app").is_err());
+        assert!(PipeListener::bind_at(r"\\.\pipe\bitsov-mcp-").is_err());
+        assert!(PipeListener::bind_at(r"\\.\pipe\bitsov-mcp-a\b").is_err());
+        let name = format!(r"\\.\pipe\bitsov-mcp-at-{}", std::process::id());
+        assert!(PipeListener::bind_at(&name).is_ok());
     }
 
     #[test]
