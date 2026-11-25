@@ -1428,6 +1428,7 @@ mod tests {
 
         /// Pair through the runner; the owner approves under the host's lock.
         fn pair(runner: &Runner, name: &str) -> bitsov_mcp::ClientKey {
+            runner.host().lock().unwrap().open_pairing(now_ms());
             let (mut reader, mut writer) = connect(name);
             let host = runner.host().clone();
             let outcome = bitsov_mcp::pair(&mut reader, &mut writer, "Desk assistant", &[8u8; 32], |_| {}, || {
@@ -1448,7 +1449,8 @@ mod tests {
             (reader, writer)
         }
 
-        fn ask_pairing(name: &str) -> Client {
+        fn ask_pairing(runner: &Runner, name: &str) -> Client {
+            runner.host().lock().unwrap().open_pairing(now_ms());
             let (mut reader, mut writer) = connect(name);
             send(&mut writer, &json!({"pair": {"name": "Notes", "nonce": hex::encode([5u8; 32])}}).to_string());
             assert!(receive(&mut reader)["pair"]["id"].is_string());
@@ -1514,7 +1516,7 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(3), "well before the idle timeout");
 
             // A pairing request that keeps asking is not held to the handshake deadline.
-            let (mut waiting_r, mut waiting_w) = ask_pairing(&name);
+            let (mut waiting_r, mut waiting_w) = ask_pairing(&runner, &name);
             for _ in 0..6 {
                 std::thread::sleep(Duration::from_millis(100));
                 send(&mut waiting_w, r#"{"pair_status":true}"#);
@@ -1529,7 +1531,7 @@ mod tests {
             let mut runner = start(&name, Deadlines::default());
             let key = pair(&runner, &name);
             wait_until("the pairing connection to end", || runner.live() == 0);
-            let mut waiting = ask_pairing(&name);
+            let mut waiting = ask_pairing(&runner, &name);
             let mut ready = session(&name, &key);
             let mut stalled: Vec<Client> = (0..MAX_CONNECTIONS - 2).map(|_| connect(&name)).collect();
             wait_until("eight live connections", || runner.live() == MAX_CONNECTIONS);

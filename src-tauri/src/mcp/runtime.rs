@@ -7,8 +7,8 @@
 //! - the [`Host`], loaded once from the sealed clients file
 //!   ([`Host::from_load`]); a file that does not load blocks saving and is
 //!   only ever moved aside by the owner ([`Runtime::reset_clients`]);
-//! - the platform listener (the macOS [`super::runner::Runner`]; other
-//!   platforms report `start_failed` until theirs is wired);
+//! - the platform listener (the [`super::runner::Runner`]: a socket on
+//!   macOS, this user's pipe on Windows; elsewhere `start_failed`);
 //! - the sealed [`AuditLog`]: the host's rows are moved to it by a tick
 //!   thread, never under the host lock, which also calls
 //!   [`AuditLog::flush_due`]; switching off calls [`AuditLog::flush`];
@@ -68,7 +68,7 @@ pub trait Listener: Send {
     fn stop(&mut self);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl Listener for super::runner::Runner {
     fn stop(&mut self) {
         super::runner::Runner::stop(self);
@@ -82,8 +82,8 @@ pub type StartListener =
 /// Opens the audit file in a directory.
 pub type OpenAudit = Box<dyn Fn(&Path) -> io::Result<Box<dyn AppendIo + Send>> + Send>;
 
-/// The listener of this platform: the macOS runner. Elsewhere `Unsupported`
-/// until that platform's runner is wired.
+/// The listener of this platform: the macOS runner on a socket in `dir`,
+/// the Windows runner on this user's pipe. Elsewhere `Unsupported`.
 pub fn platform_listener() -> StartListener {
     Box::new(|dir, host, source| {
         #[cfg(target_os = "macos")]
@@ -91,7 +91,14 @@ pub fn platform_listener() -> StartListener {
             let runner = super::runner::Runner::start(dir, host, source)?;
             Ok(Box::new(runner) as Box<dyn Listener>)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            // The pipe name is per user; the directory holds only the files.
+            let _ = dir;
+            let runner = super::runner::Runner::start(host, source)?;
+            Ok(Box::new(runner) as Box<dyn Listener>)
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = (dir, host, source);
             Err(io::Error::new(io::ErrorKind::Unsupported, "no MCP listener on this platform yet"))
