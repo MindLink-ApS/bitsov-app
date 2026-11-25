@@ -172,9 +172,9 @@ struct Delivery {
 pub struct Host {
     registry: Registry,
     identities: Identities,
-    pub pairing: Pairing,
+    pairing: Pairing,
     sessions: Sessions,
-    pub audit: Vec<AuditRow>,
+    audit: Vec<AuditRow>,
     deliveries: HashMap<String, Delivery>,
     stored: Vec<StoredClient>,
     /// Set when the clients file was there but did not load: nothing is saved
@@ -339,7 +339,7 @@ impl Host {
     /// preset chosen (at most `rounded`). Not saved: only ever called inside
     /// [`Host::commit`], which saves it or undoes it, so it is not public.
     /// Refused when [`MAX_CLIENTS`] other clients are already kept.
-    pub(super) fn approve(&mut self, id: &str, topics: &[Topic], preset: Preset, now_ms: u64) -> Result<(), ChangeError> {
+    fn approve(&mut self, id: &str, topics: &[Topic], preset: Preset, now_ms: u64) -> Result<(), ChangeError> {
         if !r2_preset_allowed(preset) {
             return Err(ChangeError::PresetTooWide);
         }
@@ -436,9 +436,51 @@ impl Host {
         Ok(result)
     }
 
+    /// The owner approves a waiting pairing request with the topics and
+    /// preset chosen, saved sealed through [`Host::commit`]: saved, or
+    /// nothing changed. The only way to approve from outside the endpoint.
+    pub fn commit_approve(
+        &mut self,
+        io: &dyn FileIo,
+        sealer: Option<&dyn Sealer>,
+        id: &str,
+        topics: &[Topic],
+        preset: Preset,
+        now_ms: u64,
+    ) -> Result<(), ChangeError> {
+        self.commit(io, sealer, |host| host.approve(id, topics, preset, now_ms))
+    }
+
     /// The owner denies a waiting pairing request.
     pub fn deny(&mut self, id: &str, now_ms: u64) -> bool {
         self.pairing.deny(id, now_ms)
+    }
+
+    /// The pairing requests waiting for the owner (expired ones dropped).
+    pub fn waiting_requests(&mut self, now_ms: u64) -> Vec<super::pairing::Shown> {
+        self.pairing.waiting(now_ms)
+    }
+
+    /// The audit rows not yet moved to the audit log.
+    pub fn audit_rows(&self) -> &[AuditRow] {
+        &self.audit
+    }
+
+    /// Take the audit rows to move them to the audit log.
+    pub fn take_audit(&mut self) -> Vec<AuditRow> {
+        std::mem::take(&mut self.audit)
+    }
+
+    /// Tests elsewhere in the module: the pairing requests, directly.
+    #[cfg(test)]
+    pub(super) fn pairing_mut(&mut self) -> &mut Pairing {
+        &mut self.pairing
+    }
+
+    /// Tests elsewhere in the module: add an audit row directly.
+    #[cfg(test)]
+    pub(super) fn push_audit(&mut self, row: AuditRow) {
+        self.audit.push(row);
     }
 
     /// Save the current records as they are (the owner's "save again" after

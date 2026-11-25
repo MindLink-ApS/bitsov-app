@@ -319,7 +319,7 @@ fn outcome_code(outcome: Outcome) -> &'static str {
 /// them), then write any summary rows that are due.
 fn drain(host: &Mutex<Host>, audit: &Mutex<Log>, now_ms: u64) {
     let rows = match host.lock() {
-        Ok(mut host) => std::mem::take(&mut host.audit),
+        Ok(mut host) => host.take_audit(),
         Err(_) => return,
     };
     if let Ok(mut log) = audit.lock() {
@@ -631,7 +631,7 @@ impl Runtime {
             if !its_request {
                 return Err(code::UNKNOWN);
             }
-            let result = host.commit(self.config.store.as_ref(), Some(sealer), |h| h.approve(id, topics, preset.preset(), now_ms));
+            let result = host.commit_approve(self.config.store.as_ref(), Some(sealer), id, topics, preset.preset(), now_ms);
             match result {
                 Ok(()) => {}
                 Err(ChangeError::StoreBlocked(_)) => return Err(code::BLOCKED),
@@ -1264,7 +1264,7 @@ mod tests {
         let mut rt = runtime(&file, &counts);
         rt.set_enabled(true, 0).unwrap();
         // A request no window took (made directly on the host).
-        let stray = rt.host().lock().unwrap().pairing.request("Stray", &[1u8; 32], 1).unwrap().id;
+        let stray = rt.host().lock().unwrap().pairing_mut().request("Stray", &[1u8; 32], 1).unwrap().id;
         assert_eq!(rt.approve(&stray, &[Topic::Node], R2Preset::Counts, 2), Err(code::UNKNOWN));
         rt.open_pairing(3).unwrap();
         assert_eq!(rt.approve(&stray, &[Topic::Node], R2Preset::Counts, 4), Err(code::UNKNOWN), "not this window's request");
@@ -1479,7 +1479,7 @@ mod tests {
         {
             let mut host = rt.host().lock().unwrap();
             for at in 100..400 {
-                host.audit.push(AuditRow { at_ms: at, client: id.clone(), tool: "read_node".into(), arguments: String::new(), outcome: Outcome::Read });
+                host.push_audit(AuditRow { at_ms: at, client: id.clone(), tool: "read_node".into(), arguments: String::new(), outcome: Outcome::Read });
             }
         }
         let page = rt.audit(500).unwrap();
@@ -1499,7 +1499,7 @@ mod tests {
         let _ = pair_frame(rt.host(), "Desk", 3, super::super::runner::now_ms());
         let _ = hello(&rt, "mcp-0000", super::super::runner::now_ms());
         let started = std::time::Instant::now();
-        while counts.notified.load(Ordering::SeqCst) == before || !rt.host().lock().unwrap().audit.is_empty() {
+        while counts.notified.load(Ordering::SeqCst) == before || !rt.host().lock().unwrap().audit_rows().is_empty() {
             assert!(started.elapsed() < Duration::from_secs(10), "the tick ran");
             std::thread::sleep(Duration::from_millis(20));
         }

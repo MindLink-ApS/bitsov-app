@@ -912,7 +912,7 @@ mod tests {
         serve(&host, &Instant, &mut input, &mut output, &|| 5).unwrap();
         let reply: Value = serde_json::from_slice(output.strip_suffix(b"\n").unwrap()).unwrap();
         assert_eq!(reply["error"], "unknown client", "one reply, then the connection closes");
-        assert_eq!(host.lock().unwrap().audit.len(), 1);
+        assert_eq!(host.lock().unwrap().audit_rows().len(), 1);
 
         let mut empty = io::Cursor::new(Vec::new());
         serve(&host, &Instant, &mut empty, &mut output, &|| 6).unwrap();
@@ -948,7 +948,7 @@ mod tests {
         host.lock().unwrap().open_pairing(now_ms());
         let (text, failed) = call(2);
         assert!(!failed, "{text}");
-        let shown = host.lock().unwrap().pairing.waiting(now_ms()).first().cloned().expect("a request in the app");
+        let shown = host.lock().unwrap().waiting_requests(now_ms()).first().cloned().expect("a request in the app");
         assert!(text.contains(&shown.code.join(" ")), "the chat shows the app's words: {text}");
         assert!(!text.contains("Add an AI app"), "opening it again would end this request: {text}");
         let (text, _) = call(3);
@@ -956,7 +956,7 @@ mod tests {
 
         // The owner approves; the tool reports it and the key is saved, never shown.
         let now = now_ms();
-        host.lock().unwrap().commit(&MemFile::default(), Some(&TagSealer), |h| h.approve(&shown.id, &[Topic::Node], Preset::Counts, now)).unwrap();
+        host.lock().unwrap().commit_approve(&MemFile::default(), Some(&TagSealer), &shown.id, &[Topic::Node], Preset::Counts, now).unwrap();
         let started = std::time::Instant::now();
         let text = loop {
             let (text, failed) = call(4);
@@ -1028,8 +1028,8 @@ mod tests {
             let outcome = bitsov_mcp::pair(&mut reader, &mut writer, "Desk assistant", &[8u8; 32], |_| {}, || {
                 let mut host = host.lock().unwrap();
                 let now = now_ms();
-                if let Some(shown) = host.pairing.waiting(now).first().cloned() {
-                    host.commit(&MemFile::default(), Some(&TagSealer), |h| h.approve(&shown.id, &[Topic::Node], Preset::Counts, now)).unwrap();
+                if let Some(shown) = host.waiting_requests(now).first().cloned() {
+                    host.commit_approve(&MemFile::default(), Some(&TagSealer), &shown.id, &[Topic::Node], Preset::Counts, now).unwrap();
                 }
                 true
             }).unwrap();
@@ -1078,7 +1078,7 @@ mod tests {
             assert_eq!(receive(&mut reader)["result"]["tools"].as_array().unwrap().len(), 1, "only the approved topic");
             send(&mut writer, r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_node"}}"#);
             assert_eq!(receive(&mut reader)["result"]["isError"], false);
-            assert_eq!(runner.host().lock().unwrap().audit.len(), 1, "the call is audited");
+            assert_eq!(runner.host().lock().unwrap().audit_rows().len(), 1, "the call is audited");
             runner.stop();
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -1286,7 +1286,7 @@ mod tests {
             let mut writer = client;
             send(&mut writer, &json!({"pair": {"name": "Desk", "nonce": hex::encode([6u8; 32])}}).to_string());
             let id = receive(&mut reader)["pair"]["id"].as_str().unwrap().to_owned();
-            host.lock().unwrap().commit(&MemFile::default(), Some(&TagSealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, now_ms())).unwrap();
+            host.lock().unwrap().commit_approve(&MemFile::default(), Some(&TagSealer), &id, &[Topic::Node], Preset::Counts, now_ms()).unwrap();
             send(&mut writer, r#"{"pair_status":true}"#);
             assert_eq!(receive(&mut reader)["pair"], "approved");
             server.join().unwrap().unwrap();
@@ -1326,7 +1326,7 @@ mod tests {
                 let (mut reader, mut writer) = session(&dir, &key);
                 send(&mut writer, r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_node"}}"#);
                 assert_eq!(receive(&mut reader)["result"]["isError"], true, "{tag}: the client is told the read failed");
-                let audit = runner.host().lock().unwrap().audit.clone();
+                let audit = runner.host().lock().unwrap().audit_rows().to_vec();
                 assert_eq!(audit.iter().map(|row| row.outcome).collect::<Vec<_>>(), [Outcome::ReadFailed], "{tag}: audited");
                 send(&mut writer, r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#);
                 assert_eq!(receive(&mut reader)["result"], json!({}), "{tag}: the connection is still served");
@@ -1504,8 +1504,8 @@ mod tests {
             let outcome = bitsov_mcp::pair(&mut reader, &mut writer, "Desk assistant", &[8u8; 32], |_| {}, || {
                 let mut host = host.lock().unwrap();
                 let now = now_ms();
-                if let Some(shown) = host.pairing.waiting(now).first().cloned() {
-                    host.commit(&MemFile::default(), Some(&TagSealer), |h| h.approve(&shown.id, &[Topic::Node], Preset::Counts, now)).unwrap();
+                if let Some(shown) = host.waiting_requests(now).first().cloned() {
+                    host.commit_approve(&MemFile::default(), Some(&TagSealer), &shown.id, &[Topic::Node], Preset::Counts, now).unwrap();
                 }
                 true
             }).unwrap();
@@ -1542,7 +1542,7 @@ mod tests {
             assert_eq!(receive(&mut reader)["result"]["tools"].as_array().unwrap().len(), 1, "only the approved topic");
             send(&mut writer, r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_node"}}"#);
             assert_eq!(receive(&mut reader)["result"]["isError"], false);
-            assert_eq!(runner.host().lock().unwrap().audit.len(), 1, "the call is audited");
+            assert_eq!(runner.host().lock().unwrap().audit_rows().len(), 1, "the call is audited");
             runner.stop();
         }
 
