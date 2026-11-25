@@ -5,7 +5,9 @@ const USAGE: &str = "\
 bitsov-mcp connects an AI client to the BitSov app on this computer.
 
   bitsov-mcp pair \"<name>\"   ask the app to approve this client (shows six words)
-  bitsov-mcp                 run as the AI client's MCP server (stdin/stdout)
+  bitsov-mcp                 run as the AI client's MCP server (stdin/stdout);
+                             not paired yet: offers one tool that pairs from
+                             inside the AI app and shows the six words there
   bitsov-mcp forget          delete this client's key
 
   --endpoint <path>          use another endpoint (for testing)";
@@ -136,10 +138,12 @@ fn run(args: &[String]) -> std::io::Result<()> {
             Ok(())
         }
         [] => {
-            let key = key_file::load(&keys).map_err(|e| match e.kind() {
-                ErrorKind::NotFound => Error::new(ErrorKind::NotFound, "not paired yet: run `bitsov-mcp pair \"<name>\"`"),
-                _ => e,
-            })?;
+            let key = match key_file::load(&keys) {
+                Ok(key) => key,
+                // Not paired yet: pair from inside the AI app, which shows the words.
+                Err(error) if error.kind() == ErrorKind::NotFound => return serve_pairing(endpoint, keys),
+                Err(error) => return Err(error),
+            };
             let (mut reader, mut writer) = platform::connect(&endpoint)?;
             open_session(&mut reader, &mut writer, &key)?;
             drop(key);
@@ -147,4 +151,29 @@ fn run(args: &[String]) -> std::io::Result<()> {
         }
         _ => Err(Error::new(ErrorKind::InvalidInput, USAGE)),
     }
+}
+
+/// No key yet: run the pairing tool as the AI app's MCP server.
+#[cfg(any(target_os = "macos", windows))]
+fn serve_pairing(endpoint: String, keys: std::path::PathBuf) -> std::io::Result<()> {
+    use std::io::{BufRead, Write};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use bitsov_mcp::chat_pair::{Link, Server};
+    use bitsov_mcp::key_file;
+
+    let save_dir = keys.clone();
+    let link = Link {
+        connect: Box::new(move || {
+            let (reader, writer) = platform::connect(&endpoint)?;
+            Ok((Box::new(reader) as Box<dyn BufRead + Send>, Box::new(writer) as Box<dyn Write + Send>))
+        }),
+        ready: Box::new(move || key_file::ready_to_pair(&keys)),
+        save: Arc::new(move |key| key_file::save(&save_dir, key)),
+        // Well inside the app's idle limit; given up with the app's request.
+        poll_every: Duration::from_secs(2),
+        give_up_after: Duration::from_secs(5 * 60),
+    };
+    Server::new(link).serve(std::io::stdin().lock(), std::io::stdout())
 }

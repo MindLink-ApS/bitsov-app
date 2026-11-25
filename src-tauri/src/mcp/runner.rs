@@ -920,6 +920,55 @@ mod tests {
         assert!(serve(&host, &Instant, &mut long, &mut Vec::new(), &|| 7).is_err(), "an over-long line ends it");
     }
 
+    /// Pairing from inside an AI app, end to end through a runner: the shim's
+    /// pairing tool answers MCP calls, reaches the app through `connect`, and
+    /// saves the key in `keys`. Returns once the key is saved.
+    #[cfg(any(target_os = "macos", windows))]
+    fn pair_in_chat(host: &std::sync::Arc<Mutex<Host>>, connect: bitsov_mcp::chat_pair::Connect, keys: std::path::PathBuf) {
+        use crate::ai::Preset;
+        use crate::mcp::store::testing::{MemFile, TagSealer};
+        use bitsov_mcp::chat_pair::{Link, Server, TOOL};
+        let ready_dir = keys.clone();
+        let mut server = Server::new(Link {
+            connect,
+            ready: Box::new(move || bitsov_mcp::key_file::ready_to_pair(&ready_dir)),
+            save: std::sync::Arc::new(move |key| bitsov_mcp::key_file::save(&keys, key)),
+            poll_every: Duration::from_millis(20),
+            give_up_after: Duration::from_secs(20),
+        });
+        let mut call = |id: u64| {
+            let reply = server.handle(&json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": TOOL, "arguments": {} } })).unwrap();
+            (reply["result"]["content"][0]["text"].as_str().unwrap().to_owned(), reply["result"]["isError"] == true)
+        };
+        // No window open in the app yet: the AI app is told what to do.
+        let (text, failed) = call(1);
+        assert!(failed && text.contains("Open 'Add an AI app' in BitSov first"), "{text}");
+
+        // The owner opens the window; the tool shows the same six words the app shows.
+        host.lock().unwrap().open_pairing(now_ms());
+        let (text, failed) = call(2);
+        assert!(!failed, "{text}");
+        let shown = host.lock().unwrap().pairing.waiting(now_ms()).first().cloned().expect("a request in the app");
+        assert!(text.contains(&shown.code.join(" ")), "the chat shows the app's words: {text}");
+        assert!(!text.contains("Add an AI app"), "opening it again would end this request: {text}");
+        let (text, _) = call(3);
+        assert!(text.starts_with("Still waiting") && !text.contains("Add an AI app"), "{text}");
+
+        // The owner approves; the tool reports it and the key is saved, never shown.
+        let now = now_ms();
+        host.lock().unwrap().commit(&MemFile::default(), Some(&TagSealer), |h| h.approve(&shown.id, &[Topic::Node], Preset::Counts, now)).unwrap();
+        let started = std::time::Instant::now();
+        let text = loop {
+            let (text, failed) = call(4);
+            if text.starts_with("Approved.") {
+                break text;
+            }
+            assert!(!failed && started.elapsed() < Duration::from_secs(10), "{text}");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!text.contains(&shown.id), "{text}");
+    }
+
     #[cfg(target_os = "macos")]
     mod macos {
         use super::*;
@@ -996,6 +1045,27 @@ mod tests {
 
         fn start(dir: &Path, source: Arc<dyn ReadSource + Send + Sync>, idle: Duration) -> Runner {
             Runner::start_with_idle(dir, Arc::new(Mutex::new(Host::default())), source, idle).unwrap()
+        }
+
+        #[test]
+        fn an_ai_app_pairs_from_its_chat_and_then_opens_a_session_with_the_saved_key() {
+            let dir = dir("chat");
+            let keys = std::env::temp_dir().join(format!("bsm-{}-chat-keys", std::process::id()));
+            let _ = std::fs::remove_dir_all(&keys);
+            let mut runner = start(&dir, Arc::new(Instant), IDLE_TIMEOUT);
+            let socket = dir.join(SOCKET_NAME);
+            let connect: bitsov_mcp::chat_pair::Connect = Box::new(move || {
+                let stream = bitsov_mcp::macos::connect(&socket)?;
+                Ok((Box::new(BufReader::new(stream.try_clone()?)) as Box<dyn BufRead + Send>, Box::new(stream) as Box<dyn Write + Send>))
+            });
+            pair_in_chat(runner.host(), connect, keys.clone());
+            let key = bitsov_mcp::key_file::load(&keys).unwrap();
+            let (mut reader, mut writer) = session(&dir, &key);
+            send(&mut writer, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+            assert_eq!(receive(&mut reader)["result"]["tools"].as_array().unwrap().len(), 1, "the approved topic");
+            runner.stop();
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&keys);
         }
 
         #[test]
@@ -1474,6 +1544,25 @@ mod tests {
             assert_eq!(receive(&mut reader)["result"]["isError"], false);
             assert_eq!(runner.host().lock().unwrap().audit.len(), 1, "the call is audited");
             runner.stop();
+        }
+
+        #[test]
+        fn an_ai_app_pairs_from_its_chat_over_the_pipe_and_then_opens_a_session() {
+            let name = pipe("chat");
+            let keys = std::env::temp_dir().join(format!("bsm-{}-chat-keys", std::process::id()));
+            let _ = bitsov_mcp::key_file::forget(&keys);
+            let mut runner = start(&name, Deadlines::default());
+            let endpoint = name.clone();
+            let connect: bitsov_mcp::chat_pair::Connect = Box::new(move || {
+                let (reader, writer) = try_connect(&endpoint)?;
+                Ok((Box::new(reader) as Box<dyn BufRead + Send>, Box::new(writer) as Box<dyn Write + Send>))
+            });
+            pair_in_chat(runner.host(), connect, keys.clone());
+            let key = bitsov_mcp::key_file::load(&keys).unwrap();
+            let mut client = session(&name, &key);
+            assert!(lists_tools(&mut client));
+            runner.stop();
+            let _ = bitsov_mcp::key_file::forget(&keys);
         }
 
         #[test]

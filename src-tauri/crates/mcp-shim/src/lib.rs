@@ -15,8 +15,14 @@
 //!   challenge, the signature, `ready`.
 //! - **Relay** ([`relay`]): frames up to the shared cap, each way.
 //!
+//! - **Pairing in the AI app** ([`chat_pair`]): with no key yet, the shim
+//!   runs as an MCP server with one tool that pairs and shows the six words
+//!   in the AI app's chat, so no terminal is needed.
+//!
 //! macOS reaches the app through its owner-only socket, Windows through its
 //! owner-only named pipe; on both, the key file is private to this user.
+
+pub mod chat_pair;
 
 use std::io::{self, BufRead, Write};
 
@@ -92,8 +98,30 @@ pub fn pair(
     name: &str,
     shim_nonce: &[u8; 32],
     show_code: impl FnOnce(&[&'static str; 6]),
-    mut wait: impl FnMut() -> bool,
+    wait: impl FnMut() -> bool,
 ) -> io::Result<PairOutcome> {
+    let asked = ask_pair(reader, writer, name, shim_nonce)?;
+    show_code(&asked.words);
+    wait_pair(reader, writer, &asked.id, wait)
+}
+
+/// A pairing request the app took: its id and the six words to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asked {
+    pub id: String,
+    pub words: [&'static str; 6],
+}
+
+/// Refused because the owner has not opened a pairing window in the app
+/// ("Add an AI app"), or another request already took the window.
+pub fn refused_for_window(error: &io::Error) -> bool {
+    let text = error.to_string();
+    text.ends_with(": pairing closed") || text.ends_with(": pairing request already made")
+}
+
+/// The first step of [`pair`]: send the request and check the app's words.
+/// The words returned are our own; the app's are only a cross-check.
+pub fn ask_pair(reader: &mut impl BufRead, writer: &mut impl Write, name: &str, shim_nonce: &[u8; 32]) -> io::Result<Asked> {
     let name = clean_name(name);
     if name.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "give this client a name"));
@@ -107,13 +135,17 @@ pub fn pair(
     if !valid_client_id(id) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "the app sent a malformed client id"));
     }
-    let id = id.to_owned();
-    // The words shown are our own; the app's are only a cross-check.
     let ours = pair_code(shim_nonce, &host_nonce, &name);
     if asked.get("code") != Some(&json!(ours)) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "the app's six words do not match; not pairing"));
     }
-    show_code(&ours);
+    Ok(Asked { id: id.to_owned(), words: ours })
+}
+
+/// The second step of [`pair`]: poll until the owner decides. `wait` is
+/// called before every poll and returns false to give up (`TimedOut`).
+pub fn wait_pair(reader: &mut impl BufRead, writer: &mut impl Write, id: &str, mut wait: impl FnMut() -> bool) -> io::Result<PairOutcome> {
+    let id = id.to_owned();
     loop {
         if !wait() {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "the request was not approved in time"));
