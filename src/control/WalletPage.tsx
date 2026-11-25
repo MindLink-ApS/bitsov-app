@@ -137,6 +137,7 @@ export function WalletPage(props: {
   onClose: () => void;
   /** Phone tab content, below the persistent status and above the tab bar. */
   embedded?: boolean;
+  phoneAddSatsHint?: { id: string; reason: string; disabled: boolean };
   wallet: WalletOverview | null;
   walletError?: string;
   moneyBlocked: boolean;
@@ -211,7 +212,13 @@ export function WalletPage(props: {
       </header>
 
       <div class="wallet-body">
-        <Show when={props.embedded && !starterOpen()}><button class="soft" data-phone-add-sats onClick={() => props.onTab('receive')}>{t('phoneAddSats')}</button></Show>
+        <Show when={props.embedded && !starterOpen()}>
+          <button class="soft" data-phone-add-sats disabled={props.phoneAddSatsHint?.disabled}
+            aria-describedby={props.phoneAddSatsHint?.id} onClick={() => props.onTab('receive')}>{t('phoneAddSats')}</button>
+          <Show when={props.phoneAddSatsHint}>
+            {(hint) => <p class="hint" id={hint().id}>{hint().reason}</p>}
+          </Show>
+        </Show>
         <Show when={props.starter}>
           <StarterBalance {...props.starter!} open={starterOpen()} onOpen={() => setStarterOpen(true)} onHidden={() => setStarterOpen(false)} />
         </Show>

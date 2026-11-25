@@ -427,18 +427,26 @@ export function ControlCenter(props: Props) {
   const [recentCallPeers, setRecentCallPeers] = createSignal<string[]>([]);
   // Cache settled/in-flight reads for this shell/source. Reconnects and peer
   // refreshes reuse them; a live call replaces even a cached negative result.
+  // The cutoff moves only after a scan finishes. A page cap leaves a resume
+  // cursor so the next reconnect continues into pages this pass did not read.
+  // Every reconnect also rechecks messages newer than the last seen tip, and
+  // a negative is not settled while that newer span is still unread.
+  type CallResume = { before: number; newest: number; anchored?: number; gapBefore?: number };
   const callHistory = new Map<string, Promise<boolean>>();
   const callHistoryNewest = new Map<string, number>();
+  const callHistoryResume = new Map<string, CallResume>();
   const knownCallPeers = new Set<string>();
   const [callHistoryRevision, setCallHistoryRevision] = createSignal(0);
   const noteCallHistory = (id: string) => {
     knownCallPeers.add(id);
     callHistory.set(id, Promise.resolve(true));
+    callHistoryResume.delete(id);
     setRecentCallPeers(ids => ids.includes(id) ? ids : [...ids, id]);
   };
   const reconcileCallHistory = () => {
-    // A fresh websocket does not replay missed messages. Recheck only history
-    // newer than the last completed negative read; retain every positive result.
+    // A fresh websocket does not replay missed messages. Drop cached negatives
+    // and recheck history newer than the last seen tip, then continue a scan
+    // the page cap stopped. Retain every positive result.
     for (const id of callHistory.keys()) if (!knownCallPeers.has(id)) callHistory.delete(id);
     setCallHistoryRevision(value => value + 1);
   };
@@ -446,15 +454,72 @@ export function ControlCenter(props: Props) {
     const cached = callHistory.get(id);
     if (cached) return cached;
     const cutoff = callHistoryNewest.get(id);
-    let newest = cutoff ?? -Infinity;
+    const pending = callHistoryResume.get(id);
+    let newest = pending?.newest ?? cutoff ?? -Infinity;
+    let resume: number | undefined;
+    let gapBefore = pending?.gapBefore;
+    let anchored = pending?.anchored ?? pending?.newest;
+    let complete = false;
     const read = (async () => {
       let before: number | undefined;
+      let pages = 0;
+      // 'scan' is a first look or a finished cutoff. With a resume cursor,
+      // 'newer' rechecks the tip, 'gap' finishes messages between that tip
+      // and the scanned prefix, and 'older' continues the page-cap cursor.
+      let mode: 'scan' | 'newer' | 'gap' | 'older' = pending ? 'newer' : 'scan';
+      const pageCap = 3;
       while (phoneShell() && live()) {
         const page = await source.messages(id, before);
-        if (before === undefined) newest = Math.max(newest, ...page.map(m => m.timestamp));
+        pages += 1;
+        if (before === undefined && page.length) newest = Math.max(newest, ...page.map(m => m.timestamp));
         if (page.some(m => isCallKind(m.kind))) return true;
         const oldest = Math.min(...page.map(m => m.timestamp));
-        if (!page.length || !Number.isFinite(oldest) || (cutoff !== undefined && oldest <= cutoff) || (before !== undefined && oldest >= before)) return false;
+        const stuck = !page.length || !Number.isFinite(oldest) || (before !== undefined && oldest >= before);
+        if (mode === 'scan') {
+          // Empty, already scanned, or stuck: this walk has seen every message
+          // down through the previous cutoff. A full page budget is not that.
+          const exhausted = stuck || (cutoff !== undefined && Number.isFinite(oldest) && oldest <= cutoff);
+          if (exhausted) { complete = true; return false; }
+          if (pages >= pageCap) { resume = oldest; return false; }
+          before = oldest;
+          continue;
+        }
+        if (!pending) throw new Error(tr('caCallHistoryReadInterrupted'));
+        if (mode === 'newer' || mode === 'gap') {
+          const stop = mode === 'newer' ? pending.newest : (anchored ?? pending.newest);
+          const reached = Number.isFinite(oldest) && oldest <= stop;
+          if (stuck || reached) {
+            const gapLeft = mode === 'newer' && gapBefore !== undefined && !stuck;
+            if (gapLeft && pages < pageCap) {
+              mode = 'gap';
+              before = gapBefore;
+              continue;
+            }
+            if (gapLeft) { resume = pending.before; return false; }
+            // Newer span is covered. Do not settle a negative until the older
+            // cursor is finished too; a spent page budget keeps that cursor.
+            gapBefore = undefined;
+            if (pages >= pageCap) { resume = pending.before; return false; }
+            mode = 'older';
+            before = pending.before;
+            continue;
+          }
+          if (pages >= pageCap) {
+            gapBefore = oldest;
+            anchored = pending.anchored ?? pending.newest;
+            resume = pending.before;
+            return false;
+          }
+          before = oldest;
+          continue;
+        }
+        if (mode !== 'older') {
+          const leftover: never = mode;
+          throw new Error(tr('caCallHistoryReadInterrupted') + leftover);
+        }
+        const exhausted = stuck || (cutoff !== undefined && Number.isFinite(oldest) && oldest <= cutoff);
+        if (exhausted) { complete = true; return false; }
+        if (pages >= pageCap) { resume = oldest; return false; }
         before = oldest;
       }
       throw new Error(tr('caCallHistoryReadInterrupted'));
@@ -462,8 +527,24 @@ export function ControlCenter(props: Props) {
     callHistory.set(id, read);
     void read.then(hasCall => {
       if (callHistory.get(id) !== read) return;
-      if (hasCall) knownCallPeers.add(id);
-      else callHistoryNewest.set(id, newest);
+      if (hasCall) {
+        knownCallPeers.add(id);
+        callHistoryResume.delete(id);
+        return;
+      }
+      if (complete) {
+        callHistoryResume.delete(id);
+        callHistoryNewest.set(id, newest);
+        return;
+      }
+      if (resume !== undefined) {
+        const next: CallResume = { before: resume, newest };
+        if (gapBefore !== undefined) {
+          next.gapBefore = gapBefore;
+          next.anchored = anchored ?? pending?.newest;
+        }
+        callHistoryResume.set(id, next);
+      }
     }, () => { if (callHistory.get(id) === read) callHistory.delete(id); });
     return read;
   };
@@ -2247,6 +2328,18 @@ export function ControlCenter(props: Props) {
     void loadWallet();
   };
 
+  const phoneShareReasonId = createUniqueId();
+  const phoneAddSatsReasonId = createUniqueId();
+  const phoneWalletReady = () => wallet() !== null && !errors.wallet;
+  const phoneCanShare = () => overview()?.capabilities?.includes('front_door_v1') === true;
+  const phoneShareReason = () => !overview() ? tr('caWaitingForYourNodeSCapabilities')
+    : !phoneCanShare() ? tr('caProfileCardsAreNotAvailableOnThisNodeYet')
+    : tr('caOpenYourProfileToCreateOrShareYourCard');
+  const phoneCanFund = () => !!overview()?.lightning_available && phoneWalletReady() && !moneyBlocked();
+  const phoneFundReason = () => moneyBlocked() ? tr('caYourNodeSWalletIsNotReadyYet')
+    : !overview() || !phoneWalletReady() ? tr('caWaitingForYourNodeSWallet')
+    : !overview()!.lightning_available ? tr('caReceivingSatsIsNotAvailableOnThisNodeYet')
+    : tr('caOpenYourWalletToReceiveBitcoin');
   const openPhoneSettings = (page: ReturnType<typeof tab>) => { if (phoneGuard.check() || walletBusy()) return; setTab(page); setContextOpen(true); };
   const selectPhoneTab = (next: PhoneTab) => {
     if (phoneGuard.check() || walletBusy() || pairingBlockingActions() > 0) return;
@@ -2557,7 +2650,9 @@ export function ControlCenter(props: Props) {
         <Show when={phoneTab() === 'you'}>
           <section class="phone-page" data-phone-you inert={contextOpen()} aria-label={tr('uiYou')}>
             <h1>{tr('uiYou')}</h1>
-            <button class="primary" data-phone-share onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
+            <p class="hint" id={phoneShareReasonId}>{phoneShareReason()}</p>
+            <button class="primary" data-phone-share disabled={!phoneCanShare()} aria-describedby={phoneShareReasonId}
+              onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
             <button class="soft" data-phone-settings onClick={() => openPhoneSettings('body')}>{tr('uiProfileAndSettings')}</button>
             <button class="soft" data-phone-devices onClick={() => openPhoneSettings('devices')}>{tr('phoneAddDevice')}</button>
             <Show when={approvalsWaiting() > 0}><button class="soft" onClick={() => openPhoneSettings('node')}>{tr('uiApprovalsWaiting')} ({approvalsWaiting()})</button></Show>
@@ -2816,6 +2911,7 @@ export function ControlCenter(props: Props) {
             onTab={setWalletTab}
             onClose={closeWallet}
             embedded={phoneShell()}
+            phoneAddSatsHint={phoneShell() ? { id: phoneAddSatsReasonId, reason: phoneFundReason(), disabled: !phoneCanFund() } : undefined}
             wallet={wallet()}
             starter={{ nodeId: ownId(), network: overview()?.network, capabilities: overview()?.capabilities,
               api: { current: () => source.starterCurrent(ownId()), request: id => source.starterRequest(ownId(), id) } }}
