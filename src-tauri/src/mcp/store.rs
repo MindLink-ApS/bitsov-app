@@ -11,20 +11,41 @@
 //!
 //! R2 clients (known to this app, not to the node) may see at most
 //! `rounded` data: [`Preset::Exact`] is refused here, on load and on save.
+//!
+//! **The file holds live clients only.** Removing a client takes its record
+//! out of the file; the removal and the client's history live in the audit
+//! log. At most [`MAX_CLIENTS`] records are kept, and every record is bounded
+//! (id, name, topics), so the largest file this module writes stays under the
+//! platform sealers' plaintext limit ([`MAX_PLAINTEXT`]); a test checks the
+//! worst case. The public key is stored as hex. Files of the first format
+//! (the key as a list of numbers, removed clients kept and marked) still
+//! load: their removed records are dropped, and the next save writes the
+//! current format.
 
 use serde::{Deserialize, Serialize};
 
 use crate::ai::{Preset, Topic};
-use crate::at_rest::Sealer;
+use crate::at_rest::{Sealer, MAX_PLAINTEXT};
+use super::session::MAX_CLIENT_NAME;
+use super::ClientId;
 
 /// The sealer purpose for the approved-clients file.
 pub const CLIENTS_PURPOSE: &str = "mcp-clients-v1";
 /// The file's name in the app's data directory.
 pub const FILE_NAME: &str = "mcp-clients.sealed";
-/// Format version inside the sealed content.
-const VERSION: u32 = 1;
-/// Largest sealed file read; a client record is a few hundred bytes.
+/// Format version written: live clients only, the key as hex.
+const VERSION: u32 = 2;
+/// The first format: removed clients kept with `revoked: true`, the key as
+/// a list of 32 numbers. Still read.
+const VERSION_1: u32 = 1;
+/// Largest sealed file read. Sealed output is larger than its plaintext;
+/// files written here are under [`MAX_PLAINTEXT`] before sealing.
 pub const MAX_FILE_BYTES: usize = 64 * 1024;
+/// Most clients kept. Approving one more is refused until the owner removes
+/// one. With every record at its largest (a 64-byte id, 64 four-byte
+/// characters of name, every topic) six records take about 3.3 KB, well
+/// under the sealer's 4,096 bytes; eight would not fit.
+pub const MAX_CLIENTS: usize = 6;
 
 /// Whether new R2 pairings may still be made. The ADR's sunset: once the node
 /// ships owner-set device approvals on file and flag boxes (N-5), this becomes
@@ -38,19 +59,66 @@ pub const R2_PAIRING_OPEN: bool = true;
 pub struct StoredClient {
     pub id: String,
     pub name: String,
-    /// The client's Ed25519 public key.
+    /// The client's Ed25519 public key, written as 64 hex characters.
+    #[serde(with = "key_hex")]
     pub public_key: [u8; 32],
     pub topics: Vec<Topic>,
     pub preset: Preset,
     pub created_ms: u64,
-    pub revoked: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Contents {
+/// The public key as lowercase hex; the first format's list of 32 numbers is
+/// still read.
+mod key_hex {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(key: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(key))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 32], D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Key {
+            Hex(String),
+            Numbers([u8; 32]),
+        }
+        match Key::deserialize(deserializer)? {
+            Key::Numbers(key) => Ok(key),
+            Key::Hex(text) if text.len() == 64 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => {
+                let bytes = hex::decode(text).map_err(serde::de::Error::custom)?;
+                bytes.try_into().map_err(|_| serde::de::Error::custom("not 32 bytes"))
+            }
+            Key::Hex(_) => Err(serde::de::Error::custom("not a 64-character lowercase hex key")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Contents<'a> {
     version: u32,
-    clients: Vec<StoredClient>,
+    clients: &'a [StoredClient],
+}
+
+/// A record as read: the first format also carries `revoked`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadRecord {
+    id: String,
+    name: String,
+    #[serde(with = "key_hex")]
+    public_key: [u8; 32],
+    topics: Vec<Topic>,
+    preset: Preset,
+    created_ms: u64,
+    revoked: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadContents {
+    version: u32,
+    clients: Vec<ReadRecord>,
 }
 
 /// Why the clients could not be loaded or saved. Every load error means the
@@ -66,6 +134,9 @@ pub enum StoreError {
     PresetTooWide { id: String },
     /// Two records for one client id.
     DuplicateClient { id: String },
+    /// A record past the bounds (id, name, topics), or a list that would not
+    /// fit the sealer once encoded.
+    TooLarge,
     /// The file could not be read or written.
     Io(String),
 }
@@ -121,7 +192,24 @@ impl R2Preset {
     }
 }
 
+/// Each record within the bounds the size check assumes: a valid client id
+/// (at most 64 bytes, nothing JSON escapes), a name of at most
+/// [`MAX_CLIENT_NAME`] characters with no control characters, and each topic
+/// at most once.
+fn bounded(client: &StoredClient) -> bool {
+    let mut topics = client.topics.clone();
+    topics.sort_by_key(|topic| *topic as u8);
+    topics.dedup();
+    ClientId::parse(&client.id).is_some()
+        && client.name.chars().count() <= MAX_CLIENT_NAME
+        && !client.name.chars().any(char::is_control)
+        && topics.len() == client.topics.len()
+}
+
 fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
+    if !clients.iter().all(bounded) {
+        return Err(StoreError::TooLarge);
+    }
     let mut ids = std::collections::HashSet::new();
     if let Some(client) = clients.iter().find(|client| !ids.insert(client.id.as_str())) {
         // Two records for one id: which one holds is undefined, so neither is trusted.
@@ -133,10 +221,9 @@ fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
     }
 }
 
-/// Load the stored client records. A missing file is no records; anything
-/// that does not open and check is [`StoreError::Unreadable`] (fail closed).
-/// **Revoked records are returned too** (kept for the owner's history):
-/// a caller that authorizes anything must skip records with `revoked: true`.
+/// Load the approved clients. A missing file is no records; anything that
+/// does not open and check is [`StoreError::Unreadable`] (fail closed). A
+/// first-format file loads too, without its removed records.
 pub fn load(io: &dyn FileIo, sealer: Option<&dyn Sealer>) -> Result<Vec<StoredClient>, StoreError> {
     let sealer = sealer.ok_or(StoreError::NoSealer)?;
     let Some(sealed) = io.read(MAX_FILE_BYTES + 1).map_err(|error| StoreError::Io(error.to_string()))? else {
@@ -146,22 +233,43 @@ pub fn load(io: &dyn FileIo, sealer: Option<&dyn Sealer>) -> Result<Vec<StoredCl
         return Err(StoreError::Unreadable);
     }
     let plain = sealer.open(CLIENTS_PURPOSE, &sealed).map_err(|_| StoreError::Unreadable)?;
-    let contents: Contents = serde_json::from_slice(&plain).map_err(|_| StoreError::Unreadable)?;
-    if contents.version != VERSION {
+    let contents: ReadContents = serde_json::from_slice(&plain).map_err(|_| StoreError::Unreadable)?;
+    if contents.version != VERSION && contents.version != VERSION_1 {
         return Err(StoreError::Unreadable);
     }
+    let mut clients = Vec::with_capacity(contents.clients.len());
+    for record in contents.clients {
+        let removed = match (contents.version, record.revoked) {
+            (VERSION, None) => false,
+            (VERSION_1, Some(revoked)) => revoked,
+            _ => return Err(StoreError::Unreadable),
+        };
+        if !removed {
+            let ReadRecord { id, name, public_key, topics, preset, created_ms, revoked: _ } = record;
+            clients.push(StoredClient { id, name, public_key, topics, preset, created_ms });
+        }
+    }
     // A file that holds a wider preset than R2 allows is not trusted at all.
-    check(&contents.clients).map_err(|_| StoreError::Unreadable)?;
-    Ok(contents.clients)
+    check(&clients).map_err(|_| StoreError::Unreadable)?;
+    Ok(clients)
+}
+
+/// The plaintext [`save`] seals, or why it would not fit the sealer.
+fn encode(clients: &[StoredClient]) -> Result<zeroize::Zeroizing<Vec<u8>>, StoreError> {
+    check(clients)?;
+    let plain = serde_json::to_vec(&Contents { version: VERSION, clients })
+        .map_err(|error| StoreError::Io(error.to_string()))?;
+    let plain = zeroize::Zeroizing::new(plain);
+    if plain.len() > MAX_PLAINTEXT {
+        return Err(StoreError::TooLarge);
+    }
+    Ok(plain)
 }
 
 /// Save the approved clients, sealed. Refuses a client above `rounded`.
 pub fn save(io: &dyn FileIo, sealer: Option<&dyn Sealer>, clients: &[StoredClient]) -> Result<(), StoreError> {
     let sealer = sealer.ok_or(StoreError::NoSealer)?;
-    check(clients)?;
-    let plain = serde_json::to_vec(&Contents { version: VERSION, clients: clients.to_vec() })
-        .map_err(|error| StoreError::Io(error.to_string()))?;
-    let plain = zeroize::Zeroizing::new(plain);
+    let plain = encode(clients)?;
     let sealed = sealer.seal(CLIENTS_PURPOSE, &plain).map_err(StoreError::Io)?;
     if sealed.len() > MAX_FILE_BYTES {
         return Err(StoreError::Io("too many clients to store".into()));
@@ -276,6 +384,22 @@ pub(crate) mod testing {
 
     /// Not secret (the body is plain); it only lets tests prove tamper refusal.
     pub(crate) struct TagSealer;
+
+    /// [`TagSealer`] with the real sealers' plaintext limit: more than
+    /// [`crate::at_rest::MAX_PLAINTEXT`] bytes is refused, as the Apple
+    /// enclave bridge and Windows DPAPI do.
+    pub(crate) struct LimitSealer;
+    impl Sealer for LimitSealer {
+        fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+            if plaintext.is_empty() || plaintext.len() > crate::at_rest::MAX_PLAINTEXT {
+                return Err("invalid protected storage input".into());
+            }
+            TagSealer.seal(purpose, plaintext)
+        }
+        fn open(&self, purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+            TagSealer.open(purpose, sealed)
+        }
+    }
     impl TagSealer {
         fn tag(purpose: &str, body: &[u8]) -> [u8; 32] {
             let mut hasher = blake3::Hasher::new_keyed(&[9u8; 32]);
@@ -324,7 +448,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::testing::{MemFile, TagSealer};
+    use super::testing::{LimitSealer, MemFile, TagSealer};
     use std::cell::RefCell;
 
     /// A test sealer with integrity: a keyed BLAKE3 tag over purpose and body.
@@ -355,7 +479,7 @@ mod tests {
         let (file, sealer) = (MemFile::default(), TagSealer);
         let twice = vec![client("mcp-01", Preset::Counts), client("mcp-01", Preset::Rounded)];
         assert_eq!(save(&file, Some(&sealer), &twice), Err(StoreError::DuplicateClient { id: "mcp-01".into() }));
-        let body = serde_json::to_vec(&Contents { version: VERSION, clients: twice }).unwrap();
+        let body = serde_json::to_vec(&Contents { version: VERSION, clients: &twice }).unwrap();
         *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, &body).unwrap());
         assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable));
     }
@@ -379,7 +503,7 @@ mod tests {
     }
 
     fn client(id: &str, preset: Preset) -> StoredClient {
-        StoredClient { id: id.into(), name: "Desk".into(), public_key: [7u8; 32], topics: vec![Topic::Node], preset, created_ms: 1, revoked: false }
+        StoredClient { id: id.into(), name: "Desk".into(), public_key: [7u8; 32], topics: vec![Topic::Node], preset, created_ms: 1 }
     }
 
     #[test]
@@ -413,7 +537,7 @@ mod tests {
     #[test]
     fn a_file_sealed_for_another_purpose_or_too_large_is_refused() {
         let (file, sealer) = (MemFile::default(), TagSealer);
-        let plain = serde_json::to_vec(&Contents { version: VERSION, clients: vec![] }).unwrap();
+        let plain = serde_json::to_vec(&Contents { version: VERSION, clients: &[] }).unwrap();
         *file.bytes.borrow_mut() = Some(sealer.seal("client-ed25519-seed-v1", &plain).unwrap());
         assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable));
         *file.bytes.borrow_mut() = Some(vec![0u8; MAX_FILE_BYTES * 4]);
@@ -430,7 +554,7 @@ mod tests {
         );
         assert!(file.bytes.borrow().is_none(), "nothing written");
         // A validly sealed file that holds `exact` (written by older or other code) is not trusted.
-        let plain = serde_json::to_vec(&Contents { version: VERSION, clients: vec![client("mcp-03", Preset::Exact)] }).unwrap();
+        let plain = serde_json::to_vec(&Contents { version: VERSION, clients: &[client("mcp-03", Preset::Exact)] }).unwrap();
         *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, &plain).unwrap());
         assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable));
         assert!(r2_preset_allowed(Preset::Rounded) && r2_preset_allowed(Preset::Counts) && !r2_preset_allowed(Preset::Exact));
@@ -477,9 +601,116 @@ mod tests {
     #[test]
     fn unknown_fields_and_other_versions_are_refused() {
         let (file, sealer) = (MemFile::default(), TagSealer);
-        for plain in [br#"{"version":2,"clients":[]}"#.to_vec(), br#"{"version":1,"clients":[],"extra":1}"#.to_vec()] {
+        for plain in [br#"{"version":3,"clients":[]}"#.to_vec(), br#"{"version":2,"clients":[],"extra":1}"#.to_vec()] {
             *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, &plain).unwrap());
             assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable));
+        }
+    }
+
+    /// The largest record the checks allow: a 64-byte id, 64 four-byte
+    /// characters of name, every topic, the widest R2 preset, the largest time.
+    fn largest(n: usize) -> StoredClient {
+        let id = format!("{n:x}{}", "z".repeat(64)).chars().take(64).collect::<String>();
+        StoredClient {
+            id,
+            name: "\u{1D11E}".repeat(MAX_CLIENT_NAME),
+            public_key: [0xff; 32],
+            topics: vec![Topic::Balance, Topic::Channels, Topic::Node, Topic::Inbox, Topic::Prices, Topic::Payments],
+            preset: Preset::Rounded,
+            created_ms: u64::MAX,
+        }
+    }
+
+    #[test]
+    fn the_largest_allowed_file_fits_the_sealer_limit() {
+        let full: Vec<StoredClient> = (0..MAX_CLIENTS).map(largest).collect();
+        let plain = encode(&full).unwrap();
+        assert!(plain.len() <= MAX_PLAINTEXT, "{} bytes", plain.len());
+        // Margin for later fields: at least 10% under the limit.
+        assert!(plain.len() * 10 <= MAX_PLAINTEXT * 9, "{} bytes", plain.len());
+        let (file, sealer) = (MemFile::default(), LimitSealer);
+        save(&file, Some(&sealer), &full).unwrap();
+        assert_eq!(load(&file, Some(&sealer)).unwrap(), full);
+        // One record past the bounds is refused, never sealed.
+        let mut long = largest(0);
+        long.name.push('x');
+        assert_eq!(encode(&[long]), Err(StoreError::TooLarge));
+        let mut doubled = largest(0);
+        doubled.topics.push(Topic::Node);
+        assert_eq!(encode(&[doubled]), Err(StoreError::TooLarge));
+        let mut odd = largest(0);
+        odd.id = "Has\"quotes".into();
+        assert_eq!(encode(&[odd]), Err(StoreError::TooLarge));
+        let mut control = largest(0);
+        control.name = "a\u{7}b".into();
+        assert_eq!(encode(&[control]), Err(StoreError::TooLarge));
+    }
+
+    #[test]
+    fn a_list_that_would_not_fit_the_sealer_is_refused_before_sealing() {
+        let (file, sealer) = (MemFile::default(), LimitSealer);
+        let too_many: Vec<StoredClient> = (0..MAX_CLIENTS + 3).map(largest).collect();
+        assert_eq!(save(&file, Some(&sealer), &too_many), Err(StoreError::TooLarge));
+        assert!(file.bytes.borrow().is_none());
+    }
+
+    #[test]
+    fn forty_approvals_and_removals_in_a_row_keep_saving_under_the_real_limit() {
+        let (file, sealer) = (MemFile::default(), LimitSealer);
+        // Five long-lived clients at their largest, then 40 added and removed.
+        let mut clients: Vec<StoredClient> = (0..MAX_CLIENTS - 1).map(largest).collect();
+        save(&file, Some(&sealer), &clients).unwrap();
+        for n in 0..40 {
+            let mut added = largest(1000 + n);
+            added.id = format!("mcp-{n:016x}");
+            clients.push(added.clone());
+            save(&file, Some(&sealer), &clients).unwrap();
+            clients.retain(|client| client.id != added.id);
+            save(&file, Some(&sealer), &clients).unwrap();
+            let on_disk = load(&file, Some(&sealer)).unwrap();
+            assert!(on_disk.iter().all(|client| client.id != added.id), "removal {n} is on disk");
+        }
+        assert_eq!(load(&file, Some(&sealer)).unwrap(), clients);
+    }
+
+    #[test]
+    fn a_first_format_file_still_loads_without_its_removed_records() {
+        let (file, sealer) = (MemFile::default(), TagSealer);
+        let numbers = (0..32).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        let old = format!(
+            r#"{{"version":1,"clients":[{{"id":"mcp-01","name":"Desk","public_key":[{numbers}],"topics":["node"],"preset":"counts","created_ms":1,"revoked":false}},{{"id":"mcp-02","name":"Old","public_key":[{numbers}],"topics":["node"],"preset":"rounded","created_ms":2,"revoked":true}}]}}"#
+        );
+        *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, old.as_bytes()).unwrap());
+        let mut key = [0u8; 32];
+        for (n, byte) in key.iter_mut().enumerate() {
+            *byte = n as u8;
+        }
+        let loaded = load(&file, Some(&sealer)).unwrap();
+        assert_eq!(loaded, vec![StoredClient { id: "mcp-01".into(), name: "Desk".into(), public_key: key, topics: vec![Topic::Node], preset: Preset::Counts, created_ms: 1 }]);
+        // The next save writes the current format: version 2, the key as hex, no removed record.
+        save(&file, Some(&sealer), &loaded).unwrap();
+        let sealed = file.bytes.borrow().clone().unwrap();
+        let plain = String::from_utf8(sealer.open(CLIENTS_PURPOSE, &sealed).unwrap().to_vec()).unwrap();
+        assert!(plain.contains(r#""version":2"#) && plain.contains(&hex::encode(key)), "{plain}");
+        assert!(!plain.contains("revoked") && !plain.contains("mcp-02"), "{plain}");
+        assert_eq!(load(&file, Some(&sealer)).unwrap(), loaded);
+    }
+
+    #[test]
+    fn the_formats_do_not_mix() {
+        let (file, sealer) = (MemFile::default(), TagSealer);
+        let key = hex::encode([0xab_u8; 32]);
+        for plain in [
+            // `revoked` belongs to the first format only.
+            format!(r#"{{"version":2,"clients":[{{"id":"mcp-01","name":"D","public_key":"{key}","topics":[],"preset":"counts","created_ms":1,"revoked":false}}]}}"#),
+            // The first format always carried it.
+            format!(r#"{{"version":1,"clients":[{{"id":"mcp-01","name":"D","public_key":"{key}","topics":[],"preset":"counts","created_ms":1}}]}}"#),
+            // Upper-case or short hex is not a key.
+            format!(r#"{{"version":2,"clients":[{{"id":"mcp-01","name":"D","public_key":"{}","topics":[],"preset":"counts","created_ms":1}}]}}"#, key.to_uppercase()),
+            r#"{"version":2,"clients":[{"id":"mcp-01","name":"D","public_key":"abcd","topics":[],"preset":"counts","created_ms":1}]}"#.to_owned(),
+        ] {
+            *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, plain.as_bytes()).unwrap());
+            assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable), "{plain}");
         }
     }
 

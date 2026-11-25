@@ -19,8 +19,8 @@ const BACKEND: &str = "dpapi-current-user";
 const VERSION: u8 = 1;
 /// Largest stored envelope; matches the client key file limit.
 pub(crate) const MAX_ENVELOPE: usize = 16384;
-/// Largest payload a caller may seal.
-pub(crate) const MAX_PAYLOAD: usize = 4096;
+/// Largest payload a caller may seal (the shared limit).
+pub(crate) const MAX_PAYLOAD: usize = super::MAX_PLAINTEXT;
 const MAX_LABEL: usize = 256;
 
 /// The OS protection primitive: current user only, never machine scope.

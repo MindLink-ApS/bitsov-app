@@ -30,7 +30,7 @@ use super::identity::Identities;
 use super::pairing::{PairError, Pairing};
 use super::server::{ReadFailed, Reads, MAX_FRAME_BYTES};
 use super::session::{clean, AuditRow, Begun, Outcome, Registry, Sessions, MAX_CLIENT_NAME};
-use super::store::{self, r2_preset_allowed, FileIo, R2Preset, StoreError, StoredClient, R2_PAIRING_OPEN};
+use super::store::{self, r2_preset_allowed, FileIo, R2Preset, StoreError, StoredClient, MAX_CLIENTS, R2_PAIRING_OPEN};
 use crate::ai::{Preset, Topic};
 use crate::at_rest::Sealer;
 
@@ -39,6 +39,11 @@ pub const MAX_CONNECTIONS: usize = 8;
 
 /// The tool name on audit rows for a refused handshake.
 pub const HANDSHAKE_AUDIT_TOOL: &str = "handshake";
+
+/// The tool name on the audit row the owner's removal of a client writes; its
+/// arguments hold the client's name, so the history keeps it after the
+/// record has left the clients file.
+pub const REMOVED_AUDIT_TOOL: &str = "client_removed";
 
 /// How long an approved client's secret waits to be collected.
 pub const DELIVERY_TTL_MS: u64 = 5 * 60_000;
@@ -175,6 +180,10 @@ pub struct Host {
     /// Set when the clients file was there but did not load: nothing is saved
     /// over it until the owner chooses to start over ([`Host::start_over`]).
     blocked: Option<StoreError>,
+    /// Clients removed in memory since the last save that worked: the file
+    /// may still list them. A caller that loads the file again (a recovery)
+    /// removes these again, so a reload never gives access back.
+    removed_unsaved: Vec<String>,
     /// The pairing window the owner opened, if any (ADR A1 §1.4, D7 B1).
     window: Option<PairingWindow>,
 }
@@ -239,14 +248,17 @@ pub enum ChangeError {
     /// A preset wider than R2 allows (`exact`).
     PresetTooWide,
     UnknownClient,
+    /// Already [`MAX_CLIENTS`] clients: the owner removes one first.
+    TooManyClients,
     /// Saving failed; nothing changed.
     Store(StoreError),
     /// The clients file did not load, so nothing is saved over it until the
     /// owner starts over; nothing changed.
     StoreBlocked(StoreError),
-    /// The client **is** revoked now (no session, no key), but the record
-    /// could not be saved: after a restart it would be back until a later
-    /// save succeeds. Revocation never waits for the disk.
+    /// The client **is** removed now (no session, no key, no record in
+    /// memory), but the file could not be saved: it still lists the client
+    /// until a later save succeeds. Removal never waits for the disk; the
+    /// runtime keeps the endpoint closed until the file agrees.
     RevokedNotSaved(StoreError),
 }
 
@@ -269,9 +281,8 @@ impl Host {
         Step::refuse(reason)
     }
 
-    /// A host for the clients on file. Revoked records are kept for the
-    /// owner's history and never authorised; a record whose key does not load
-    /// is kept but not authorised either.
+    /// A host for the clients on file. A record whose key does not load is
+    /// kept but not authorised.
     /// A host from the result of [`store::load`]. A file that is there but
     /// does not load (unreadable, tampered, the wrong mode) gives no clients
     /// **and** blocks saving, so it is never overwritten by accident.
@@ -296,7 +307,7 @@ impl Host {
     pub fn from_stored(records: Vec<StoredClient>) -> Self {
         let mut host = Host::default();
         for record in &records {
-            if record.revoked || !r2_preset_allowed(record.preset) {
+            if !r2_preset_allowed(record.preset) {
                 continue;
             }
             if host.identities.insert(&record.id, &record.public_key).is_ok() {
@@ -307,7 +318,7 @@ impl Host {
         host
     }
 
-    /// The records to save: every approved client, revoked ones included.
+    /// The records to save: every approved client (removed ones are gone).
     pub fn stored(&self) -> &[StoredClient] {
         &self.stored
     }
@@ -316,47 +327,66 @@ impl Host {
     /// record that somehow holds a wider preset gets counts (such a record is
     /// never authorised anyway, see [`Host::from_stored`]).
     pub fn preset(&self, client: &str) -> R2Preset {
-        self.stored.iter().find(|record| record.id == client && !record.revoked)
+        self.stored.iter().find(|record| record.id == client)
             .and_then(|record| R2Preset::new(record.preset))
             .unwrap_or(super::broker::DEFAULT_PRESET)
     }
 
     /// The owner approves a waiting pairing request with the topics and
     /// preset chosen (at most `rounded`). Not saved: see [`Host::commit`].
+    /// Refused when [`MAX_CLIENTS`] other clients are already kept.
     pub fn approve(&mut self, id: &str, topics: &[Topic], preset: Preset, now_ms: u64) -> Result<(), ChangeError> {
         if !r2_preset_allowed(preset) {
             return Err(ChangeError::PresetTooWide);
+        }
+        if self.stored.iter().filter(|record| record.id != id).count() >= MAX_CLIENTS {
+            return Err(ChangeError::TooManyClients);
         }
         let issued = self.pairing.approve(id, topics, now_ms, &mut self.registry, &mut self.identities).map_err(ChangeError::Pair)?;
         let public_key = self.identities.public_key(id).ok_or(ChangeError::UnknownClient)?;
         let name = self.registry.active(id).map(|client| client.name.clone()).unwrap_or_default();
         self.stored.retain(|record| record.id != id);
-        self.stored.push(StoredClient { id: id.to_owned(), name, public_key, topics: topics.to_vec(), preset, created_ms: now_ms, revoked: false });
+        self.stored.push(StoredClient { id: id.to_owned(), name, public_key, topics: topics.to_vec(), preset, created_ms: now_ms });
         self.deliveries.insert(id.to_owned(), Delivery { secret: issued.secret, expires_ms: now_ms.saturating_add(DELIVERY_TTL_MS) });
         Ok(())
     }
 
-    /// The owner revokes a client and the record is saved. The revocation
-    /// holds in memory **even when saving fails** (then
-    /// [`ChangeError::RevokedNotSaved`]): cutting access never waits for the
-    /// disk, and the next successful save carries it.
-    pub fn revoke_saved(&mut self, io: &dyn FileIo, sealer: Option<&dyn Sealer>, id: &str) -> Result<(), ChangeError> {
-        self.revoke(id)?;
+    /// The owner removes a client: its record leaves the file, and an audit
+    /// row records the removal. The removal holds in memory **even when
+    /// saving fails** (then [`ChangeError::RevokedNotSaved`]): cutting access
+    /// never waits for the disk, and the next successful save carries it.
+    pub fn revoke_saved(&mut self, io: &dyn FileIo, sealer: Option<&dyn Sealer>, id: &str, now_ms: u64) -> Result<(), ChangeError> {
+        self.revoke(id, now_ms)?;
         if let Some(error) = &self.blocked {
             return Err(ChangeError::RevokedNotSaved(error.clone()));
         }
-        store::save(io, sealer, &self.stored).map_err(ChangeError::RevokedNotSaved)
+        store::save(io, sealer, &self.stored).map_err(ChangeError::RevokedNotSaved)?;
+        self.removed_unsaved.clear();
+        Ok(())
     }
 
-    /// Revoke in memory only: no new session, no further frame on a live one,
-    /// and its key is dropped. The record stays, marked revoked. Use
+    /// Clients removed in memory whose removal no save has carried yet.
+    pub fn removed_unsaved(&self) -> &[String] {
+        &self.removed_unsaved
+    }
+
+    /// Remove in memory only: no new session, no further frame on a live one,
+    /// its key is dropped and its record leaves the list. Use
     /// [`Host::revoke_saved`].
-    fn revoke(&mut self, id: &str) -> Result<(), ChangeError> {
-        let record = self.stored.iter_mut().find(|record| record.id == id && !record.revoked).ok_or(ChangeError::UnknownClient)?;
-        record.revoked = true;
+    fn revoke(&mut self, id: &str, now_ms: u64) -> Result<(), ChangeError> {
+        let at = self.stored.iter().position(|record| record.id == id).ok_or(ChangeError::UnknownClient)?;
+        let record = self.stored.remove(at);
+        self.audit.push(AuditRow {
+            at_ms: now_ms,
+            client: record.id,
+            tool: REMOVED_AUDIT_TOOL.to_owned(),
+            arguments: record.name,
+            outcome: Outcome::Removed,
+        });
         self.registry.revoke(id);
         self.identities.revoke(id);
         self.deliveries.remove(id);
+        self.removed_unsaved.push(id.to_owned());
         Ok(())
     }
 
@@ -398,6 +428,7 @@ impl Host {
             undo(self);
             return Err(ChangeError::Store(error));
         }
+        self.removed_unsaved.clear();
         Ok(result)
     }
 
@@ -412,7 +443,14 @@ impl Host {
         if let Some(error) = &self.blocked {
             return Err(ChangeError::StoreBlocked(error.clone()));
         }
-        store::save(io, sealer, &self.stored).map_err(ChangeError::Store)
+        store::save(io, sealer, &self.stored).map_err(ChangeError::Store)?;
+        // A `&self` save: the caller clears with [`Host::saved`].
+        Ok(())
+    }
+
+    /// Every removal is on file now (after [`Host::save_now`] worked).
+    pub fn saved(&mut self) {
+        self.removed_unsaved.clear();
     }
 
     /// The owner opens a pairing window: for [`PAIRING_WINDOW_MS`] one `pair`
@@ -777,7 +815,7 @@ mod tests {
         // A restart: only the sealed file is left.
         let records = crate::mcp::store::load(&file, Some(&sealer)).unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!((records[0].id.as_str(), records[0].preset, records[0].revoked), (id.as_str(), Preset::Rounded, false));
+        assert_eq!((records[0].id.as_str(), records[0].preset), (id.as_str(), Preset::Rounded));
         let mut host = Host::from_stored(records);
         let mut conn = ready(&mut host, &id, &secret);
         let out = call_read_node(&mut host, &mut conn, 20, &ByPreset);
@@ -819,16 +857,100 @@ mod tests {
         let secret: [u8; 32] = hex::decode(done["secret"].as_str().unwrap()).unwrap().try_into().unwrap();
         let mut live = ready(&mut host, &id, &secret);
 
-        host.revoke_saved(&file, Some(&sealer), &id).unwrap();
+        host.revoke_saved(&file, Some(&sealer), &id, 30).unwrap();
         assert!(host.on_frame(&mut live, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, 30, &Fake).close, "a live session ends");
         assert!(host.identities.public_key(&id).is_none(), "the key is dropped with the registry entry");
-        assert_eq!(host.revoke_saved(&file, Some(&sealer), &id), Err(ChangeError::UnknownClient));
+        assert_eq!(host.revoke_saved(&file, Some(&sealer), &id, 30), Err(ChangeError::UnknownClient));
 
         let records = crate::mcp::store::load(&file, Some(&sealer)).unwrap();
-        assert!(records[0].revoked, "kept for the owner's history, marked revoked");
+        assert!(records.is_empty(), "the record left the file");
+        let removed = host.audit.iter().find(|row| row.outcome == Outcome::Removed).expect("the removal is audited");
+        assert_eq!((removed.client.as_str(), removed.tool.as_str(), removed.arguments.as_str(), removed.at_ms), (id.as_str(), REMOVED_AUDIT_TOOL, "Desk", 30));
         let mut host = Host::from_stored(records);
         let mut conn = Conn::Start;
         assert_eq!(reply(&host.on_frame(&mut conn, &frame(json!({"hello": id})), 40, &Fake))["error"], "unknown client");
+    }
+
+    /// Pair one client (name `name`, nonce byte `n`) and approve it with a save.
+    fn pair_and_approve(host: &mut Host, file: &MemFile, sealer: &dyn Sealer, name: &str, n: u8, at: u64) -> Result<String, ChangeError> {
+        let mut conn = Conn::Start;
+        host.open_pairing(at);
+        let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": name, "nonce": hex::encode([n; 32])}})), at, &Fake));
+        let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+        host.commit(file, Some(sealer), |h| h.approve(&id, &[Topic::Balance, Topic::Channels, Topic::Node, Topic::Inbox, Topic::Prices, Topic::Payments], Preset::Rounded, at))?;
+        host.close_pairing(at);
+        Ok(id)
+    }
+
+    #[test]
+    fn approving_and_removing_forty_apps_keeps_saving_under_the_real_sealer_limit() {
+        use crate::mcp::store::testing::LimitSealer;
+        let (file, sealer) = (MemFile::default(), LimitSealer);
+        let mut host = Host::default();
+        // Long names in four-byte characters, every topic: the largest records.
+        let name = "\u{1D11E}".repeat(MAX_CLIENT_NAME);
+        let mut kept = Vec::new();
+        for n in 0..MAX_CLIENTS - 1 {
+            kept.push(pair_and_approve(&mut host, &file, &sealer, &name, n as u8, 10 + n as u64).unwrap());
+        }
+        let mut last = String::new();
+        for n in 0..40u64 {
+            let at = 1_000 + n * 10;
+            last = pair_and_approve(&mut host, &file, &sealer, &name, 100 + n as u8, at).unwrap();
+            assert_eq!(host.revoke_saved(&file, Some(&sealer), &last, at + 1), Ok(()), "removal {n} saved");
+        }
+        // A restart: the last removal is on disk, the long-lived clients too.
+        let records = crate::mcp::store::load(&file, Some(&sealer)).unwrap();
+        assert!(records.iter().all(|r| r.id != last));
+        assert_eq!(records.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), kept);
+        assert_eq!(host.audit.iter().filter(|row| row.outcome == Outcome::Removed).count(), 40);
+    }
+
+    #[test]
+    fn a_removal_not_on_file_is_removed_again_after_a_reload_and_never_regranted() {
+        let (mut file, sealer) = (MemFile::default(), TagSealer);
+        let mut host = Host::default();
+        let id = pair_and_approve(&mut host, &file, &sealer, "Desk", 1, 10).unwrap();
+        let other = pair_and_approve(&mut host, &file, &sealer, "Notes", 2, 11).unwrap();
+        file.fail_write = true;
+        assert!(matches!(host.revoke_saved(&file, Some(&sealer), &id, 20), Err(ChangeError::RevokedNotSaved(_))));
+        assert_eq!(host.removed_unsaved(), std::slice::from_ref(&id));
+        // A reload (a recovery) reads the old file, which still lists the client:
+        // applying the carried removals takes it out again.
+        let mut reloaded = Host::from_load(crate::mcp::store::load(&file, Some(&sealer)));
+        assert!(reloaded.registry.active(&id).is_some(), "the old file alone would give access back");
+        for removed in host.removed_unsaved() {
+            let _ = reloaded.revoke(removed, 21);
+        }
+        assert!(reloaded.registry.active(&id).is_none() && reloaded.identities.public_key(&id).is_none());
+        assert!(reloaded.registry.active(&other).is_some(), "other clients are untouched");
+        assert_eq!(reloaded.removed_unsaved(), std::slice::from_ref(&id), "still owed to the file");
+        // Once a save carries it, the record is gone from the file: applying the
+        // removal again finds nothing, and nothing is granted.
+        file.fail_write = false;
+        reloaded.save_now(&file, Some(&sealer)).unwrap();
+        reloaded.saved();
+        assert!(reloaded.removed_unsaved().is_empty());
+        let mut again = Host::from_load(crate::mcp::store::load(&file, Some(&sealer)));
+        assert_eq!(again.revoke(&id, 22), Err(ChangeError::UnknownClient));
+        assert!(again.registry.active(&id).is_none());
+    }
+
+    #[test]
+    fn approving_past_the_client_cap_is_refused_and_changes_nothing() {
+        let (file, sealer) = (MemFile::default(), TagSealer);
+        let mut host = Host::default();
+        for n in 0..MAX_CLIENTS {
+            pair_and_approve(&mut host, &file, &sealer, "Desk", n as u8, 10).unwrap();
+        }
+        let before = file.bytes.borrow().clone();
+        assert_eq!(pair_and_approve(&mut host, &file, &sealer, "One more", 99, 20), Err(ChangeError::TooManyClients));
+        assert_eq!(*file.bytes.borrow(), before, "nothing saved");
+        assert_eq!(host.stored().len(), MAX_CLIENTS);
+        // Removing one makes room again.
+        let first = host.stored()[0].id.clone();
+        host.revoke_saved(&file, Some(&sealer), &first, 30).unwrap();
+        pair_and_approve(&mut host, &file, &sealer, "One more", 98, 40).unwrap();
     }
 
     /// Pair, approve with a save, collect the secret, open a session.
@@ -850,7 +972,7 @@ mod tests {
         let mut host = Host::default();
         let (id, _, mut live) = approved_and_ready(&mut host, &file);
         file.fail_write = true;
-        assert!(matches!(host.revoke_saved(&file, Some(&TagSealer), &id), Err(ChangeError::RevokedNotSaved(_))));
+        assert!(matches!(host.revoke_saved(&file, Some(&TagSealer), &id, 30), Err(ChangeError::RevokedNotSaved(_))));
         assert!(host.on_frame(&mut live, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, 30, &Fake).close, "the live session ends anyway");
         assert!(host.identities.public_key(&id).is_none());
         // A later failing approval must not bring it back.
@@ -864,7 +986,7 @@ mod tests {
         let other = asked["pair"]["id"].as_str().unwrap().to_owned();
         host.commit(&file, Some(&TagSealer), |h| h.approve(&other, &[Topic::Node], Preset::Counts, 51)).unwrap();
         let records = crate::mcp::store::load(&file, Some(&TagSealer)).unwrap();
-        assert!(records.iter().any(|r| r.id == id && r.revoked));
+        assert!(records.iter().all(|r| r.id != id), "the removal is on file now");
     }
 
     #[test]
@@ -1017,7 +1139,7 @@ mod tests {
 
         let Begin::Read(pending) = host.begin_frame(&mut conn, call, 14) else { panic!("a read to run") };
         let done = pending.read(&Fixed(&Fake));
-        host.revoke_saved(&MemFile::default(), Some(&TagSealer), &id).unwrap();
+        host.revoke_saved(&MemFile::default(), Some(&TagSealer), &id, 30).unwrap();
         let step = host.finish_frame(&mut conn, pending, done);
         assert_eq!(reply(&step)["error"], "client not authorised", "the read's result is not sent");
         assert!(step.close);
@@ -1105,12 +1227,12 @@ mod tests {
         let mut host = Host::default();
         let (id, _) = paired(&mut host, &[Topic::Node]);
         let failing = MemFile { fail_write: true, ..MemFile::default() };
-        assert!(matches!(host.revoke_saved(&failing, Some(&TagSealer), &id), Err(ChangeError::RevokedNotSaved(_))));
+        assert!(matches!(host.revoke_saved(&failing, Some(&TagSealer), &id, 30), Err(ChangeError::RevokedNotSaved(_))));
         assert!(matches!(host.save_now(&failing, Some(&TagSealer)), Err(ChangeError::Store(_))));
         let file = MemFile::default();
         host.save_now(&file, Some(&TagSealer)).unwrap();
         let records = crate::mcp::store::load(&file, Some(&TagSealer)).unwrap();
-        assert!(records[0].revoked, "the revoke is on file now");
+        assert!(records.is_empty(), "the removal is on file now");
 
         let blocked = Host::from_load(Err(StoreError::Unreadable));
         assert!(matches!(blocked.save_now(&file, Some(&TagSealer)), Err(ChangeError::StoreBlocked(_))));
