@@ -389,7 +389,10 @@ impl Runtime {
         if lock(&self.host)?.blocked().is_some() {
             return Err(code::BLOCKED);
         }
-        let audit = self.audit_log().inspect_err(|_| self.start_error = Some(code::START_FAILED))?;
+        let Ok(audit) = self.audit_log() else {
+            self.start_error = Some(code::START_FAILED);
+            return Err(code::START_FAILED);
+        };
         let listener = match (self.config.start)(&self.config.dir, self.host.clone(), self.config.source.clone()) {
             Ok(listener) => listener,
             Err(_) => {
@@ -489,6 +492,8 @@ impl Runtime {
     /// (counts or rounded). Saved, or nothing changed; the window closes.
     pub fn approve(&mut self, id: &str, topics: &[Topic], preset: R2Preset, now_ms: u64) -> Result<ClientView, &'static str> {
         let sealer = self.sealer()?;
+        // Every save writes the whole list: never before the file was read.
+        self.ensure_loaded(false)?;
         if topics.is_empty() {
             return Err(code::NO_TOPICS);
         }
@@ -563,6 +568,8 @@ impl Runtime {
     /// Save the records again after a revoke that was not saved.
     pub fn save_again(&mut self) -> Result<Saved, &'static str> {
         let sealer = self.sealer()?;
+        // Never save before the file was read: an empty host would replace it.
+        self.ensure_loaded(false)?;
         let result = lock(&self.host)?.save_now(self.config.store.as_ref(), Some(sealer));
         let saved = match result {
             Ok(()) => {
@@ -924,6 +931,38 @@ mod tests {
         let records = store::load(&file, Some(&SEALER)).unwrap();
         assert!(records[0].revoked, "the revoke is on file");
         assert_eq!(rt.revoke("mcp-ffff"), Err(code::UNKNOWN));
+    }
+
+    #[test]
+    fn save_again_before_anything_was_loaded_reads_the_file_first() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut first = runtime(&file, &counts);
+        let (id, _) = approved(&mut first, R2Preset::Counts);
+        drop(first);
+        // A restart: the first call is "save again" (or an approval of nothing).
+        let before = file.0.lock().unwrap().0.clone();
+        let mut rt = runtime(&file, &counts);
+        assert_eq!(rt.approve("mcp-none", &[Topic::Node], R2Preset::Counts, 9), Err(code::UNKNOWN));
+        assert_eq!(rt.save_again().unwrap(), Saved { saved: true });
+        assert_eq!(file.0.lock().unwrap().0, before, "the file is unchanged");
+        let records = store::load(&file, Some(&SEALER)).unwrap();
+        assert_eq!(records.iter().map(|record| record.id.as_str()).collect::<Vec<_>>(), [id.as_str()], "the client is still on file");
+        // A file that does not load is never saved over.
+        file.put(b"tampered");
+        let mut rt = runtime(&file, &counts);
+        assert_eq!(rt.save_again(), Err(code::BLOCKED));
+        assert_eq!(file.0.lock().unwrap().0.as_deref(), Some(&b"tampered"[..]));
+    }
+
+    #[test]
+    fn an_audit_file_that_cannot_open_is_a_start_failure() {
+        let (file, counts) = (SharedFile::default(), Arc::new(Counts::default()));
+        let mut rt = runtime(&file, &counts);
+        rt.config.open_audit = Box::new(|_| Err(io::Error::other("no audit file")));
+        assert_eq!(rt.set_enabled(true, 0), Err(code::START_FAILED));
+        let status = rt.status(0);
+        assert_eq!((status.enabled, status.start_error), (false, Some(code::START_FAILED)));
+        assert_eq!(counts.started.load(Ordering::SeqCst), 0, "nothing listens");
     }
 
     #[test]
