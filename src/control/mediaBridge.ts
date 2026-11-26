@@ -32,6 +32,8 @@ export type MediaBridge = {
   send: (payload: Uint8Array) => void;
   /** One video payload; resolves to how many fragments wait in the host. Only on a socket opened with `video`. */
   sendVideo?: (payload: Uint8Array) => Promise<number>;
+  /** Running counts of frames the host's queues dropped; null when there is no session or no answer. */
+  stats?: () => Promise<{ uplinkDropped: number; downlinkDropped: number } | null>;
   close: () => Promise<void>;
 };
 
@@ -55,6 +57,14 @@ export function parseLinkMessage(message: unknown): MediaLink | null {
   const parsed: MediaLink = { link: link as MediaLinkState, detail: typeof detail === 'string' ? detail : null };
   if (limits && typeof limits.messages === 'number' && typeof limits.bytes === 'number') parsed.limits = { messages: limits.messages, bytes: limits.bytes };
   return parsed;
+}
+
+/** The host's queue drop counts, or null when the answer is not two counts. */
+export function parseQueueStats(value: unknown): { uplinkDropped: number; downlinkDropped: number } | null {
+  if (!value || typeof value !== 'object') return null;
+  const { uplink_dropped: up, downlink_dropped: down } = value as { uplink_dropped?: unknown; downlink_dropped?: unknown };
+  const count = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+  return count(up) && count(down) ? { uplinkDropped: up, downlinkDropped: down } : null;
 }
 
 /** A binary channel message: an ArrayBuffer on desktop, a byte array on some mobile IPC paths. */
@@ -107,6 +117,10 @@ export function hostMediaBridge(): MediaBridge {
       void invoke<void>('call_media_send', payload, { headers }).catch(() => undefined);
     },
     sendVideo: (payload) => (current ? invoke<number>('call_media_video_send', payload).catch(() => 0) : Promise.resolve(0)),
+    stats: async () => {
+      if (!current) return null;
+      try { return parseQueueStats(await invoke<unknown>('call_media_stats')); } catch { return null; }
+    },
     close: async () => {
       if (!current) return;
       current = null;
@@ -145,6 +159,7 @@ export function unavailableMediaBridge(): MediaBridge {
   return {
     open: async (_callId, _peer, _onFrame, onLink) => { onLink({ link: 'ended', detail: 'no_host_media_bridge' }); },
     send: () => {},
+    stats: async () => null,
     close: async () => {},
   };
 }

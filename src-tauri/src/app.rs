@@ -12009,6 +12009,8 @@ struct MediaSession {
     #[allow(dead_code)]
     call_id: String,
     uplink: Arc<control::media::FrameQueue>,
+    /// Frames from the node on their way to the renderer (read for its drop count only).
+    downlink: Arc<control::media::FrameQueue>,
     /// Puts the renderer's uplink sends back in order before `uplink`.
     send_order: Arc<control::media::SendOrder>,
     /// The video path, on a video call only.
@@ -12042,6 +12044,7 @@ async fn media_bridge<R: tauri::Runtime>(
     call_id: String,
     peer: String,
     uplink: Arc<control::media::FrameQueue>,
+    downlink: Arc<control::media::FrameQueue>,
     video: Option<Arc<control::media::VideoPath>>,
     stop: Arc<AtomicBool>,
     mut seal: Option<Box<control::media::SealedMedia>>,
@@ -12051,7 +12054,6 @@ async fn media_bridge<R: tauri::Runtime>(
     // However this task ends, panic included, it releases the hold.
     let _activity = control::call_activity::ReleaseOnDrop(activity);
     let state = app.state::<NodeState>();
-    let downlink = control::media::FrameQueue::new(control::media::QUEUE_FRAMES);
     let stopping = || stop.load(Ordering::SeqCst) || state.quitting.load(Ordering::SeqCst);
     let emit = |link: control::media::MediaLink| {
         let _ = channel.send(tauri::ipc::InvokeResponseBody::Json(link.to_json()));
@@ -12165,13 +12167,13 @@ fn start_media_session<R: tauri::Runtime>(
 ) {
     // Taken before the old session lets go: a session replaced for the same call keeps the activity.
     let activity = Arc::new(control::call_activity::CallActivity::system().hold(&call_id));
-    let (uplink, video, stop) = install_media_session(state, &call_id, video, send_base, activity.clone());
-    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, video, stop, seal, on_frame, activity));
+    let (uplink, downlink, video, stop) = install_media_session(state, &call_id, video, send_base, activity.clone());
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, downlink, video, stop, seal, on_frame, activity));
 }
 
 /// Replace the current media session, if any, with a new one for `call_id`
 /// whose send order starts at `send_base`. Answers the new session's uplink,
-/// video path and stop flag for its socket task.
+/// downlink, video path and stop flag for its socket task.
 #[allow(clippy::type_complexity)]
 fn install_media_session(
     state: &NodeState,
@@ -12179,20 +12181,22 @@ fn install_media_session(
     video: bool,
     send_base: Option<u64>,
     activity: Arc<control::call_activity::CallHold>,
-) -> (Arc<control::media::FrameQueue>, Option<Arc<control::media::VideoPath>>, Arc<AtomicBool>) {
+) -> (Arc<control::media::FrameQueue>, Arc<control::media::FrameQueue>, Option<Arc<control::media::VideoPath>>, Arc<AtomicBool>) {
     let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
+    let downlink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
     let video = video.then(|| Arc::new(control::media::VideoPath::new()));
     let stop = Arc::new(AtomicBool::new(false));
     stop_media_session(state);
     *state.media.lock().unwrap() = Some(MediaSession {
         call_id: call_id.to_string(),
         uplink: uplink.clone(),
+        downlink: downlink.clone(),
         send_order: Arc::new(control::media::SendOrder::starting_at(send_base)),
         video: video.clone(),
         stop: stop.clone(),
         activity,
     });
-    (uplink, video, stop)
+    (uplink, downlink, video, stop)
 }
 
 #[cfg(feature = "call-seal")]
@@ -12366,6 +12370,20 @@ fn call_media_video_send(
     let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
     let Some(video) = session.video.as_ref() else { return Err("this media session carries no video".into()) };
     video.push(payload)
+}
+
+/// Running counts of frames the open media session's queues dropped as the
+/// oldest. A local read of two counters: no node request, payment or admission
+/// change, and nothing about the audio itself.
+#[tauri::command(rename_all = "snake_case")]
+fn call_media_stats(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>) -> Result<serde_json::Value, String> {
+    reject_sealed_window(&window)?;
+    let slot = state.media.lock().unwrap();
+    let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
+    Ok(serde_json::json!({
+        "uplink_dropped": session.uplink.dropped(),
+        "downlink_dropped": session.downlink.dropped(),
+    }))
 }
 
 /// Close the open media session (hangup or local teardown). Idempotent; only
@@ -12683,6 +12701,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_media_send,
             call_media_video_send,
             call_media_close,
+            call_media_stats,
             porch_quote,
             porch_read,
             porch_cards,
@@ -31567,6 +31586,7 @@ mod assistant_acl_tests {
                 "call_media_send",
                 "call_media_video_send",
                 "call_media_close",
+                "call_media_stats",
                 "porch_quote",
                 "porch_read",
                 "porch_cards",

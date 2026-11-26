@@ -18,6 +18,10 @@ const protocol: Record<string, Record<string, string[]>> = {
   },
   'control/call.ts': { createCallEngine: ['NotFoundError'], RECOVERY_CLOSING: ['Your last call is still closing. End it, then call again.'] },
   // M6 A1: the placeholder session description that carries the node-routed marker (wire bytes, never shown).
+  // The per-5 s audio figures appended to the call report: fixed English keys, numbers only.
+  'control/callAudioStats.ts': {
+    audioStatsLines: ['audio_stats: one row per 5 s, numbers only, this device; dB values are tenths of dBFS (-312 = -31.2); u = unavailable'],
+  },
   'control/nodeRoutedConnection.ts': { nodeRoutedSdp: ['o=bitsov 0 0 IN IP4 0.0.0.0', 'c=IN IP4 0.0.0.0'] },
   // M6 P3: the copied call report is a fixed English record set beside the node journal (the button and confirmation are translated).
   'control/callReport.ts': {
