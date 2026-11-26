@@ -9,8 +9,12 @@
 //! its parent module does (`cfg(test)` or the off-by-default `mcp-grant`
 //! feature).
 //!
-//! R2 clients (known to this app, not to the node) may see at most
-//! `rounded` data: [`Preset::Exact`] is refused here, on load and on save.
+//! R2 clients (known to this app, not to the node) are treated as cloud
+//! clients (ADR AI boundary, owner GO 26 Nov): they may see **counts only**
+//! ([`r2_preset_allowed`]), and never `balance` or `payments`
+//! ([`mcp_topic_allowed`]). A file written before that loads narrowed, never
+//! wider: those topics are dropped and `rounded` becomes `counts`. A file
+//! that holds `exact` is not trusted at all.
 //!
 //! **The file holds live clients only.** Removing a client takes its record
 //! out of the file; the removal and the client's history live in the audit
@@ -130,8 +134,10 @@ pub enum StoreError {
     /// The file is there but does not open, parse or check: edited, from
     /// another user or machine, or damaged. The owner approves clients again.
     Unreadable,
-    /// A client asks for more than R2 allows (`exact`).
+    /// A client asks for more detail than R2 allows (above counts).
     PresetTooWide { id: String },
+    /// A client holds a topic no MCP client may have (`balance`, `payments`).
+    TopicNotAllowed { id: String },
     /// Two records for one client id.
     DuplicateClient { id: String },
     /// A record past the bounds (id, name, topics), or a list that would not
@@ -151,23 +157,33 @@ pub trait FileIo {
     fn write(&self, bytes: &[u8]) -> std::io::Result<()>;
 }
 
-/// Whether an R2 client may have `preset`. Exhaustive on purpose: a new,
-/// wider preset must be decided here, never allowed by default.
+/// Whether an R2 client may have `preset`: counts only. Exhaustive on
+/// purpose: a new, wider preset must be decided here, never allowed by
+/// default.
 pub fn r2_preset_allowed(preset: Preset) -> bool {
     match preset {
-        Preset::Counts | Preset::Rounded => true,
-        Preset::Exact => false,
+        Preset::Counts => true,
+        Preset::Rounded | Preset::Exact => false,
     }
 }
 
-/// A preset an R2 client may have: counts or rounded, never exact. The read
-/// path takes only this type, so `exact` cannot reach a client's reads at
-/// all (ADR A1 §1.6).
+/// Whether an MCP client may be given `topic`. `balance` and `payments` are
+/// never in a cloud client's scope, at any detail, with no setting to bring
+/// them back (owner GO, 26 Nov). `channels` stays, as counts only: no ids
+/// and no amounts (the counts preset). Exhaustive on purpose: a new topic is decided here.
+pub fn mcp_topic_allowed(topic: Topic) -> bool {
+    match topic {
+        Topic::Node | Topic::Channels | Topic::Prices | Topic::Inbox => true,
+        Topic::Balance | Topic::Payments => false,
+    }
+}
+
+/// The only preset an R2 client has: counts. The read path takes only this
+/// type, so neither `rounded` nor `exact` can reach a client's reads at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum R2Preset {
     Counts,
-    Rounded,
 }
 
 impl R2Preset {
@@ -178,8 +194,7 @@ impl R2Preset {
         }
         match preset {
             Preset::Counts => Some(Self::Counts),
-            Preset::Rounded => Some(Self::Rounded),
-            Preset::Exact => None,
+            Preset::Rounded | Preset::Exact => None,
         }
     }
 
@@ -187,7 +202,6 @@ impl R2Preset {
     pub fn preset(self) -> Preset {
         match self {
             Self::Counts => Preset::Counts,
-            Self::Rounded => Preset::Rounded,
         }
     }
 }
@@ -215,10 +229,24 @@ fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
         // Two records for one id: which one holds is undefined, so neither is trusted.
         return Err(StoreError::DuplicateClient { id: client.id.clone() });
     }
+    if let Some(client) = clients.iter().find(|client| !client.topics.iter().all(|topic| mcp_topic_allowed(*topic))) {
+        return Err(StoreError::TopicNotAllowed { id: client.id.clone() });
+    }
     match clients.iter().find(|client| !r2_preset_allowed(client.preset)) {
         Some(client) => Err(StoreError::PresetTooWide { id: client.id.clone() }),
         None => Ok(()),
     }
+}
+
+/// A record written before the cloud scope (owner GO, 26 Nov), read narrowed
+/// and never wider: `balance` and `payments` are dropped, `rounded` becomes
+/// `counts`. `exact` is left for [`check`] to refuse the whole file.
+fn narrowed(mut client: StoredClient) -> StoredClient {
+    client.topics.retain(|topic| mcp_topic_allowed(*topic));
+    if client.preset == Preset::Rounded {
+        client.preset = Preset::Counts;
+    }
+    client
 }
 
 /// Load the approved clients. A missing file is no records; anything that
@@ -246,10 +274,11 @@ pub fn load(io: &dyn FileIo, sealer: Option<&dyn Sealer>) -> Result<Vec<StoredCl
         };
         if !removed {
             let ReadRecord { id, name, public_key, topics, preset, created_ms, revoked: _ } = record;
-            clients.push(StoredClient { id, name, public_key, topics, preset, created_ms });
+            clients.push(narrowed(StoredClient { id, name, public_key, topics, preset, created_ms }));
         }
     }
-    // A file that holds a wider preset than R2 allows is not trusted at all.
+    // A file that still holds `exact` (or anything else that does not check
+    // once narrowed) is not trusted at all.
     check(&clients).map_err(|_| StoreError::Unreadable)?;
     Ok(clients)
 }
@@ -510,7 +539,7 @@ mod tests {
     fn saved_clients_load_back_and_a_missing_file_is_no_clients() {
         let (file, sealer) = (MemFile::default(), TagSealer);
         assert_eq!(load(&file, Some(&sealer)), Ok(vec![]));
-        let clients = vec![client("mcp-01", Preset::Counts), client("mcp-02", Preset::Rounded)];
+        let clients = vec![client("mcp-01", Preset::Counts), client("mcp-02", Preset::Counts)];
         save(&file, Some(&sealer), &clients).unwrap();
         assert_eq!(load(&file, Some(&sealer)), Ok(clients));
         assert!(!String::from_utf8_lossy(file.bytes.borrow().as_ref().unwrap()).is_empty());
@@ -557,7 +586,7 @@ mod tests {
         let plain = serde_json::to_vec(&Contents { version: VERSION, clients: &[client("mcp-03", Preset::Exact)] }).unwrap();
         *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, &plain).unwrap());
         assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable));
-        assert!(r2_preset_allowed(Preset::Rounded) && r2_preset_allowed(Preset::Counts) && !r2_preset_allowed(Preset::Exact));
+        assert!(r2_preset_allowed(Preset::Counts) && !r2_preset_allowed(Preset::Rounded) && !r2_preset_allowed(Preset::Exact));
     }
 
     #[test]
@@ -567,16 +596,14 @@ mod tests {
                 Some(r2) => {
                     assert!(r2_preset_allowed(preset));
                     assert_eq!(r2.preset(), preset, "converts back unchanged");
-                    assert!(matches!(r2.preset(), Preset::Counts | Preset::Rounded));
+                    assert_eq!(r2.preset(), Preset::Counts);
                 }
-                None => assert_eq!(preset, Preset::Exact),
+                None => assert!(matches!(preset, Preset::Rounded | Preset::Exact)),
             }
         }
-        // Exhaustive with two arms: a third (wider) variant would not compile here.
-        for r2 in [R2Preset::Counts, R2Preset::Rounded] {
-            match r2 {
-                R2Preset::Counts | R2Preset::Rounded => {}
-            }
+        // Exhaustive with one arm: a second (wider) variant would not compile here.
+        match R2Preset::Counts {
+            R2Preset::Counts => {}
         }
     }
 
@@ -608,15 +635,16 @@ mod tests {
     }
 
     /// The largest record the checks allow: a 64-byte id, 64 four-byte
-    /// characters of name, every topic, the widest R2 preset, the largest time.
+    /// characters of name, every topic an MCP client may have, the only R2
+    /// preset, the largest time.
     fn largest(n: usize) -> StoredClient {
         let id = format!("{n:x}{}", "z".repeat(64)).chars().take(64).collect::<String>();
         StoredClient {
             id,
             name: "\u{1D11E}".repeat(MAX_CLIENT_NAME),
             public_key: [0xff; 32],
-            topics: vec![Topic::Balance, Topic::Channels, Topic::Node, Topic::Inbox, Topic::Prices, Topic::Payments],
-            preset: Preset::Rounded,
+            topics: vec![Topic::Channels, Topic::Node, Topic::Inbox, Topic::Prices],
+            preset: Preset::Counts,
             created_ms: u64::MAX,
         }
     }
@@ -694,6 +722,71 @@ mod tests {
         assert!(plain.contains(r#""version":2"#) && plain.contains(&hex::encode(key)), "{plain}");
         assert!(!plain.contains("revoked") && !plain.contains("mcp-02"), "{plain}");
         assert_eq!(load(&file, Some(&sealer)).unwrap(), loaded);
+    }
+
+    /// A record as an older app wrote it, in either format.
+    fn written_before(version: u32, id: &str, topics: &str, preset: &str) -> String {
+        match version {
+            1 => {
+                let numbers = (0..32).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+                format!(r#"{{"id":"{id}","name":"Desk","public_key":[{numbers}],"topics":{topics},"preset":"{preset}","created_ms":1,"revoked":false}}"#)
+            }
+            _ => {
+                let key = hex::encode((0..32u8).collect::<Vec<_>>());
+                format!(r#"{{"id":"{id}","name":"Desk","public_key":"{key}","topics":{topics},"preset":"{preset}","created_ms":1}}"#)
+            }
+        }
+    }
+
+    #[test]
+    fn an_old_file_with_balance_payments_or_rounded_loads_narrowed_never_wider() {
+        for version in [1, 2] {
+            let (file, sealer) = (MemFile::default(), TagSealer);
+            let records = [
+                written_before(version, "mcp-01", r#"["balance","channels","payments","node"]"#, "rounded"),
+                written_before(version, "mcp-02", r#"["balance","payments"]"#, "counts"),
+                written_before(version, "mcp-03", r#"["inbox","prices"]"#, "counts"),
+            ];
+            let plain = format!(r#"{{"version":{version},"clients":[{}]}}"#, records.join(","));
+            *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, plain.as_bytes()).unwrap());
+            let loaded = load(&file, Some(&sealer)).unwrap();
+            let seen: Vec<(&str, &[Topic], Preset)> = loaded.iter().map(|client| (client.id.as_str(), client.topics.as_slice(), client.preset)).collect();
+            assert_eq!(seen, [
+                ("mcp-01", &[Topic::Channels, Topic::Node][..], Preset::Counts),
+                ("mcp-02", &[][..], Preset::Counts),
+                ("mcp-03", &[Topic::Inbox, Topic::Prices][..], Preset::Counts),
+            ], "version {version}");
+            assert!(loaded.iter().all(|client| client.topics.iter().all(|topic| mcp_topic_allowed(*topic))));
+            // Saved again, the narrowed records are what is on file.
+            save(&file, Some(&sealer), &loaded).unwrap();
+            let sealed = file.bytes.borrow().clone().unwrap();
+            let plain = String::from_utf8(sealer.open(CLIENTS_PURPOSE, &sealed).unwrap().to_vec()).unwrap();
+            for gone in ["balance", "payments", "rounded"] {
+                assert!(!plain.contains(gone), "version {version}: {gone} in {plain}");
+            }
+            // `exact` is still not trusted at all.
+            let plain = format!(r#"{{"version":{version},"clients":[{}]}}"#, written_before(version, "mcp-04", r#"["node"]"#, "exact"));
+            *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, plain.as_bytes()).unwrap());
+            assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable), "version {version}");
+        }
+    }
+
+    #[test]
+    fn balance_payments_and_rounded_are_never_saved() {
+        let (file, sealer) = (MemFile::default(), TagSealer);
+        for topic in [Topic::Balance, Topic::Payments] {
+            let mut wide = client("mcp-01", Preset::Counts);
+            wide.topics.push(topic);
+            assert_eq!(save(&file, Some(&sealer), &[wide]), Err(StoreError::TopicNotAllowed { id: "mcp-01".into() }));
+        }
+        assert_eq!(save(&file, Some(&sealer), &[client("mcp-01", Preset::Rounded)]), Err(StoreError::PresetTooWide { id: "mcp-01".into() }));
+        assert!(file.bytes.borrow().is_none(), "nothing written");
+        for topic in [Topic::Balance, Topic::Payments] {
+            assert!(!mcp_topic_allowed(topic));
+        }
+        for topic in [Topic::Node, Topic::Channels, Topic::Prices, Topic::Inbox] {
+            assert!(mcp_topic_allowed(topic));
+        }
     }
 
     #[test]

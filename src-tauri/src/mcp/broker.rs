@@ -17,7 +17,7 @@
 use serde_json::{json, Value};
 
 use super::server::{ReadFailed, Reads};
-use super::store::R2Preset;
+use super::store::{mcp_topic_allowed, R2Preset};
 use crate::ai::{narrow, Preset, Topic, TopicRead};
 
 /// What MCP clients get unless the owner chooses otherwise.
@@ -53,8 +53,13 @@ where
     F: Fn(Topic, Option<u64>) -> TopicRead,
 {
     fn read(&self, topic: Topic, since_ms: Option<u64>) -> Result<Value, ReadFailed> {
+        // Never read for an MCP client, whatever asked (owner GO, 26 Nov).
+        if !mcp_topic_allowed(topic) {
+            return Err(ReadFailed);
+        }
         match (self.read)(topic, since_ms) {
             TopicRead::Live { topic: got, outputs, freshness, .. } if got == topic => {
+                // Counts only: a channel list becomes its length, with no ids and no amounts.
                 let data: Vec<Value> = outputs
                     .iter()
                     .map(|output| serde_json::to_value(output).map(|value| narrow(&value, self.preset)))
@@ -93,7 +98,7 @@ mod tests {
 
     const TOKEN: &str = "mcp-broker-test-token";
     const ALL: [Topic; 6] = [Topic::Node, Topic::Channels, Topic::Prices, Topic::Balance, Topic::Payments, Topic::Inbox];
-    const TOOLS: [&str; 6] = ["read_node", "read_channels", "read_prices", "read_balance", "read_payments", "read_inbox_counts"];
+    const TOOLS: [&str; 4] = ["read_node", "read_channels", "read_prices", "read_inbox_counts"];
 
     struct Quiet;
     impl AuditSink for Quiet {
@@ -151,22 +156,70 @@ mod tests {
         assert!(audit.iter().all(|row| row.outcome == Outcome::Read));
     }
 
+    /// Every key anywhere in `value`.
+    fn keys(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Array(items) => items.iter().for_each(|item| keys(item, out)),
+            Value::Object(map) => map.iter().for_each(|(key, inner)| {
+                out.push(key.clone());
+                keys(inner, out);
+            }),
+            _ => {}
+        }
+    }
+
     #[test]
-    fn the_widest_a_client_gets_is_rounded_never_the_exact_amount() {
+    fn balance_and_payments_are_never_read_and_channels_are_counts_with_no_amount_or_id() {
         let server = TestServer::start(MockNode::canonical(), TOKEN);
         let base = server.api_base();
-        let reads = BrokerReads::with_preset(|topic, since| read_topic(paired(&["read"]), &base, Arc::new(Quiet), topic, since), R2Preset::Rounded);
+        let read_count = std::cell::Cell::new(0);
+        let reads = BrokerReads::new(|topic, since| {
+            read_count.set(read_count.get() + 1);
+            read_topic(paired(&["read"]), &base, Arc::new(Quiet), topic, since)
+        });
+        // Even a registry that lists every topic gets no balance or payments.
         let mut registry = Registry::default();
-        registry.add("desk", "Desk assistant", &[Topic::Balance]);
+        registry.add("desk", "Desk assistant", &ALL);
         let (mut sessions, mut audit) = (Sessions::default(), Vec::new());
-        let reply = ask(&mut sessions, &registry, &reads, &mut audit, "read_balance");
-        let data = data(&reply);
-        assert_eq!(data["shared"], "rounded");
-        assert!(!reply.to_string().contains(&balance_msat().to_string()), "the exact amount stays home");
-        // Message text is never part of any projection.
-        for canary in CANARIES {
-            assert!(!reply.to_string().contains(canary), "{canary}");
+        for tool in ["read_balance", "read_payments"] {
+            assert_eq!(ask(&mut sessions, &registry, &reads, &mut audit, tool)["error"]["message"], "unknown tool", "{tool}");
         }
+        assert_eq!(read_count.get(), 0, "the node was not asked");
+        for topic in [Topic::Balance, Topic::Payments] {
+            assert_eq!(reads.read(topic, None), Err(ReadFailed), "{topic:?}");
+        }
+        assert_eq!(read_count.get(), 0, "refused before any read");
+
+        // A channel read: the list is only its length; no amount and no id survives.
+        let reply = ask(&mut sessions, &registry, &reads, &mut audit, "read_channels");
+        let data = data(&reply);
+        assert_eq!(data["shared"], "counts");
+        let report = &data["data"][0]["report"]["value"];
+        assert!(report["channels"]["withheld_items"].as_u64().is_some(), "{report}");
+        let mut found = Vec::new();
+        keys(&data, &mut found);
+        for field in ["capacity", "local_balance", "remote_balance", "channel_id", "short_channel_id", "sats"] {
+            assert!(!found.iter().any(|key| key == field), "the channel read has a {field:?} field: {data}");
+        }
+        // Every figure left is a count.
+        let mut units = Vec::new();
+        fn unit_of(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::Array(items) => items.iter().for_each(|item| unit_of(item, out)),
+                Value::Object(map) => {
+                    if let Some(unit) = map.get("unit").and_then(Value::as_str) {
+                        out.push(unit.to_owned());
+                    }
+                    map.values().for_each(|inner| unit_of(inner, out));
+                }
+                _ => {}
+            }
+        }
+        unit_of(&data, &mut units);
+        assert!(!units.is_empty() && units.iter().all(|unit| unit == "count"), "{units:?}");
+        let text = reply.to_string();
+        assert!(!text.contains(r#""msat""#), "no amount in msat: {text}");
+        assert!(!text.contains(&balance_msat().to_string()), "the balance figure stays home");
     }
 
     #[test]
@@ -197,12 +250,12 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         let reads = BrokerReads::new(|topic, since| {
             seen.borrow_mut().push((topic, since));
-            if topic == Topic::Payments {
+            if topic == Topic::Prices {
                 TopicRead::Unavailable { topic, reason: NoRead::NodeUnreachable }
             } else {
-                // A live answer, but for the balance.
+                // A live answer, but for another topic.
                 TopicRead::Live {
-                    topic: Topic::Balance,
+                    topic: Topic::Inbox,
                     outputs: Vec::new(),
                     freshness: Freshness { state: "fresh", age_ms: Some(0), fresh_for_ms: Some(1), node_as_of: false, node_stale: false, clock_skew: false },
                     routes: Vec::new(),
@@ -210,8 +263,8 @@ mod tests {
             }
         });
         assert_eq!(reads.read(Topic::Node, None), Err(ReadFailed));
-        assert_eq!(reads.read(Topic::Payments, Some(1700)), Err(ReadFailed));
-        // The client's since_ms reaches the broker unchanged.
-        assert_eq!(*seen.borrow(), vec![(Topic::Node, None), (Topic::Payments, Some(1700))]);
+        assert_eq!(reads.read(Topic::Prices, Some(1700)), Err(ReadFailed));
+        // The broker is asked exactly what the session asked.
+        assert_eq!(*seen.borrow(), vec![(Topic::Node, None), (Topic::Prices, Some(1700))]);
     }
 }

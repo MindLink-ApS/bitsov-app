@@ -34,13 +34,13 @@ pub struct ToolSpec {
     pub description: &'static str,
 }
 
-/// The whole tool list. Read-only; nothing else exists.
-pub const TOOLS: [ToolSpec; 6] = [
+/// The whole tool list. Read-only; nothing else exists. No tool serves
+/// `balance` or `payments` ([`super::store::mcp_topic_allowed`]); a test
+/// checks it.
+pub const TOOLS: [ToolSpec; 4] = [
     ToolSpec { name: "read_node", topic: Topic::Node, description: "Health of the owner's node." },
-    ToolSpec { name: "read_channels", topic: Topic::Channels, description: "The node's Lightning channels." },
+    ToolSpec { name: "read_channels", topic: Topic::Channels, description: "How many Lightning channels the node has; counts only, no amounts or ids." },
     ToolSpec { name: "read_prices", topic: Topic::Prices, description: "The node's own message and call prices." },
-    ToolSpec { name: "read_balance", topic: Topic::Balance, description: "The node's balance." },
-    ToolSpec { name: "read_payments", topic: Topic::Payments, description: "Recent payments, optionally since a time." },
     ToolSpec { name: "read_inbox_counts", topic: Topic::Inbox, description: "Message counts only, never bodies." },
 ];
 
@@ -98,15 +98,10 @@ pub fn handle(frame: &[u8], allowed: &[Topic], reads: &dyn Reads) -> Option<Vec<
 
 fn listed(allowed: &[Topic]) -> Vec<Value> {
     TOOLS.iter().filter(|tool| allowed.contains(&tool.topic)).map(|tool| {
-        let properties = if tool.topic == Topic::Payments {
-            json!({ "since_ms": { "type": "integer", "minimum": 0 } })
-        } else {
-            json!({})
-        };
         json!({
             "name": tool.name,
             "description": tool.description,
-            "inputSchema": { "type": "object", "properties": properties, "additionalProperties": false },
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
         })
     }).collect()
 }
@@ -128,17 +123,11 @@ fn call(id: Value, params: Option<&Value>, allowed: &[Topic], reads: &dyn Reads)
         Some(Value::Object(arguments)) => arguments,
         Some(_) => return error(id, INVALID_PARAMS, "invalid arguments"),
     };
-    let mut since_ms = None;
-    for (key, value) in arguments {
-        match (tool.topic, key.as_str()) {
-            (Topic::Payments, "since_ms") => match value.as_u64() {
-                Some(ms) => since_ms = Some(ms),
-                None => return error(id, INVALID_PARAMS, "invalid arguments"),
-            },
-            _ => return error(id, INVALID_PARAMS, "invalid arguments"),
-        }
+    // No tool takes an argument (the only one, `since_ms`, was for payments).
+    if !arguments.is_empty() {
+        return error(id, INVALID_PARAMS, "invalid arguments");
     }
-    match reads.read(tool.topic, since_ms) {
+    match reads.read(tool.topic, None) {
         Ok(data) => {
             let wrapped = json!({ "trust": "untrusted_data", "topic": tool.topic, "data": data });
             result(id, json!({ "content": [{ "type": "text", "text": wrapped.to_string() }], "isError": false }))
@@ -193,8 +182,11 @@ mod tests {
     fn the_tool_list_is_read_only_and_filtered_per_client() {
         let all = ask(json!({"jsonrpc":"2.0","id":"a","method":"tools/list"}), &ALL, &Fake::new());
         let names: Vec<_> = all["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
-        assert_eq!(names, ["read_node", "read_channels", "read_prices", "read_balance", "read_payments", "read_inbox_counts"]);
+        assert_eq!(names, ["read_node", "read_channels", "read_prices", "read_inbox_counts"]);
         assert!(names.iter().all(|n| n.starts_with("read_")));
+        // No tool serves balance or payments, whatever the client was given.
+        assert!(TOOLS.iter().all(|tool| crate::mcp::store::mcp_topic_allowed(tool.topic)));
+        assert!(all["result"]["tools"].as_array().unwrap().iter().all(|t| t["inputSchema"]["properties"] == json!({})));
         let some = ask(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}), &[Topic::Node], &Fake::new());
         assert_eq!(some["result"]["tools"].as_array().unwrap().len(), 1);
         let none = ask(json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}), &[], &Fake::new());
@@ -204,34 +196,31 @@ mod tests {
     #[test]
     fn a_call_returns_the_projection_wrapped_as_untrusted_data() {
         let reads = Fake::new();
-        let reply = ask(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_balance"}}), &ALL, &reads);
+        let reply = ask(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_prices"}}), &ALL, &reads);
         assert_eq!(reply["result"]["isError"], false);
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
         let wrapped: Value = serde_json::from_str(text).unwrap();
         assert_eq!(wrapped["trust"], "untrusted_data");
-        assert_eq!(wrapped["topic"], "balance");
-        assert_eq!(*reads.seen.borrow(), vec![(Topic::Balance, None)]);
+        assert_eq!(wrapped["topic"], "prices");
+        assert_eq!(*reads.seen.borrow(), vec![(Topic::Prices, None)]);
     }
 
     #[test]
-    fn only_payments_takes_an_argument_and_only_a_whole_since_ms() {
+    fn no_tool_takes_an_argument() {
         let reads = Fake::new();
-        let ok = ask(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read_payments","arguments":{"since_ms":1700}}}), &ALL, &reads);
+        let ok = ask(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read_node","arguments":{}}}), &ALL, &reads);
         assert_eq!(ok["result"]["isError"], false);
-        assert_eq!(*reads.seen.borrow(), vec![(Topic::Payments, Some(1700))]);
-        for arguments in [json!({"since_ms":-1}), json!({"since_ms":"1"}), json!({"limit":5}), json!([1])] {
-            let reply = ask(json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"read_payments","arguments":arguments}}), &ALL, &reads);
+        for arguments in [json!({"since_ms":1}), json!({"since_ms":"1"}), json!({"limit":5}), json!([1])] {
+            let reply = ask(json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"read_node","arguments":arguments}}), &ALL, &reads);
             assert_eq!(code(&reply), INVALID_PARAMS, "{arguments}");
         }
-        let extra = ask(json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"read_node","arguments":{"since_ms":1}}}), &ALL, &reads);
-        assert_eq!(code(&extra), INVALID_PARAMS);
         assert_eq!(reads.seen.borrow().len(), 1, "a refused call reads nothing");
     }
 
     #[test]
     fn unknown_and_disallowed_tools_are_refused_alike_and_read_nothing() {
         let reads = Fake::new();
-        for (name, allowed) in [("pay", &ALL[..]), ("send_message", &ALL[..]), ("read_balance", &[Topic::Node][..]), ("READ_NODE", &ALL[..])] {
+        for (name, allowed) in [("pay", &ALL[..]), ("send_message", &ALL[..]), ("read_balance", &ALL[..]), ("read_payments", &ALL[..]), ("read_prices", &[Topic::Node][..]), ("READ_NODE", &ALL[..])] {
             let reply = ask(json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":name}}), allowed, &reads);
             assert_eq!(code(&reply), INVALID_PARAMS, "{name}");
             assert_eq!(reply["error"]["message"], "unknown tool", "{name}");

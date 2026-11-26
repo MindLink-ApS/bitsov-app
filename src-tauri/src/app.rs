@@ -13388,7 +13388,7 @@ mod mcp_command_tests {
     fn errors_are_short_codes() {
         use bitsov_app::mcp::runtime::code;
         for value in [code::MAIN_WINDOW_ONLY, code::UNAVAILABLE, code::BLOCKED, code::START_FAILED, code::UNKNOWN,
-            code::NO_TOPICS, code::PRESET_TOO_WIDE, code::NOT_SAVED, code::PAIRING_CLOSED] {
+            code::NO_TOPICS, code::PRESET_TOO_WIDE, code::NOT_SAVED, code::PAIRING_CLOSED, code::TOPIC_NOT_ALLOWED] {
             assert!(value.chars().all(|c| c.is_ascii_lowercase() || c == '_'), "{value}");
         }
     }
