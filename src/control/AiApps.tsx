@@ -1,8 +1,8 @@
 import { createEffect, createSignal, createUniqueId, For, onCleanup, onMount, Show } from 'solid-js';
 import { language, t, type CopyKey } from '../i18n';
 import {
-  auditOutcome, auditWhat, clock, errorCode, errorCopy, MCP_MAX_CLIENTS, MCP_TOOL_NAME, MCP_TOPICS, TOPIC_COPY,
-  type AiAppsApi, type McpAuditPage, type McpClient, type McpPending, type McpPreset, type McpStatus, type McpTopic,
+  auditOutcome, auditWhat, clock, errorCode, errorCopy, MCP_MAX_CLIENTS, MCP_TOOL_NAME, MCP_TOPICS, TOPIC_COPY, TOPIC_HINT,
+  type AiAppsApi, type McpAuditPage, type McpClient, type McpPending, type McpStatus, type McpTopic,
 } from './aiAppsApi';
 
 /** How often the screen reads the host while it is open and the switch is on. */
@@ -30,12 +30,11 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
   const [confirmReset, setConfirmReset] = createSignal(false);
   const [confirmRemove, setConfirmRemove] = createSignal<string | null>(null);
   const [topics, setTopics] = createSignal<McpTopic[]>([]);
-  const [preset, setPreset] = createSignal<McpPreset>('counts');
   // Countdowns run locally from the host's seconds and the time they were read.
   const [readAt, setReadAt] = createSignal(now());
   const [tick, setTick] = createSignal(now());
   let requestHeading: HTMLHeadingElement | undefined;
-  const ids = { title: createUniqueId(), switchHint: createUniqueId(), request: createUniqueId(), topics: createUniqueId(), preset: createUniqueId() };
+  const ids = { title: createUniqueId(), switchHint: createUniqueId(), request: createUniqueId(), topics: createUniqueId() };
 
   const say = (key: CopyKey, tone: Note['tone'] = 'err', ...values: (string | number)[]) => setNote({ key, tone, values });
   const fail = (error: unknown, override?: Partial<Record<string, CopyKey>>) => {
@@ -52,7 +51,7 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
       setTick(now());
       const usable = next.platform === 'ok' && next.store !== 'blocked';
       const request = next.enabled && next.waiting > 0 ? (await props.api.pending())[0] ?? null : null;
-      if (request && request.id !== pending()?.id) { setTopics([]); setPreset('counts'); queueMicrotask(() => requestHeading?.focus()); }
+      if (request && request.id !== pending()?.id) { setTopics([]); queueMicrotask(() => requestHeading?.focus()); }
       setPending(request);
       setClients(usable ? await props.api.clients() : []);
       if (auditOpen()) await loadAudit();
@@ -207,17 +206,11 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
         <For each={MCP_TOPICS}>{topic => <label>
           <input type="checkbox" data-ai-topic={topic} checked={topics().includes(topic)} disabled={busy()}
             onChange={e => toggleTopic(topic, e.currentTarget.checked)} /> {t(TOPIC_COPY[topic])}
+          <Show when={TOPIC_HINT[topic]}>{hint => <span class="hint" data-ai-topic-hint={topic}> {t(hint())}</span>}</Show>
         </label>}</For>
         <Show when={topics().length === 0}><p class="hint" id={ids.topics} data-ai-pick-one>{t('mcpPickOne')}</p></Show>
       </fieldset>
-      <fieldset class="ai-apps-choices" data-ai-presets>
-        <legend>{t('mcpDetailLabel')}</legend>
-        <label><input type="radio" name={ids.preset} data-ai-preset="counts" checked={preset() === 'counts'} disabled={busy()}
-          onChange={() => setPreset('counts')} /> {t('mcpPresetCounts')}<span class="hint"> {t('mcpPresetCountsHint')}</span></label>
-        <label><input type="radio" name={ids.preset} data-ai-preset="rounded" checked={preset() === 'rounded'} disabled={busy()}
-          onChange={() => setPreset('rounded')} /> {t('mcpPresetRounded')}<span class="hint"> {t('mcpPresetRoundedHint')}</span></label>
-        <p class="hint" data-ai-no-exact>{t('mcpNoExact')}</p>
-      </fieldset>
+      <p class="hint" data-ai-counts-only>{t('mcpCountsOnly')}</p>
       <div role="note" class="ai-apps-warning" data-ai-warning>
         <p>{t('mcpHonest')}</p>
         <details class="quiet-detail" data-ai-warning-more>
@@ -227,7 +220,7 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
       </div>
       <div class="row ai-apps-actions">
         <button type="button" class="primary" data-ai-approve disabled={busy() || topics().length === 0}
-          onClick={() => void act(() => props.api.approve(request().id, topics(), preset()), () => say('mcpApproved', 'ok'))}>{t('mcpApprove')}</button>
+          onClick={() => void act(() => props.api.approve(request().id, topics(), 'counts'), () => say('mcpApproved', 'ok'))}>{t('mcpApprove')}</button>
         <button type="button" class="soft" data-ai-deny disabled={busy()}
           onClick={() => void act(() => props.api.deny(request().id), () => say('mcpDenied', 'ok'))}>{t('mcpDeny')}</button>
       </div>
@@ -241,7 +234,7 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
           <For each={clients()}>{client => <li data-ai-client={client.id}>
             <strong>{client.name}</strong>
             <p class="hint">{client.topics.map(topic => t(TOPIC_COPY[topic])).join(', ')}</p>
-            <p class="hint">{t(client.preset === 'rounded' ? 'mcpPresetRounded' : 'mcpPresetCounts')} · {t('mcpAdded', date(client.created_ms))}</p>
+            <p class="hint">{t('mcpAdded', date(client.created_ms))}</p>
             <Show when={confirmRemove() === client.id} fallback={
               <button type="button" class="soft" data-ai-remove={client.id} disabled={busy()} onClick={() => setConfirmRemove(client.id)}>{t('mcpRemove')}</button>
             }>

@@ -3,10 +3,16 @@ import { listen } from '@tauri-apps/api/event';
 import type { CopyKey } from '../i18n';
 import { isMobilePlatform } from '../platform';
 
-/** What an AI app may read (the host's `ai::Topic`, snake_case). */
-export type McpTopic = 'node' | 'prices' | 'balance' | 'channels' | 'payments' | 'inbox';
-/** The host's R2 preset: there is no `exact` on this side either. */
-export type McpPreset = 'counts' | 'rounded';
+/** What this screen lets an AI app read: no balance or payments. */
+export type McpTopic = 'node' | 'prices' | 'channels' | 'inbox';
+/**
+ * Every topic the host knows (`ai::Topic`, snake_case). Balance and payments
+ * are never offered here; they keep a label so that an app that tries one
+ * shows plainly in the activity list.
+ */
+export type McpHostTopic = McpTopic | 'balance' | 'payments';
+/** Counts only: this screen offers no other preset. */
+export type McpPreset = 'counts';
 
 export type McpStatus = {
   platform: 'ok' | 'no_sealer';
@@ -19,7 +25,7 @@ export type McpStatus = {
   unsaved_revoke: boolean;
 };
 export type McpPending = { id: string; name: string; words: string[]; expires_in_s: number; others_refused: number };
-export type McpClient = { id: string; name: string; topics: McpTopic[]; preset: McpPreset; created_ms: number };
+export type McpClient = { id: string; name: string; topics: McpHostTopic[]; preset: string; created_ms: number };
 export type McpAuditRow = { at_ms: number; client: string | null; tool: string; outcome: string };
 export type McpAuditPage = { rows: McpAuditRow[]; unreadable: number };
 
@@ -46,10 +52,13 @@ export interface AiAppsApi {
 export const MCP_MAX_CLIENTS = 6;
 /** The bundled tool an AI app starts (named, never run, by this app). */
 export const MCP_TOOL_NAME = 'bitsov-mcp';
-/** Topics in the order shown: the least sensitive first. */
-export const MCP_TOPICS: readonly McpTopic[] = ['node', 'prices', 'balance', 'channels', 'payments', 'inbox'];
+/** The topics offered, in the order shown. */
+export const MCP_TOPICS: readonly McpTopic[] = ['node', 'prices', 'channels', 'inbox'];
 
-export const TOPIC_COPY: Record<McpTopic, CopyKey> = {
+/** A line under a topic's box, where the label alone could mislead. */
+export const TOPIC_HINT: Partial<Record<McpTopic, CopyKey>> = { channels: 'mcpTopicChannelsHint' };
+
+export const TOPIC_COPY: Record<McpHostTopic, CopyKey> = {
   node: 'mcpTopicNode', prices: 'mcpTopicPrices', balance: 'mcpTopicBalance',
   channels: 'mcpTopicChannels', payments: 'mcpTopicPayments', inbox: 'mcpTopicInbox',
 };
@@ -62,7 +71,7 @@ const ERROR_COPY: Record<string, CopyKey> = {
   start_failed: 'mcpStartFailed',
   unknown: 'mcpRequestGone',
   no_topics: 'mcpPickOne',
-  preset_too_wide: 'mcpNoExact',
+  preset_too_wide: 'mcpCountsOnly',
   not_saved: 'mcpApproveNotSaved',
   too_many_clients: 'mcpTooMany',
   removal_not_saved: 'mcpRevokeNotSaved',
@@ -79,7 +88,7 @@ export function errorCopy(code: string): CopyKey {
   return Object.prototype.hasOwnProperty.call(ERROR_COPY, code) ? ERROR_COPY[code] : 'mcpGenericError';
 }
 
-const TOOL_TOPIC: Record<string, McpTopic> = {
+const TOOL_TOPIC: Record<string, McpHostTopic> = {
   read_node: 'node', read_prices: 'prices', read_balance: 'balance',
   read_channels: 'channels', read_payments: 'payments', read_inbox_counts: 'inbox',
 };

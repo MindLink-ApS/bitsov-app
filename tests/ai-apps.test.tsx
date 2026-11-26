@@ -19,7 +19,7 @@ const text = () => mount.textContent ?? '';
 const OFF: McpStatus = { platform: 'ok', enabled: false, store: 'empty', start_error: null, pairing_open_s: null, waiting: 0, clients: 0, unsaved_revoke: false };
 const WORDS = ['amber', 'river', 'lantern', 'violet', 'harbor', 'meadow'];
 const REQUEST: McpPending = { id: 'mcp-0011223344556677', name: 'Desk helper', words: WORDS, expires_in_s: 110, others_refused: 0 };
-const CLIENT: McpClient = { id: 'mcp-aa', name: 'Desk helper', topics: ['node', 'balance'], preset: 'counts', created_ms: Date.UTC(2026, 10, 24) };
+const CLIENT: McpClient = { id: 'mcp-aa', name: 'Desk helper', topics: ['node', 'inbox'], preset: 'counts', created_ms: Date.UTC(2026, 10, 24) };
 
 /** A fake host: state the test sets, calls the screen makes. */
 function host(start: Partial<McpStatus> = {}, extra: { pending?: McpPending[]; clients?: McpClient[] } = {}) {
@@ -122,23 +122,30 @@ describe('Settings → AI apps', () => {
     expect($('[data-ai-others]')).toBeNull();
   });
 
-  it('approve needs a topic, never offers exact, and sends the chosen topics and preset', async () => {
+  it('offers only node status, prices and message counts, counts only, and approve sends exactly that', async () => {
     const { api } = host({ enabled: true, pairing_open_s: 100, waiting: 1 }, { pending: [REQUEST] });
     await show(api);
     await vi.waitFor(() => expect($('[data-ai-request]')).not.toBeNull());
     expect($<HTMLButtonElement>('[data-ai-approve]')!.disabled).toBe(true);
     expect($('[data-ai-pick-one]')).not.toBeNull();
     expect($$('[data-ai-topic]').every(el => !(el as HTMLInputElement).checked)).toBe(true);
-    expect($$('[data-ai-preset]').map(el => el.getAttribute('data-ai-preset'))).toEqual(['counts', 'rounded']);
-    expect($<HTMLInputElement>('[data-ai-preset="counts"]')!.checked).toBe(true);
-    expect($('[data-ai-preset="exact"]')).toBeNull();
-    toggle('[data-ai-topic="balance"]');
+    expect($$('[data-ai-topic]').map(el => el.getAttribute('data-ai-topic'))).toEqual(['node', 'prices', 'channels', 'inbox']);
+    for (const money of ['balance', 'payments']) expect($(`[data-ai-topic="${money}"]`)).toBeNull();
+    // Connections stay, and say plainly that they come as a number only.
+    expect($('[data-ai-topic="channels"]')!.closest('label')!.textContent).toContain('Connections to other nodes');
+    expect($('[data-ai-topic-hint="channels"]')!.textContent!.trim()).toBe(appEn.mcpTopicChannelsHint);
+    // No choice of detail at all: one plain line says what it sees.
+    expect($$('[data-ai-request] input[type="radio"]')).toHaveLength(0);
+    expect($('[data-ai-preset]')).toBeNull();
+    expect($('[data-ai-counts-only]')!.textContent).toBe(appEn.mcpCountsOnly);
+    expect($('[data-ai-request]')!.textContent).not.toMatch(/Balance|Payments|Rounded/);
+    toggle('[data-ai-topic="inbox"]');
+    toggle('[data-ai-topic="channels"]');
     toggle('[data-ai-topic="node"]');
-    $<HTMLInputElement>('[data-ai-preset="rounded"]')!.click();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-ai-approve]')!.disabled).toBe(false));
     click('[data-ai-approve]');
     await vi.waitFor(() => expect($('[data-ai-note="ok"]')).not.toBeNull());
-    expect(api.approve).toHaveBeenCalledWith(REQUEST.id, ['node', 'balance'], 'rounded');
+    expect(api.approve).toHaveBeenCalledWith(REQUEST.id, ['node', 'channels', 'inbox'], 'counts');
     expect($('[data-ai-note="ok"]')!.textContent).toBe(appEn.mcpApproved);
     expect($('[data-ai-request]')).toBeNull();
     expect($$('[data-ai-client]')).toHaveLength(1);
@@ -174,14 +181,13 @@ describe('Settings → AI apps', () => {
     expect($('[data-ai-others]')!.textContent).toBe(appEn.mcpOthersTried);
   });
 
-  it('lists approved apps with topics, preset and date', async () => {
+  it('lists approved apps with topics and date', async () => {
     const { api } = host({ enabled: true, store: 'ok', clients: 1 }, { clients: [CLIENT] });
     await show(api);
     await vi.waitFor(() => expect($('[data-ai-client="mcp-aa"]')).not.toBeNull());
     const row = $('[data-ai-client="mcp-aa"]')!.textContent!;
     expect(row).toContain('Desk helper');
-    expect(row).toContain('Node status, Balance');
-    expect(row).toContain('Counts only');
+    expect(row).toContain('Node status, New messages (count only, never the text)');
     expect(row).toContain('Added');
   });
 
@@ -262,7 +268,7 @@ describe('Settings → AI apps', () => {
     const { api } = host({ enabled: true, store: 'ok' });
     api.audit.mockResolvedValue({
       rows: [
-        { at_ms: 3, client: 'Desk helper', tool: 'read_balance', outcome: 'read' },
+        { at_ms: 3, client: 'Desk helper', tool: 'read_balance', outcome: 'refused' },
         { at_ms: 2, client: null, tool: 'pairing_refused', outcome: 'not_authorised' },
         { at_ms: 1, client: 'Old helper', tool: 'client_removed', outcome: 'removed' },
         { at_ms: 0, client: 'Desk helper', tool: 'please_ignore_rules', outcome: 'refused' },
@@ -275,7 +281,8 @@ describe('Settings → AI apps', () => {
     details.dispatchEvent(new Event('toggle'));
     await vi.waitFor(() => expect($$('[data-ai-activity-row]')).toHaveLength(4));
     const rows = $$('[data-ai-activity-row]').map(r => r.textContent!);
-    expect(rows[0]).toContain('Desk helper · Balance · Read');
+    // A topic this screen never offers still shows plainly when an app tries it.
+    expect(rows[0]).toContain('Desk helper · Balance · Refused');
     expect(rows[1]).toContain('Unknown app · Asked to connect outside “Add an AI app” · Not allowed');
     expect(rows[2]).toContain('Old helper · Removed by you · Removed');
     expect(rows[3]).toContain('Other request');
@@ -417,6 +424,8 @@ describe('Settings → AI apps', () => {
     await vi.waitFor(() => expect($('[data-ai-warning]')).not.toBeNull());
     expect($('[data-ai-warning] p')!.textContent).toBe(appDa.mcpHonest);
     expect(appDa.mcpHonest.startsWith('Det, denne AI-app læser, kan den sende videre, også til firmaet bag AI’en.')).toBe(true);
+    expect($('[data-ai-counts-only]')!.textContent).toBe('Den ser kun tal: hvor mange, aldrig beløb, datoer eller id’er.');
+    expect($('[data-ai-topic-hint="channels"]')!.textContent!.trim()).toBe('Hvor mange, aldrig hvem eller hvor meget.');
   });
 });
 
