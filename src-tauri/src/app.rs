@@ -8766,6 +8766,13 @@ mod pause_points {
         (arrived, release)
     }
 
+    /// Remove the gate armed with `release` if no request reached it. Tests only.
+    #[cfg_attr(any(not(test), feature = "mobile"), allow(dead_code))]
+    pub fn disarm(api_base: &str, point: &'static str, release: &Arc<Notify>) {
+        let mut gates = GATES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        gates.retain(|g| !(g.api_base == api_base && g.point == point && Arc::ptr_eq(&g.release, release)));
+    }
+
     pub async fn at(api_base: &str, point: &'static str) {
         let gate = {
             let mut gates = GATES.lock().unwrap();
@@ -18935,6 +18942,23 @@ mod control_act_tests {
         compose_kinds(node).iter().filter(|k| **k == u64::from(act::KIND_CALL_BLOCK)).count()
     }
 
+    /// Releases the request paused at a pause point when dropped, and drops
+    /// the gate if no request reached it. Made inside a thread scope, it is
+    /// dropped as a failing test unwinds, before the scope joins the paused
+    /// thread, so the test fails instead of hanging on that join.
+    struct ReleaseOnDrop { api_base: String, point: &'static str, release: Arc<tokio::sync::Notify> }
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            pause_points::disarm(&self.api_base, self.point, &self.release);
+            self.release.notify_one();
+        }
+    }
+
+    fn release_on_drop(api_base: &str, point: &'static str, release: &Arc<tokio::sync::Notify>) -> ReleaseOnDrop {
+        ReleaseOnDrop { api_base: api_base.into(), point, release: release.clone() }
+    }
+
     fn race_runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap()
     }
@@ -23264,6 +23288,8 @@ fn end_does_not_dispatch_after_switch_during_token_acquisition() {
     let offer = offer_op(&node);
     let (read, go_on) = pause_points::arm(&node.state.api_base, "end_wait_read");
     let end = std::thread::scope(|s| {
+        // A failure below releases End, so the scope's join cannot hang on it.
+        let _release = release_on_drop(&node.state.api_base, "end_wait_read", &go_on);
         let end = s.spawn(|| rt.block_on(do_op_end_call_when_node_ends(&node.state, CALL_ID, None)));
         rt.block_on(async {
             tokio::time::timeout(Duration::from_secs(2), read.notified()).await.expect("End's first read completed");
@@ -23357,6 +23383,8 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
         let (holding, released) = (AtomicBool::new(false), AtomicBool::new(false));
         std::thread::scope(|s| {
+            // A failure below releases End, so the scope's join cannot hang on it.
+            let _release = release_on_drop(&node.state.api_base, "end_wait_read", &go_on);
             let end = s.spawn(|| rt.block_on(do_op_end_call_when_node_ends(&node.state, CALL_ID, None)));
             rt.block_on(async {
                 tokio::time::timeout(Duration::from_secs(2), read.notified()).await.expect("End's first read completed");
@@ -23369,13 +23397,50 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
                 std::thread::sleep(Duration::from_millis(500));
                 released.store(true, Ordering::SeqCst);
             });
-            while !holding.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+            let limit = Instant::now() + Duration::from_secs(5);
+            while !holding.load(Ordering::SeqCst) {
+                assert!(Instant::now() < limit, "the credential was never taken");
+                std::thread::sleep(Duration::from_millis(1));
+            }
             go_on.notify_one();
             let error = end.join().unwrap().unwrap_err();
             assert_eq!(error.code, "not_dispatched");
             assert!(!released.load(Ordering::SeqCst), "a read began at the deadline and waited for the credential");
             assert_eq!(reads(&node), before, "a read reached the node at the deadline");
         });
+    }
+
+    /// A test that fails while a request is paused at a pause point fails
+    /// instead of hanging: the guard releases the request as the test unwinds,
+    /// before the thread scope joins the paused thread.
+    #[test]
+    fn a_request_paused_by_a_failing_test_is_released() {
+        let rt = race_runtime();
+        let base = "http://127.0.0.1:1/pause-guard-release";
+        let (arrived, release) = pause_points::arm(base, "end_wait_read");
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| std::thread::scope(|s| {
+                let _release = release_on_drop(base, "end_wait_read", &release);
+                s.spawn(|| rt.block_on(pause_points::at(base, "end_wait_read")));
+                rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), arrived.notified()).await.expect("paused") });
+                panic!("the test fails while the request is paused");
+            })));
+            let _ = done.send(outcome.is_err());
+        });
+        assert_eq!(finished.recv_timeout(Duration::from_secs(10)), Ok(true), "the failing test returned instead of hanging");
+    }
+
+    /// A gate no request reached is dropped with the guard, so a later request
+    /// to the same address and point is not paused by it.
+    #[test]
+    fn an_unused_gate_goes_with_its_guard() {
+        let rt = race_runtime();
+        let base = "http://127.0.0.1:1/pause-guard-unused";
+        let (_arrived, release) = pause_points::arm(base, "end_wait_read");
+        drop(release_on_drop(base, "end_wait_read", &release));
+        let passed = rt.block_on(async { tokio::time::timeout(Duration::from_secs(2), pause_points::at(base, "end_wait_read")).await });
+        assert!(passed.is_ok(), "a later request was paused by a gate left behind");
     }
 
     /// Another node made active while End waits is never asked about this call.
