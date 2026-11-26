@@ -4252,9 +4252,7 @@ mod tests {
         let key = Arc::new(ClientKey::load_or_create(store.path()).unwrap());
         let auth: Arc<str> = Arc::from("b".repeat(64));
         let retry = Arc::new(RemoteRetry::default());
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_base = format!("http://127.0.0.1:{}/api/v1", probe.local_addr().unwrap().port());
-        drop(probe);
+        let local_base = super::test_ports::proxy_api_base();
         persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
         let proxy = start_proxy(&local_base, app_dir.path(), descriptor,
             key, "polling test", store.path().to_path_buf(), auth.clone(), retry.clone()).await.unwrap();
@@ -4339,9 +4337,7 @@ mod tests {
             .unwrap()
             .contains("\"code\""));
 
-        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let dead_base = format!("http://{}/{}", dead.local_addr().unwrap(), "api/v1");
-        drop(dead);
+        let dead_base = format!("http://{}/api/v1", super::test_ports::DEAD_ENDPOINT);
         let client = pairing::PairingClient::new(reqwest::Client::new(), dead_base);
         let error = pairing::establish_remote(&client, &key, pairing_store.path())
             .await
@@ -4453,10 +4449,7 @@ mod tests {
         persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
         let pairing_store = tempfile::tempdir().unwrap();
         let key = Arc::new(ClientKey::load_or_create(pairing_store.path()).unwrap());
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = probe.local_addr().unwrap();
-        drop(probe);
-        let proxy = start_proxy(&format!("http://{local_addr}/{}", "api/v1"), app_dir.path(), descriptor, key,
+        let proxy = start_proxy(&super::test_ports::proxy_api_base(), app_dir.path(), descriptor, key,
             "BitSov test", pairing_store.path().to_path_buf(), local_auth.clone(), retry).await.unwrap();
         (proxy, app_dir, pairing_store)
     }
@@ -5485,4 +5478,41 @@ pub(crate) fn load_linux_candidate(path: &Path, sealer: Option<&dyn Sealer>) -> 
     let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
     load_with(path, Some(&sealer))
+}
+
+/// Loopback addresses for tests that no other socket in a parallel test run
+/// can take or answer on.
+#[cfg(test)]
+pub(crate) mod test_ports {
+    /// An API base whose port the remote proxy binds later in the test.
+    ///
+    /// Not a port probed with `bind("127.0.0.1:0")`: that port is free again
+    /// once the probe closes, and any socket the parallel test run opens
+    /// meanwhile (a listener on port 0, or an outgoing connection, which takes
+    /// its local port from the same ephemeral range) can take it before the
+    /// proxy binds it, and the proxy then fails with "Address already in use".
+    /// These ports come from a band below every OS's ephemeral range (Linux
+    /// starts at 32768, macOS and Windows at 49152), which nothing in the test
+    /// run picks on its own, and each call gets its own.
+    pub(crate) fn proxy_api_base() -> String {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        const FIRST: u16 = 20_000;
+        const SPAN: u16 = 12_000;
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        // A start per process, so two test processes at once seldom meet.
+        let offset = u16::try_from(std::process::id() % u32::from(SPAN)).unwrap_or(0);
+        for _ in 0..SPAN {
+            let port = FIRST + offset.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed)) % SPAN;
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return format!("http://127.0.0.1:{port}/api/v1");
+            }
+        }
+        panic!("no free loopback port below the ephemeral range");
+    }
+
+    /// An endpoint where nothing listens: port 1. A port probed with
+    /// `bind("127.0.0.1:0")` and closed is not that, since another test's
+    /// listener on port 0 can land on it and answer. No test binds port 1, and
+    /// nothing picks it on its own.
+    pub(crate) const DEAD_ENDPOINT: &str = "127.0.0.1:1";
 }
