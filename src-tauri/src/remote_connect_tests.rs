@@ -80,30 +80,10 @@ fn app() -> tauri::App<tauri::test::MockRuntime> {
     app_with_pins(Arc::new(NoSavedBoxPins))
 }
 
-/// An API base whose port the remote proxy binds later in the test.
-///
-/// Not a port probed with `bind("127.0.0.1:0")`: that port is free again once
-/// the probe closes, and any socket the parallel test run opens meanwhile (a
-/// listener on port 0, or an outgoing connection, which takes its local port
-/// from the same ephemeral range) can take it before the proxy binds it, and
-/// the proxy then fails with "Address already in use". These ports come from
-/// a band below every OS's ephemeral range (Linux starts at 32768, macOS and
-/// Windows at 49152), which nothing in the test run picks on its own, and
-/// each call gets its own.
+/// An API base whose port the remote proxy binds later in the test (see
+/// `remote_access::test_ports::proxy_api_base`).
 pub(super) fn proxy_api_base() -> String {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    const FIRST: u16 = 20_000;
-    const SPAN: u16 = 12_000;
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    // A start per process, so two test processes at once seldom meet.
-    let offset = u16::try_from(std::process::id() % u32::from(SPAN)).unwrap_or(0);
-    for _ in 0..SPAN {
-        let port = FIRST + offset.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed)) % SPAN;
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return format!("http://127.0.0.1:{port}/api/v1");
-        }
-    }
-    panic!("no free loopback port below the ephemeral range");
+    bitsov_app::remote_access::test_ports::proxy_api_base()
 }
 
 fn app_with_pins(pins: Arc<dyn bitsov_app::home_node::BoxPinStore>) -> tauri::App<tauri::test::MockRuntime> {
