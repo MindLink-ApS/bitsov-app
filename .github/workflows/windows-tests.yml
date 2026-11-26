@@ -50,6 +50,7 @@ jobs:
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/bin
           : > "src-tauri/bin/konsensus-${TRIPLE}.exe"
+          : > "src-tauri/bin/bitsov-mcp-${TRIPLE}.exe"
       # Hosted runners are elevated, and the private-file layer refuses an
       # elevated process (its store tests then return early and prove nothing).
       # Build the test executables here, then run the private-file layer and

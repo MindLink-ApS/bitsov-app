@@ -103,6 +103,8 @@ case "$TARGET_DIR" in
   *) CARGO_OUTPUT="$ROOT/$TARGET_DIR" ;;
 esac
 SIDECAR="src-tauri/bin/konsensus-$TRIPLE"
+# The MCP shim (crate bitsov-mcp), built from this checkout for the same target.
+SHIM="src-tauri/bin/bitsov-mcp-$TRIPLE"
 APP="$BUNDLE_DIR/macos/BitSov.app"
 if [ "$BETA" = 1 ]; then
   APP="$BUNDLE_DIR/macos/BitSov Beta.app"
@@ -155,6 +157,19 @@ else
   bash scripts/fetch-node-sidecar.sh --verify-only
 fi
 
+echo "== 1b. MCP shim =="
+if [ "$REMOTE_ONLY" = 1 ]; then
+  echo "→ remote-only profile: no MCP shim"
+else
+  # Never bundle a stale or foreign shim: build it from this checkout every time.
+  rm -f src-tauri/bin/bitsov-mcp-*
+  CARGO_TARGET_DIR="$CARGO_OUTPUT" cargo build --locked --release \
+    --manifest-path src-tauri/Cargo.toml -p bitsov-mcp --target "$TRIPLE"
+  cp "$CARGO_OUTPUT/$TRIPLE/release/bitsov-mcp" "$SHIM"
+  chmod 0755 "$SHIM"
+  test -x "$SHIM"
+fi
+
 echo "== 2. app bundle build =="
 npm ci --ignore-scripts --no-audit --no-fund
 # Never inspect or upload stale artifacts. Build only the app: Tauri's DMG
@@ -187,6 +202,8 @@ echo "== 3. static checks =="
 CHECK_ARGS=(--arch "$ARCH" --app "$APP" --sidecar "$SIDECAR" --dist dist)
 if [ "$REMOTE_ONLY" = 1 ]; then
   CHECK_ARGS+=(--remote-only)
+else
+  CHECK_ARGS+=(--shim "$SHIM")
 fi
 bash scripts/check-mac-bundle.sh "${CHECK_ARGS[@]}"
 

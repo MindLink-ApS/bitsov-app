@@ -4,12 +4,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/../src-tauri"
 
-# tauri-build needs the sidecar file to exist; an empty placeholder, as in CI.
+# tauri-build needs both bundled binaries to exist; empty placeholders, as in CI.
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-PLACEHOLDER="bin/konsensus-${TRIPLE}"
-created=""
-if [ ! -e "$PLACEHOLDER" ]; then : > "$PLACEHOLDER"; created=1; fi
-cleanup() { if [ -n "$created" ]; then rm -f "$PLACEHOLDER"; fi; }
+created=()
+for PLACEHOLDER in "bin/konsensus-${TRIPLE}" "bin/bitsov-mcp-${TRIPLE}"; do
+  if [ ! -e "$PLACEHOLDER" ]; then : > "$PLACEHOLDER"; created+=("$PLACEHOLDER"); fi
+done
+cleanup() { if [ "${#created[@]}" -gt 0 ]; then rm -f "${created[@]}"; fi; }
 trap cleanup EXIT
 
 log="$(mktemp)"
