@@ -114,7 +114,8 @@ describe('Settings → AI apps', () => {
     const warning = $('[data-ai-warning]')!;
     expect(warning.getAttribute('role')).toBe('note');
     expect(warning.querySelector('p')!.textContent).toBe(appEn.mcpHonest);
-    expect(appEn.mcpHonest.startsWith('What this AI app reads, it can send on, including to the company behind the AI.')).toBe(true);
+    expect(appEn.mcpHonest.startsWith('What this AI app reads can leave this computer, including to the company behind the AI.')).toBe(true);
+    expect(appEn.mcpHonest).toContain('never your balance or payments');
     // The ADR sentence stays, word for word, under More detail.
     expect($('[data-ai-warning-more]')!.textContent).toContain(appEn.mcpHonestAdr);
     expect(($('[data-ai-warning-more]') as HTMLDetailsElement).open).toBe(false);
@@ -149,6 +150,19 @@ describe('Settings → AI apps', () => {
     expect($('[data-ai-note="ok"]')!.textContent).toBe(appEn.mcpApproved);
     expect($('[data-ai-request]')).toBeNull();
     expect($$('[data-ai-client]')).toHaveLength(1);
+  });
+
+  it('a topic the host refuses is said plainly, and nothing is approved', async () => {
+    const { api } = host({ enabled: true, pairing_open_s: 100, waiting: 1 }, { pending: [REQUEST] });
+    api.approve.mockRejectedValueOnce('topic_not_allowed');
+    await show(api);
+    await vi.waitFor(() => expect($('[data-ai-request]')).not.toBeNull());
+    toggle('[data-ai-topic="node"]');
+    click('[data-ai-approve]');
+    await vi.waitFor(() => expect($('[data-ai-note="err"]')).not.toBeNull());
+    expect($('[data-ai-note="err"]')!.textContent).toBe(appEn.mcpTopicNotAllowed);
+    expect($('[data-ai-request]')).not.toBeNull();
+    expect($$('[data-ai-client]')).toHaveLength(0);
   });
 
   it('approve that could not be saved says so, and the request stays', async () => {
@@ -423,7 +437,8 @@ describe('Settings → AI apps', () => {
     await show(api);
     await vi.waitFor(() => expect($('[data-ai-warning]')).not.toBeNull());
     expect($('[data-ai-warning] p')!.textContent).toBe(appDa.mcpHonest);
-    expect(appDa.mcpHonest.startsWith('Det, denne AI-app læser, kan den sende videre, også til firmaet bag AI’en.')).toBe(true);
+    expect(appDa.mcpHonest.startsWith('Det, denne AI-app læser, kan forlade denne computer, også til firmaet bag AI’en.')).toBe(true);
+    expect(appDa.mcpHonest).toContain('aldrig din saldo eller dine betalinger');
     expect($('[data-ai-counts-only]')!.textContent).toBe('Den ser kun tal: hvor mange, aldrig beløb, datoer eller id’er.');
     expect($('[data-ai-topic-hint="channels"]')!.textContent!.trim()).toBe('Hvor mange, aldrig hvem eller hvor meget.');
   });

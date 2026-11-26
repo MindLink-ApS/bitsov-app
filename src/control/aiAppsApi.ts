@@ -76,6 +76,7 @@ const ERROR_COPY: Record<string, CopyKey> = {
   too_many_clients: 'mcpTooMany',
   removal_not_saved: 'mcpRevokeNotSaved',
   pairing_closed: 'mcpRequestGone',
+  topic_not_allowed: 'mcpTopicNotAllowed',
   recovered: 'mcpRecovered',
 };
 export const MCP_ERROR_CODES = Object.keys(ERROR_COPY);
