@@ -14235,7 +14235,7 @@ mod pairing_wiring_tests {
         let token = f.state.token.lock().unwrap().clone();
         let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
         // An unreachable endpoint is a transient transport failure, not revocation.
-        let base = format!("http://{}/api/v1", bitsov_app::remote_access::test_ports::DEAD_ENDPOINT);
+        let base = bitsov_app::remote_access::test_ports::DEAD_API_BASE.to_string();
         *f.state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
             client: PairingClient::new(f.state.http.clone(), base),
             key: ctx.key.clone(), store: ctx.store.clone(), data_dir: ctx.data_dir.clone(),

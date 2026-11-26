@@ -4337,7 +4337,7 @@ mod tests {
             .unwrap()
             .contains("\"code\""));
 
-        let dead_base = format!("http://{}/api/v1", super::test_ports::DEAD_ENDPOINT);
+        let dead_base = super::test_ports::DEAD_API_BASE.to_string();
         let client = pairing::PairingClient::new(reqwest::Client::new(), dead_base);
         let error = pairing::establish_remote(&client, &key, pairing_store.path())
             .await
@@ -5510,9 +5510,9 @@ pub(crate) mod test_ports {
         panic!("no free loopback port below the ephemeral range");
     }
 
-    /// An endpoint where nothing listens: port 1. A port probed with
+    /// An API base where nothing listens: port 1. A port probed with
     /// `bind("127.0.0.1:0")` and closed is not that, since another test's
     /// listener on port 0 can land on it and answer. No test binds port 1, and
     /// nothing picks it on its own.
-    pub(crate) const DEAD_ENDPOINT: &str = "127.0.0.1:1";
+    pub(crate) const DEAD_API_BASE: &str = "http://127.0.0.1:1/api/v1";
 }

@@ -2232,7 +2232,7 @@ mod tests {
         }
 
         // Nothing listening: the error names no URL, so the token cannot leak into it.
-        let url = ws_url(&format!("http://{}/api/v1", crate::remote_access::test_ports::DEAD_ENDPOINT), "SECRET").unwrap();
+        let url = ws_url(crate::remote_access::test_ports::DEAD_API_BASE, "SECRET").unwrap();
         let err = run_ws_session(&url, None, &|_| {}).await.unwrap_err();
         assert!(!err.contains("SECRET") && !err.contains("ws://"), "{err}");
     }
