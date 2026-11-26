@@ -53,6 +53,8 @@ pub mod code {
     /// A removal is not on file yet: the endpoint stays off until it is.
     pub const REMOVAL_NOT_SAVED: &str = "removal_not_saved";
     pub const PAIRING_CLOSED: &str = "pairing_closed";
+    /// A topic no AI app may be given (`balance`, `payments`).
+    pub const TOPIC_NOT_ALLOWED: &str = "topic_not_allowed";
     /// An earlier command failed midway (a panic); the switch was turned off
     /// and the state is read again from the clients file. Returned once.
     pub const RECOVERED: &str = "recovered";
@@ -637,6 +639,7 @@ impl Runtime {
                 Err(ChangeError::StoreBlocked(_)) => return Err(code::BLOCKED),
                 Err(ChangeError::Store(_)) => return Err(code::NOT_SAVED),
                 Err(ChangeError::PresetTooWide) => return Err(code::PRESET_TOO_WIDE),
+                Err(ChangeError::TopicNotAllowed) => return Err(code::TOPIC_NOT_ALLOWED),
                 Err(ChangeError::TooManyClients) => return Err(code::TOO_MANY_CLIENTS),
                 Err(ChangeError::Pair(PairError::Unknown) | ChangeError::UnknownClient) => return Err(code::UNKNOWN),
                 Err(_) => return Err(code::NOT_SAVED),
@@ -969,7 +972,7 @@ mod tests {
         assert_eq!(counts.started.load(Ordering::SeqCst), 0, "nothing listens until the owner switches it on");
         assert_eq!(rt.open_pairing(0), Err(code::UNAVAILABLE), "no pairing window while off");
 
-        let (id, _) = approved(&mut rt, R2Preset::Rounded);
+        let (id, _) = approved(&mut rt, R2Preset::Counts);
         assert_eq!(counts.started.load(Ordering::SeqCst), 1);
         rt.open_pairing(10).unwrap();
         assert!(rt.status(10).pairing_open_s.is_some());
@@ -1048,8 +1051,11 @@ mod tests {
         assert_eq!(rt.status(5).waiting, 1);
 
         assert_eq!(rt.approve(&id, &[], R2Preset::Counts, 6), Err(code::NO_TOPICS));
-        let client = rt.approve(&id, &[Topic::Node, Topic::Inbox], R2Preset::Rounded, 7).unwrap();
-        assert_eq!((client.name.as_str(), client.preset), ("Desk", R2Preset::Rounded));
+        for refused in [Topic::Balance, Topic::Payments] {
+            assert_eq!(rt.approve(&id, &[Topic::Node, refused], R2Preset::Counts, 7), Err(code::TOPIC_NOT_ALLOWED), "{refused:?}");
+        }
+        let client = rt.approve(&id, &[Topic::Node, Topic::Inbox, Topic::Channels], R2Preset::Counts, 7).unwrap();
+        assert_eq!((client.name.as_str(), client.preset), ("Desk", R2Preset::Counts));
         let status = rt.status(8);
         assert_eq!((status.pairing_open_s, status.waiting, status.clients), (None, 0, 1), "approve closes the window");
         let (_, late) = pair_frame(rt.host(), "Late", 5, 9);
@@ -1613,9 +1619,9 @@ mod tests {
     }
 
     #[test]
-    fn approve_takes_counts_or_rounded_and_never_exact() {
-        assert_eq!(serde_json::from_value::<R2Preset>(json!("rounded")).unwrap(), R2Preset::Rounded);
+    fn approve_takes_counts_only() {
         assert_eq!(serde_json::from_value::<R2Preset>(json!("counts")).unwrap(), R2Preset::Counts);
+        assert!(serde_json::from_value::<R2Preset>(json!("rounded")).is_err());
         assert!(serde_json::from_value::<R2Preset>(json!("exact")).is_err());
     }
 }

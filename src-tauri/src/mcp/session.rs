@@ -369,13 +369,13 @@ mod tests {
     fn revoke_refuses_the_very_next_frame_of_a_live_session() {
         let (mut sessions, reads, mut audit) = (Sessions::default(), Fake::new(), Vec::new());
         let mut registry = registry();
-        let first = reply(sessions.handle("desk", &call(1, "read_balance"), 0, &registry, &reads, &mut audit));
+        let first = reply(sessions.handle("desk", &call(1, "read_prices"), 0, &registry, &reads, &mut audit));
         assert_eq!(first["result"]["isError"], false);
         assert!(registry.revoke("desk"));
         assert!(!registry.revoke("desk"), "revoking twice changes nothing");
-        let next = reply(sessions.handle("desk", &call(2, "read_balance"), 1, &registry, &reads, &mut audit));
+        let next = reply(sessions.handle("desk", &call(2, "read_prices"), 1, &registry, &reads, &mut audit));
         assert_eq!(next["error"]["code"], NOT_AUTHORISED);
-        assert_eq!(*reads.seen.borrow(), vec![Topic::Balance]);
+        assert_eq!(*reads.seen.borrow(), vec![Topic::Prices]);
         assert_eq!(audit.iter().map(|row| row.outcome).collect::<Vec<_>>(), [Outcome::Read, Outcome::NotAuthorised]);
         // The other client is unaffected.
         assert!(registry.active("notes").is_some());
