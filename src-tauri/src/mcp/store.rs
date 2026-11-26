@@ -240,13 +240,19 @@ fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
 
 /// A record written before the cloud scope (owner GO, 26 Nov), read narrowed
 /// and never wider: `balance` and `payments` are dropped, `rounded` becomes
-/// `counts`. `exact` is left for [`check`] to refuse the whole file.
-fn narrowed(mut client: StoredClient) -> StoredClient {
+/// `counts`. A client that had only those two topics has nothing left to
+/// read and is dropped (`None`): it pairs again for what it may read.
+/// `exact` is left for [`check`] to refuse the whole file.
+fn narrowed(mut client: StoredClient) -> Option<StoredClient> {
+    let had_topics = !client.topics.is_empty();
     client.topics.retain(|topic| mcp_topic_allowed(*topic));
+    if had_topics && client.topics.is_empty() {
+        return None;
+    }
     if client.preset == Preset::Rounded {
         client.preset = Preset::Counts;
     }
-    client
+    Some(client)
 }
 
 /// Load the approved clients. A missing file is no records; anything that
@@ -274,7 +280,7 @@ pub fn load(io: &dyn FileIo, sealer: Option<&dyn Sealer>) -> Result<Vec<StoredCl
         };
         if !removed {
             let ReadRecord { id, name, public_key, topics, preset, created_ms, revoked: _ } = record;
-            clients.push(narrowed(StoredClient { id, name, public_key, topics, preset, created_ms }));
+            clients.extend(narrowed(StoredClient { id, name, public_key, topics, preset, created_ms }));
         }
     }
     // A file that still holds `exact` (or anything else that does not check
@@ -746,15 +752,18 @@ mod tests {
                 written_before(version, "mcp-01", r#"["balance","channels","payments","node"]"#, "rounded"),
                 written_before(version, "mcp-02", r#"["balance","payments"]"#, "counts"),
                 written_before(version, "mcp-03", r#"["inbox","prices"]"#, "counts"),
+                written_before(version, "mcp-05", "[]", "counts"),
             ];
             let plain = format!(r#"{{"version":{version},"clients":[{}]}}"#, records.join(","));
             *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, plain.as_bytes()).unwrap());
             let loaded = load(&file, Some(&sealer)).unwrap();
             let seen: Vec<(&str, &[Topic], Preset)> = loaded.iter().map(|client| (client.id.as_str(), client.topics.as_slice(), client.preset)).collect();
+            // mcp-02 had only balance and payments: nothing is left to read, so it is dropped.
+            // mcp-05 never had a topic; the narrowing does not change it.
             assert_eq!(seen, [
                 ("mcp-01", &[Topic::Channels, Topic::Node][..], Preset::Counts),
-                ("mcp-02", &[][..], Preset::Counts),
                 ("mcp-03", &[Topic::Inbox, Topic::Prices][..], Preset::Counts),
+                ("mcp-05", &[][..], Preset::Counts),
             ], "version {version}");
             assert!(loaded.iter().all(|client| client.topics.iter().all(|topic| mcp_topic_allowed(*topic))));
             // Saved again, the narrowed records are what is on file.
