@@ -223,6 +223,37 @@ mod tests {
     }
 
     #[test]
+    fn a_client_whose_file_says_rounded_still_reads_channels_with_no_amount() {
+        use crate::mcp::endpoint::Host;
+        use crate::mcp::store::testing::{MemFile, TagSealer};
+        use crate::mcp::store::{self, CLIENTS_PURPOSE};
+        use crate::at_rest::Sealer;
+        // A clients file written before counts-only: rounded, with channels and balance.
+        let (file, sealer) = (MemFile::default(), TagSealer);
+        let key = hex::encode([7u8; 32]);
+        let plain = format!(r#"{{"version":2,"clients":[{{"id":"mcp-01","name":"Desk","public_key":"{key}","topics":["channels","balance"],"preset":"rounded","created_ms":1}}]}}"#);
+        *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, plain.as_bytes()).unwrap());
+        let host = Host::from_stored(store::load(&file, Some(&sealer)).unwrap());
+        assert_eq!(host.preset("mcp-01"), R2Preset::Counts, "loaded as counts");
+        assert_eq!(host.stored()[0].topics, [Topic::Channels], "balance dropped");
+
+        // The channel read at the preset the host gives this client.
+        let server = TestServer::start(MockNode::canonical(), TOKEN);
+        let base = server.api_base();
+        let reads = BrokerReads::with_preset(|topic, since| read_topic(paired(&["read"]), &base, Arc::new(Quiet), topic, since), host.preset("mcp-01"));
+        let mut registry = Registry::default();
+        registry.add("desk", "Desk assistant", &host.stored()[0].topics);
+        let (mut sessions, mut audit) = (Sessions::default(), Vec::new());
+        let reply = ask(&mut sessions, &registry, &reads, &mut audit, "read_channels");
+        let data = data(&reply);
+        assert_eq!(data["shared"], "counts");
+        let text = reply.to_string();
+        assert!(!text.contains(r#""msat""#) && !text.contains(r#""rounded""#) && !text.contains(r#""sats""#), "no amount: {text}");
+        assert!(!text.contains("capacity") && !text.contains("local_balance") && !text.contains("remote_balance"), "{text}");
+        assert!(data["data"][0]["report"]["value"]["channels"]["withheld_items"].as_u64().is_some(), "{data}");
+    }
+
+    #[test]
     fn a_topic_not_read_live_fails_without_detail() {
         let server = TestServer::start(MockNode::canonical(), TOKEN);
         let base = server.api_base();
