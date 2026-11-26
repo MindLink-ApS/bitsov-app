@@ -220,7 +220,10 @@ fn bounded(client: &StoredClient) -> bool {
         && topics.len() == client.topics.len()
 }
 
-fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
+/// What narrowing cannot repair: every record within bounds, one record per
+/// id, and no `exact`. Checked on every record as read, before any record is
+/// narrowed or dropped, so a bad record can never disappear unseen.
+fn valid_as_read(clients: &[StoredClient]) -> Result<(), StoreError> {
     if !clients.iter().all(bounded) {
         return Err(StoreError::TooLarge);
     }
@@ -229,6 +232,14 @@ fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
         // Two records for one id: which one holds is undefined, so neither is trusted.
         return Err(StoreError::DuplicateClient { id: client.id.clone() });
     }
+    match clients.iter().find(|client| client.preset == Preset::Exact) {
+        Some(client) => Err(StoreError::PresetTooWide { id: client.id.clone() }),
+        None => Ok(()),
+    }
+}
+
+fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
+    valid_as_read(clients)?;
     if let Some(client) = clients.iter().find(|client| !client.topics.iter().all(|topic| mcp_topic_allowed(*topic))) {
         return Err(StoreError::TopicNotAllowed { id: client.id.clone() });
     }
@@ -242,7 +253,7 @@ fn check(clients: &[StoredClient]) -> Result<(), StoreError> {
 /// and never wider: `balance` and `payments` are dropped, `rounded` becomes
 /// `counts`. A client that had only those two topics has nothing left to
 /// read and is dropped (`None`): it pairs again for what it may read.
-/// `exact` is left for [`check`] to refuse the whole file.
+/// Only ever applied to records that passed [`valid_as_read`].
 fn narrowed(mut client: StoredClient) -> Option<StoredClient> {
     let had_topics = !client.topics.is_empty();
     client.topics.retain(|topic| mcp_topic_allowed(*topic));
@@ -271,7 +282,7 @@ pub fn load(io: &dyn FileIo, sealer: Option<&dyn Sealer>) -> Result<Vec<StoredCl
     if contents.version != VERSION && contents.version != VERSION_1 {
         return Err(StoreError::Unreadable);
     }
-    let mut clients = Vec::with_capacity(contents.clients.len());
+    let mut read = Vec::with_capacity(contents.clients.len());
     for record in contents.clients {
         let removed = match (contents.version, record.revoked) {
             (VERSION, None) => false,
@@ -280,11 +291,14 @@ pub fn load(io: &dyn FileIo, sealer: Option<&dyn Sealer>) -> Result<Vec<StoredCl
         };
         if !removed {
             let ReadRecord { id, name, public_key, topics, preset, created_ms, revoked: _ } = record;
-            clients.extend(narrowed(StoredClient { id, name, public_key, topics, preset, created_ms }));
+            read.push(StoredClient { id, name, public_key, topics, preset, created_ms });
         }
     }
-    // A file that still holds `exact` (or anything else that does not check
-    // once narrowed) is not trusted at all.
+    // Every record as read must be valid (bounds, one per id, no `exact`)
+    // before any is narrowed or dropped: a file with one bad record is not
+    // trusted at all, even when that record would have been dropped.
+    valid_as_read(&read).map_err(|_| StoreError::Unreadable)?;
+    let clients: Vec<StoredClient> = read.into_iter().filter_map(narrowed).collect();
     check(&clients).map_err(|_| StoreError::Unreadable)?;
     Ok(clients)
 }
@@ -777,6 +791,31 @@ mod tests {
             let plain = format!(r#"{{"version":{version},"clients":[{}]}}"#, written_before(version, "mcp-04", r#"["node"]"#, "exact"));
             *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, plain.as_bytes()).unwrap());
             assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable), "version {version}");
+        }
+    }
+
+    #[test]
+    fn a_record_that_would_be_dropped_still_makes_a_bad_file_refuse_to_load() {
+        for version in [1, 2] {
+            let (file, sealer) = (MemFile::default(), TagSealer);
+            let good = written_before(version, "mcp-01", r#"["node"]"#, "counts");
+            for (case, bad) in [
+                // Only balance and payments, so it would be dropped, but it holds `exact`.
+                ("exact", written_before(version, "mcp-02", r#"["balance","payments"]"#, "exact")),
+                // Only balance and payments, under the id of a kept record.
+                ("duplicate id", written_before(version, "mcp-01", r#"["balance"]"#, "counts")),
+                // Only payments, past the bounds (a repeated topic).
+                ("bounds", written_before(version, "mcp-03", r#"["payments","payments"]"#, "counts")),
+            ] {
+                let plain = format!(r#"{{"version":{version},"clients":[{good},{bad}]}}"#);
+                *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, plain.as_bytes()).unwrap());
+                assert_eq!(load(&file, Some(&sealer)), Err(StoreError::Unreadable), "version {version}: {case}");
+            }
+            // A valid record with only balance and payments is still just dropped.
+            let plain = format!(r#"{{"version":{version},"clients":[{good},{}]}}"#, written_before(version, "mcp-04", r#"["balance","payments"]"#, "rounded"));
+            *file.bytes.borrow_mut() = Some(sealer.seal(CLIENTS_PURPOSE, plain.as_bytes()).unwrap());
+            let loaded = load(&file, Some(&sealer)).unwrap();
+            assert_eq!(loaded.iter().map(|client| client.id.as_str()).collect::<Vec<_>>(), ["mcp-01"], "version {version}");
         }
     }
 
