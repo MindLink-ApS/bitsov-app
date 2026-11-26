@@ -8,17 +8,26 @@
 //! - the read's freshness (state, age, whether the node itself said stale);
 //! - nothing else: no route lines, no node error, no token.
 //!
+//! **Channels are a phone book** when the client has [`Handles`] (owner GO,
+//! 26 Nov): one entry per peer, a masked handle and `active` or `inactive`.
+//! No size, amount, channel id or peer key, and no count beyond the list's
+//! length. Without handles, channels are counts only, as every other topic.
+//!
 //! A topic that is not read live (not paired, rc7 fallback, node unreachable)
 //! is a [`ReadFailed`] with no detail. The source of reads is a function, so
 //! this module opens nothing itself and holds no token; whoever wires it binds
 //! the function to the paired session. It compiles only where its parent does
 //! (`cfg(test)` or the off-by-default `mcp-grant` feature).
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 
+use super::handles::Handles;
 use super::server::{ReadFailed, Reads};
 use super::store::{mcp_topic_allowed, R2Preset};
 use crate::ai::{narrow, Preset, Topic, TopicRead};
+use crate::jarvis::broker::{ChannelPeer, Report, ToolOutput};
 
 /// What MCP clients get unless the owner chooses otherwise.
 pub const DEFAULT_PRESET: R2Preset = R2Preset::Counts;
@@ -30,6 +39,7 @@ where
 {
     read: F,
     preset: Preset,
+    handles: Option<Handles>,
 }
 
 impl<F> BrokerReads<F>
@@ -44,8 +54,37 @@ where
     /// Narrowed to `preset`, as the owner set it for this client: counts or
     /// rounded, never exact.
     pub fn with_preset(read: F, preset: R2Preset) -> Self {
-        Self { read, preset: preset.preset() }
+        Self { read, preset: preset.preset(), handles: None }
     }
+
+    /// Channels as a phone book of this client's handles.
+    pub fn with_handles(mut self, handles: Option<Handles>) -> Self {
+        self.handles = handles;
+        self
+    }
+}
+
+/// The phone-book view of a channel read: one entry per peer, sorted by
+/// handle, `active` when any channel with that peer is. A channel whose peer
+/// key did not pass its check is left out. `None` unless the read is one
+/// ready channel report.
+fn phonebook(outputs: &[ToolOutput], handles: &Handles) -> Option<Value> {
+    let [ToolOutput::Channels { report: Report::Ready { value } }] = outputs else { return None };
+    Some(contacts(value.channels.iter().map(|channel| (channel.peer.as_ref(), channel.active)), handles))
+}
+
+fn contacts<'a>(channels: impl Iterator<Item = (Option<&'a ChannelPeer>, bool)>, handles: &Handles) -> Value {
+    let mut peers: BTreeMap<String, bool> = BTreeMap::new();
+    for (peer, active) in channels {
+        if let Some(peer) = peer {
+            *peers.entry(handles.handle(peer.as_str())).or_default() |= active;
+        }
+    }
+    let contacts: Vec<Value> = peers
+        .into_iter()
+        .map(|(handle, active)| json!({"handle": handle, "state": if active { "active" } else { "inactive" }}))
+        .collect();
+    json!({ "contacts": contacts })
 }
 
 impl<F> Reads for BrokerReads<F>
@@ -59,12 +98,19 @@ where
         }
         match (self.read)(topic, since_ms) {
             TopicRead::Live { topic: got, outputs, freshness, .. } if got == topic => {
-                // Counts only: a channel list becomes its length, with no ids and no amounts.
-                let data: Vec<Value> = outputs
-                    .iter()
-                    .map(|output| serde_json::to_value(output).map(|value| narrow(&value, self.preset)))
-                    .collect::<Result<_, _>>()
-                    .map_err(|_| ReadFailed)?;
+                let book = match (&self.handles, topic) {
+                    (Some(handles), Topic::Channels) => phonebook(&outputs, handles),
+                    _ => None,
+                };
+                let data: Vec<Value> = match book {
+                    Some(book) => vec![book],
+                    // Counts only: a channel list becomes its length, with no ids and no amounts.
+                    None => outputs
+                        .iter()
+                        .map(|output| serde_json::to_value(output).map(|value| narrow(&value, self.preset)))
+                        .collect::<Result<_, _>>()
+                        .map_err(|_| ReadFailed)?,
+                };
                 Ok(json!({
                     "shared": self.preset,
                     "freshness": {
@@ -220,6 +266,127 @@ mod tests {
         let text = reply.to_string();
         assert!(!text.contains(r#""msat""#), "no amount in msat: {text}");
         assert!(!text.contains(&balance_msat().to_string()), "the balance figure stays home");
+    }
+
+    fn desk_handles() -> Handles {
+        Handles::new(Arc::new(crate::mcp::handles::HandleKey::from_bytes([5; 32])), "mcp-01", 1)
+    }
+
+    #[test]
+    fn channels_read_as_a_phone_book_of_handles_with_no_size_amount_or_id() {
+        use mock_node::{COUNTERPARTY_01, COUNTERPARTY_02, COUNTERPARTY_03, LIGHTNING_NODE_PUBKEY, NODE_ID};
+        let server = TestServer::start(MockNode::canonical(), TOKEN);
+        let base = server.api_base();
+        let handles = desk_handles();
+        let reads = BrokerReads::new(|topic, since| read_topic(paired(&["read"]), &base, Arc::new(Quiet), topic, since))
+            .with_handles(Some(handles.clone()));
+        let mut registry = Registry::default();
+        registry.add("desk", "Desk assistant", &ALL);
+        let (mut sessions, mut audit) = (Sessions::default(), Vec::new());
+        let reply = ask(&mut sessions, &registry, &reads, &mut audit, "read_channels");
+        let data = data(&reply);
+        // The mock node has three channels with three peers: two active, one not.
+        let mut expected = vec![
+            (handles.handle(COUNTERPARTY_01), "active"),
+            (handles.handle(COUNTERPARTY_02), "active"),
+            (handles.handle(COUNTERPARTY_03), "inactive"),
+        ];
+        expected.sort();
+        let got: Vec<(String, &str)> = data["data"][0]["contacts"].as_array().unwrap().iter()
+            .map(|c| (c["handle"].as_str().unwrap().to_owned(), c["state"].as_str().unwrap()))
+            .collect();
+        let expected: Vec<(String, &str)> = expected.into_iter().collect();
+        assert_eq!(got, expected, "{data}");
+        assert_eq!(data["data"].as_array().unwrap().len(), 1);
+        assert_eq!(data["shared"], "counts");
+
+        // Only these keys, anywhere: no size, amount, id or peer field.
+        let mut found = Vec::new();
+        keys(&data, &mut found);
+        found.sort();
+        found.dedup();
+        let allowed = ["age_seconds", "contacts", "data", "freshness", "handle", "node_stale", "shared", "state"];
+        assert!(found.iter().all(|key| allowed.contains(&key.as_str())), "unexpected keys {found:?}");
+        for field in ["peer", "peer_id", "peer_pubkey", "remote_pubkey", "pubkey", "node_id", "alias", "counterparty",
+            "capacity", "local_balance", "remote_balance", "channel_id", "short_channel_id", "sats", "msat", "value", "count"] {
+            assert!(!found.iter().any(|key| key == field), "the phone book has a {field:?} field: {data}");
+        }
+        // No figure or identifier from the node, in any form.
+        let text = reply.to_string();
+        for peer in [COUNTERPARTY_01, COUNTERPARTY_02, COUNTERPARTY_03, LIGHTNING_NODE_PUBKEY, NODE_ID, SENDER_A] {
+            assert!(!text.to_ascii_lowercase().contains(&peer.to_ascii_lowercase()), "a peer or node id leaked");
+            assert!(!text.contains(&peer[..16]), "part of a peer or node id leaked");
+        }
+        for figure in [500_000u64, 1_250_000, 80_000, 200_000, 750_000, 20_000, 700_000, 2_000_000, 100_000, 500, 1_250, 80, 200, 750, 20, 700, 2_000, 100] {
+            assert!(!text.contains(&format!(":{figure}")) && !text.contains(&format!("\"{figure}\"")), "the figure {figure} leaked: {text}");
+        }
+        for id in ["UserChannelId", "860123x1x0", "860123x2x0"] {
+            assert!(!text.contains(id), "{id} leaked");
+        }
+        assert!(!text.contains(&balance_msat().to_string()));
+        for canary in CANARIES {
+            assert!(!text.contains(canary), "{canary} leaked");
+        }
+        // The same read again gives the same handles.
+        assert_eq!(data["data"], self::data(&ask(&mut sessions, &registry, &reads, &mut audit, "read_channels"))["data"]);
+    }
+
+    #[test]
+    fn two_apps_see_different_handles_for_the_same_peers() {
+        let server = TestServer::start(MockNode::canonical(), TOKEN);
+        let base = server.api_base();
+        let book = |handles: Handles| {
+            let reads = BrokerReads::new(|topic, since| read_topic(paired(&["read"]), &base, Arc::new(Quiet), topic, since))
+                .with_handles(Some(handles));
+            reads.read(Topic::Channels, None).unwrap()["data"][0]["contacts"].clone()
+        };
+        let desk = book(desk_handles());
+        let other = book(Handles::new(Arc::new(crate::mcp::handles::HandleKey::from_bytes([5; 32])), "mcp-02", 1));
+        assert_eq!(desk.as_array().unwrap().len(), 3);
+        let handles_of = |list: &Value| list.as_array().unwrap().iter().map(|c| c["handle"].clone()).collect::<Vec<_>>();
+        assert!(handles_of(&desk).iter().all(|h| !handles_of(&other).contains(h)));
+    }
+
+    #[test]
+    fn several_channels_to_one_peer_are_one_entry_active_when_any_is() {
+        use crate::jarvis::broker::ChannelPeer;
+        let handles = desk_handles();
+        let a = ChannelPeer::parse(&"02".repeat(33)).unwrap();
+        let b = ChannelPeer::parse(&"03".repeat(33)).unwrap();
+        let book = contacts([(Some(&a), false), (Some(&b), false), (Some(&a), true), (None, true)].into_iter(), &handles);
+        let mut expected = vec![(handles.handle(a.as_str()), "active"), (handles.handle(b.as_str()), "inactive")];
+        expected.sort();
+        let got: Vec<(String, String)> = book["contacts"].as_array().unwrap().iter()
+            .map(|c| (c["handle"].as_str().unwrap().to_owned(), c["state"].as_str().unwrap().to_owned()))
+            .collect();
+        assert_eq!(got, expected.into_iter().map(|(h, s)| (h, s.to_owned())).collect::<Vec<_>>());
+        assert!(ChannelPeer::parse("not hex").is_none() && ChannelPeer::parse(&"0".repeat(63)).is_none());
+        assert_eq!(format!("{a:?}"), "ChannelPeer(..)", "Debug never shows the key");
+    }
+
+    #[test]
+    fn without_handles_channels_stay_counts_and_other_topics_are_unchanged() {
+        let server = TestServer::start(MockNode::canonical(), TOKEN);
+        let base = server.api_base();
+        let plain = BrokerReads::new(|topic, since| read_topic(paired(&["read"]), &base, Arc::new(Quiet), topic, since));
+        let with = BrokerReads::new(|topic, since| read_topic(paired(&["read"]), &base, Arc::new(Quiet), topic, since))
+            .with_handles(Some(desk_handles()));
+        assert!(plain.read(Topic::Channels, None).unwrap()["data"][0]["report"]["value"]["channels"]["withheld_items"].as_u64().is_some());
+        for topic in [Topic::Node, Topic::Prices, Topic::Inbox] {
+            assert_eq!(plain.read(topic, None).unwrap()["data"], with.read(topic, None).unwrap()["data"], "{topic:?}");
+        }
+        for topic in [Topic::Balance, Topic::Payments] {
+            assert_eq!(with.read(topic, None), Err(ReadFailed), "{topic:?}");
+        }
+        // The peer key is kept in memory only: no serialized output carries it,
+        // not even the assistant's own unnarrowed one.
+        let TopicRead::Live { outputs, .. } = read_topic(paired(&["read"]), &base, Arc::new(Quiet), Topic::Channels, None) else {
+            panic!("a live channel read");
+        };
+        let raw = serde_json::to_string(&outputs).unwrap().to_ascii_lowercase();
+        for peer in [mock_node::COUNTERPARTY_01, mock_node::COUNTERPARTY_02, mock_node::COUNTERPARTY_03] {
+            assert!(!raw.contains(peer), "a peer key was serialized");
+        }
     }
 
     #[test]

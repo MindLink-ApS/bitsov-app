@@ -28,7 +28,7 @@ pub use route::{PeerKey, ReadRoute, RequestTarget, ALLOWED_PATHS};
 #[allow(unused_imports)]
 pub use schema::{
     Amount, BalanceInput, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend,
-    ChannelSummary, ChannelsInput, ChannelsReport, CopiedId, HealthInput, HealthReport,
+    ChannelPeer, ChannelSummary, ChannelsInput, ChannelsReport, CopiedId, HealthInput, HealthReport,
     Direction, LightningBackend, Liveness, LocalPrices, LocalPricesInput, MessageCountsInput,
     MessageMetadata, PaymentEntry, PaymentsInput, PaymentsReport, PriceCategory, PricingMode,
     Report, SenderCount, SourceField, TargetFee, ToolCall, ToolOutput, TrustLevel,

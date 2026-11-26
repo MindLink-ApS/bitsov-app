@@ -208,6 +208,33 @@ pub struct ChannelSummary {
     pub remote_balance: Amount<u64>,
     pub active: bool,
     pub short_channel_id: Option<CopiedId>,
+    /// Who the channel is with. **Never serialized**: no assistant output or
+    /// MCP reply carries it. Only the MCP phone-book view reads it, in
+    /// memory, to make a masked handle.
+    #[serde(skip)]
+    pub peer: Option<ChannelPeer>,
+}
+
+/// A channel peer's key, after a charset check (hex, 64 to 66 characters).
+/// Its `Debug` hides the value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChannelPeer(String);
+
+impl ChannelPeer {
+    pub fn parse(value: &str) -> Option<Self> {
+        (value.len() >= 64 && value.len() <= 66 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| ChannelPeer(value.to_ascii_lowercase()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ChannelPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChannelPeer(..)")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

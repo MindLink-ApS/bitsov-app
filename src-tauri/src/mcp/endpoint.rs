@@ -114,6 +114,7 @@ pub enum Begin {
 pub struct Pending {
     begun: Begun,
     preset: R2Preset,
+    handles: Option<super::handles::Handles>,
     frame: Vec<u8>,
 }
 
@@ -130,7 +131,7 @@ impl Pending {
     /// that panics counts as a failed read: the client gets the usual
     /// failed-read reply and the call is audited as [`Outcome::ReadFailed`].
     pub fn read(&self, source: &dyn ReadSource) -> ReadDone {
-        let reads = catch_unwind(AssertUnwindSafe(|| source.reads_for(self.preset)));
+        let reads = catch_unwind(AssertUnwindSafe(|| source.reads_for_client(self.preset, self.handles.clone())));
         let reads: Box<dyn Reads + '_> = match reads {
             Ok(reads) => Box::new(NoPanic(reads)),
             Err(_) => Box::new(Failing),
@@ -186,6 +187,9 @@ pub struct Host {
     removed_unsaved: Vec<String>,
     /// The pairing window the owner opened, if any (ADR A1 §1.4, D7 B1).
     window: Option<PairingWindow>,
+    /// The key the phone-book handles are made with; `None` means channel
+    /// reads stay counts only.
+    handle_key: Option<std::sync::Arc<super::handles::HandleKey>>,
 }
 
 /// A pairing window: open for one request until `until_ms`.
@@ -223,6 +227,13 @@ pub struct WindowView {
 /// `exact` cannot be asked for here.
 pub trait ReadSource {
     fn reads_for(&self, preset: R2Preset) -> Box<dyn Reads + '_>;
+
+    /// The same, with the client's phone-book handles (`None`: none could be
+    /// made). A source that serves the phone book overrides this; the
+    /// default ignores the handles, so channels stay counts only.
+    fn reads_for_client(&self, preset: R2Preset, _handles: Option<super::handles::Handles>) -> Box<dyn Reads + '_> {
+        self.reads_for(preset)
+    }
 }
 
 /// One fixed source for every client, whatever its preset ([`Host::on_frame`],
@@ -307,6 +318,19 @@ impl Host {
     /// are allowed again, starting from no clients.
     pub fn start_over(&mut self) {
         self.blocked = None;
+    }
+
+    /// Set the phone-book handle key (the runtime loads it with the clients).
+    pub fn set_handle_key(&mut self, key: Option<super::handles::HandleKey>) {
+        self.handle_key = key.map(std::sync::Arc::new);
+    }
+
+    /// The handles `client` sees: per client and per approval, so an app
+    /// removed and paired again starts over.
+    pub fn handles(&self, client: &str) -> Option<super::handles::Handles> {
+        let key = self.handle_key.as_ref()?;
+        let record = self.stored.iter().find(|record| record.id == client)?;
+        Some(super::handles::Handles::new(key.clone(), &record.id, record.created_ms))
     }
 
     pub fn from_stored(records: Vec<StoredClient>) -> Self {
@@ -591,10 +615,11 @@ impl Host {
                 return Begin::Done(self.refuse_audited(client, "client not authorised", now_ms));
             }
             let preset = self.preset(client);
+            let handles = self.handles(client);
             let begun = self.sessions.begin(client, frame, now_ms, &self.registry, &mut self.audit);
             *conn = state;
             return match begun {
-                Ok(begun) => Begin::Read(Pending { begun, preset, frame: frame.to_vec() }),
+                Ok(begun) => Begin::Read(Pending { begun, preset, handles, frame: frame.to_vec() }),
                 Err(reply) => Begin::Done(Step { reply: reply.map(with_newline), close: false }),
             };
         }
@@ -1005,6 +1030,21 @@ mod tests {
         let mut again = Host::from_load(crate::mcp::store::load(&file, Some(&sealer)));
         assert_eq!(again.revoke(&id, 22), Err(ChangeError::UnknownClient));
         assert!(again.registry.active(&id).is_none());
+    }
+
+    #[test]
+    fn phone_book_handles_follow_the_client_and_need_the_key() {
+        let (file, sealer) = (MemFile::default(), TagSealer);
+        let mut host = Host::default();
+        let id = pair_and_approve(&mut host, &file, &sealer, "Desk", 1, 10).unwrap();
+        assert!(host.handles(&id).is_none(), "no key: no handles, channels stay counts");
+        host.set_handle_key(Some(crate::mcp::handles::HandleKey::from_bytes([3; 32])));
+        let peer = "02".repeat(33);
+        let first = host.handles(&id).unwrap().handle(&peer);
+        assert_eq!(first, host.handles(&id).unwrap().handle(&peer), "stable");
+        assert!(host.handles("mcp-unknown").is_none(), "only an approved client has handles");
+        let other = pair_and_approve(&mut host, &file, &sealer, "Notes", 2, 20).unwrap();
+        assert_ne!(first, host.handles(&other).unwrap().handle(&peer), "per client");
     }
 
     #[test]

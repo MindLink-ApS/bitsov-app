@@ -142,6 +142,8 @@ pub struct Config {
     pub sealer: Option<&'static dyn Sealer>,
     /// The clients file.
     pub store: Box<dyn FileIo + Send>,
+    /// The phone-book handle key file.
+    pub handle_key: Box<dyn FileIo + Send>,
     pub source: Arc<dyn ReadSource + Send + Sync>,
     pub start: StartListener,
     pub open_audit: OpenAudit,
@@ -156,10 +158,12 @@ impl Config {
     /// sealer, listener and audit file.
     pub fn for_app(dir: PathBuf, source: Arc<dyn ReadSource + Send + Sync>, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
         let store = Box::new(store::PrivateFile { path: dir.join(store::FILE_NAME) });
+        let handle_key = Box::new(store::PrivateFile { path: dir.join(super::handles::FILE_NAME) });
         Config {
             dir,
             sealer: crate::at_rest::installed(),
             store,
+            handle_key,
             source,
             start: platform_listener(),
             open_audit: platform_audit(),
@@ -371,6 +375,8 @@ impl Runtime {
             return Ok(());
         }
         let mut loaded = Host::from_load(store::load(self.config.store.as_ref(), Some(sealer)));
+        // Without the key, channel reads stay counts only; nothing else changes.
+        loaded.set_handle_key(super::handles::load_or_create(self.config.handle_key.as_ref(), Some(sealer)).ok());
         // Revokes held only in memory before a recovery hold again; the file
         // does not have them yet. Applied to every load, blocked or not, and
         // kept until a save puts them on file: a blocked load has no records
@@ -916,6 +922,7 @@ mod tests {
             dir,
             sealer,
             store: Box::new(file.clone()),
+            handle_key: Box::new(SharedFile::default()),
             source: Arc::new(Quiet),
             start: Box::new(move |_, _, _| {
                 if start_counts.refuse_start.load(Ordering::SeqCst) {

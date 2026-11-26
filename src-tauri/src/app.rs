@@ -12378,6 +12378,11 @@ fn call_media_video_send(
 #[tauri::command(rename_all = "snake_case")]
 fn call_media_stats(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>) -> Result<serde_json::Value, String> {
     reject_sealed_window(&window)?;
+    media_queue_stats(state.inner())
+}
+
+/// The open media session's two drop counters (see `call_media_stats`).
+fn media_queue_stats(state: &NodeState) -> Result<serde_json::Value, String> {
     let slot = state.media.lock().unwrap();
     let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
     Ok(serde_json::json!({
@@ -13152,6 +13157,15 @@ struct McpNodeReads(AppHandle<tauri::Wry>);
 #[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
 impl bitsov_app::mcp::endpoint::ReadSource for McpNodeReads {
     fn reads_for(&self, preset: bitsov_app::mcp::store::R2Preset) -> Box<dyn bitsov_app::mcp::server::Reads + '_> {
+        self.reads_for_client(preset, None)
+    }
+
+    /// Channels as the phone book of this client's handles.
+    fn reads_for_client(
+        &self,
+        preset: bitsov_app::mcp::store::R2Preset,
+        handles: Option<bitsov_app::mcp::handles::Handles>,
+    ) -> Box<dyn bitsov_app::mcp::server::Reads + '_> {
         let app = self.0.clone();
         Box::new(bitsov_app::mcp::broker::BrokerReads::with_preset(
             move |topic, since_ms| {
@@ -13161,7 +13175,7 @@ impl bitsov_app::mcp::endpoint::ReadSource for McpNodeReads {
                     .unwrap_or(ai::TopicRead::Unavailable { topic, reason: ai::NoRead::NodeUnreachable })
             },
             preset,
-        ))
+        ).with_handles(handles))
     }
 }
 
@@ -13434,6 +13448,25 @@ mod media_send_session_tests {
         assert_eq!(drain(&new), [7, 8]);
         assert!(drain(&old).is_empty());
         stop_media_session(&state);
+    }
+
+    #[test]
+    fn the_queue_stats_need_an_open_session_and_count_what_each_queue_dropped() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        assert_eq!(media_queue_stats(&state).unwrap_err(), "no media session is open");
+        let activity = control::call_activity::CallActivity::new(Box::new(NoActivity));
+        let (uplink, downlink, _, _) = install_media_session(&state, "call-1", false, None, Arc::new(activity.hold("call-1")));
+        assert_eq!(media_queue_stats(&state).unwrap(), serde_json::json!({ "uplink_dropped": 0, "downlink_dropped": 0 }));
+        // Each queue holds QUEUE_FRAMES and drops the oldest beyond that.
+        for frame in 0..control::media::QUEUE_FRAMES + 2 {
+            uplink.push(vec![frame as u8]);
+        }
+        for frame in 0..control::media::QUEUE_FRAMES + 5 {
+            downlink.push(vec![frame as u8]);
+        }
+        assert_eq!(media_queue_stats(&state).unwrap(), serde_json::json!({ "uplink_dropped": 2, "downlink_dropped": 5 }));
+        stop_media_session(&state);
+        assert!(media_queue_stats(&state).is_err(), "closed again");
     }
 
     #[test]
