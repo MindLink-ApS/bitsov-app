@@ -103,7 +103,7 @@ export type AudioStatRow = {
   mute: [number, 0 | 1][];
 };
 
-const toDb10 = (amplitude: number): number => (amplitude <= 0 ? FLOOR_DB10 : Math.max(FLOOR_DB10, Math.round(200 * Math.log10(amplitude))));
+const toDb10 = (amplitude: number): number => (!Number.isFinite(amplitude) || amplitude <= 0 ? FLOOR_DB10 : Math.max(FLOOR_DB10, Math.round(200 * Math.log10(amplitude))));
 
 /** Accumulates peak, sum of squares and clipping across frames without keeping any sample. */
 export class LevelMeter {
@@ -114,16 +114,33 @@ export class LevelMeter {
   zeroQuanta = 0;
   quanta = 0;
 
-  /** One frame. A single pass, no allocation. */
+  /**
+   * One frame. A single pass, no allocation. A sample that is not a finite
+   * number (NaN, ±Infinity) is left out of the levels and the sample count;
+   * it still makes its block not silent.
+   */
   push(pcm: Float32Array, countQuanta = false) {
     const n = pcm.length;
     let peak = this.peak;
     let sumSq = 0;
     let clipped = 0;
+    let counted = 0;
     let blockSum = 0;
     let blockLen = 0;
     for (let i = 0; i < n; i++) {
       const v = pcm[i];
+      if (!Number.isFinite(v)) {
+        if (countQuanta) {
+          blockSum = 1;
+          if (++blockLen === QUANTUM || i === n - 1) {
+            this.quanta++;
+            blockSum = 0;
+            blockLen = 0;
+          }
+        }
+        continue;
+      }
+      counted++;
       const a = v < 0 ? -v : v;
       if (a > peak) peak = a;
       if (a >= 1) clipped++;
@@ -138,7 +155,7 @@ export class LevelMeter {
         }
       }
     }
-    this.samples += n;
+    this.samples += counted;
     this.peak = peak;
     this.sumSq += sumSq;
     this.clipped += clipped;

@@ -181,11 +181,11 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     read().then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(null); });
   });
   const closeRow = async () => {
-    if (!rec || closed || rowBusy) return;
+    if (!rec || closed || failed || rowBusy) return;
     rowBusy = true;
     try {
       const [jitter, host] = await Promise.all([bounded(readStats), deps.transport.queueStats ? bounded(deps.transport.queueStats) : Promise.resolve(null)]);
-      if (!closed) emit(rec.close(clock(), { codec: sending, mic: mic(), jitter, host }));
+      if (!closed && !failed) emit(rec.close(clock(), { codec: sending, mic: mic(), jitter, host }));
     } finally { rowBusy = false; }
   };
   /** Decoded audio on its way to playout (measured before the buffer is transferred). */
@@ -194,6 +194,11 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
   const fail = (message: string) => {
     if (closed || failed) return;
     failed = true;
+    // The statistics stop with the audio: no timer is left for the caller's close.
+    clearInterval(rowTimer);
+    clearInterval(loopTimer);
+    rowTimer = undefined;
+    loopTimer = undefined;
     deps.onError?.(message);
   };
   const send = (payload: Uint8Array) => { if (!closed) deps.transport.send(payload); };
@@ -393,7 +398,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     }
     if (closed) return;
     sayHello();
-    if (rec) {
+    if (rec && !failed) {
       rowTimer = setInterval(() => void closeRow(), ROW_MS);
       rec.startTicking(clock());
       loopTimer = setInterval(() => rec.tick(clock()), 20);

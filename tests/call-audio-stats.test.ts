@@ -31,6 +31,32 @@ describe('LevelMeter', () => {
     expect(level.rmsDb10).toBeLessThan(-55);
   });
 
+  it('leaves samples that are not finite numbers out, so no NaN or Infinity reaches the report', () => {
+    const m = new LevelMeter();
+    const f = new Float32Array(2 * QUANTUM).fill(0.5);
+    f[0] = Number.NaN; f[1] = Number.POSITIVE_INFINITY; f[2] = Number.NEGATIVE_INFINITY;
+    // The second block is silent except for one NaN: it is not counted as silent.
+    f.fill(0, QUANTUM);
+    f[QUANTUM + 7] = Number.NaN;
+    m.push(f, true);
+    const level = m.take();
+    expect(level.samples).toBe(2 * QUANTUM - 4);
+    expect(level.clipped).toBe(0);
+    expect(Number.isFinite(level.peakDb10) && Number.isFinite(level.rmsDb10)).toBe(true);
+    expect(level.peakDb10).toBe(-60);
+    expect(level).toMatchObject({ quanta: 2, zeroQuanta: 0 });
+    // Only non-finite samples: the floor, never NaN.
+    const bad = new LevelMeter();
+    bad.push(new Float32Array([Number.NaN, Number.POSITIVE_INFINITY]));
+    expect(bad.take()).toMatchObject({ samples: 0, peakDb10: -1200, rmsDb10: -1200 });
+    // Through a whole row and its report line.
+    const r = new AudioStatsRecorder(0);
+    r.captured(f);
+    r.played(new Float32Array([Number.NaN, 0.25, Number.NEGATIVE_INFINITY]));
+    const line = formatRow(r.close(5000, extras()));
+    expect(line).not.toMatch(/NaN|Infinity/);
+  });
+
   it('floors digital silence at -120 dBFS and resets after take', () => {
     const m = new LevelMeter();
     m.push(frame(0));
@@ -297,6 +323,32 @@ describe('the engine feeds the recorder', () => {
     await vi.advanceTimersByTimeAsync(5600);
     expect(rows).toHaveLength(1);
     expect(rows[0].loopGapMs).toBeLessThan(100);
+    await audio.close();
+  });
+
+  it('stops its timers on a fatal audio error, before the caller closes it', async () => {
+    const rows: AudioStatRow[] = [];
+    const errors: string[] = [];
+    const audio = createCallAudio({
+      stream: { getTracks: () => [], getAudioTracks: () => [], getVideoTracks: () => [] } as unknown as MediaStream,
+      transport: { send: () => {} },
+      audioContext: () => new FakeContext() as unknown as AudioContext,
+      workletUrl: 'worklet.js',
+      opus: false,
+      onError: (message) => errors.push(message),
+      onStats: (row) => rows.push(row),
+      clock: () => Date.now(),
+    });
+    await audio.ready;
+    // The HELLO timer plus the two statistics timers.
+    expect(vi.getTimerCount()).toBe(3);
+    const capture = [...FakeWorkletNode.made].reverse().find((m) => m.name === 'bitsov-call-capture')!.node;
+    capture.onprocessorerror?.();
+    expect(errors).toEqual(['audio_capture_failed']);
+    // Only the HELLO timer is left; no row is closed after the error.
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(rows).toEqual([]);
     await audio.close();
   });
 
