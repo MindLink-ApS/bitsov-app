@@ -14811,7 +14811,7 @@ mod control_act_tests {
         spend_advance(&node.state, true).await.unwrap();
         let (arrived, release) = pause_points::arm(&node.state.api_base, "before_dispatch");
         let (sent, ()) = tokio::join!(do_message_send(&node.state, A, false, "hi", 7000, None), async {
-            arrived.notified().await;
+            arrive(&arrived, "before_dispatch").await;
             node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
             release.notify_one();
         });
@@ -14950,7 +14950,7 @@ mod control_act_tests {
 
             let (arrived, release) = pause_points::arm(&node.state.api_base, "before_resume_decision");
             let (refused, ()) = tokio::join!(do_message_send(&node.state, A, false, "gm", 14000, None), async {
-                arrived.notified().await;
+                arrive(&arrived, "before_resume_decision").await;
                 let saved = spend_journal::read_pending(journal_file(&node).parent().unwrap()).unwrap().unwrap();
                 assert!(!saved.admission_resume, "{case}: consumed by now");
                 match case {
@@ -18882,7 +18882,7 @@ mod control_act_tests {
                 let (arrived, release) = pause_points::arm(&node.state.api_base, point);
                 let state = &node.state;
                 let stop = async {
-                    arrived.notified().await;
+                    arrive(&arrived, point).await;
                     match ender {
                         "end" => {
                             let end = do_op_end_call(state, CALL_ID);
@@ -18955,6 +18955,17 @@ mod control_act_tests {
 
     fn release_on_drop(api_base: &str, point: &'static str, release: &Arc<tokio::sync::Notify>) -> ReleaseOnDrop {
         ReleaseOnDrop { api_base: api_base.into(), point, release: release.clone() }
+    }
+
+    /// How long a test waits for a request to reach its pause point.
+    const ARRIVE_WITHIN: Duration = Duration::from_secs(5);
+
+    /// Waits, bounded, for a request to reach its pause point: a request that
+    /// never gets there fails the test instead of hanging it.
+    async fn arrive(arrived: &tokio::sync::Notify, point: &str) {
+        if tokio::time::timeout(ARRIVE_WITHIN, arrived.notified()).await.is_err() {
+            panic!("{point}: the request never reached its pause point");
+        }
     }
 
     fn race_runtime() -> tokio::runtime::Runtime {
@@ -19146,8 +19157,9 @@ mod control_act_tests {
         let state = &node.state;
         let (arrived, release) = pause_points::arm(&state.api_base, "after_lock");
         let (first, second) = std::thread::scope(|s| {
+            let _release = release_on_drop(&state.api_base, "after_lock", &release);
             let first = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 0)));
-            rt.block_on(arrived.notified());
+            rt.block_on(arrive(&arrived, "after_lock"));
             let second = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 0)));
             std::thread::sleep(Duration::from_millis(150));
             release.notify_one();
@@ -21347,8 +21359,9 @@ mod control_act_tests {
         let spent = budget_now(state).spent_msat;
         let (arrived, release) = pause_points::arm(&state.api_base, "before_decision");
         std::thread::scope(|s| {
+            let _release = release_on_drop(&state.api_base, "before_decision", &release);
             let minute = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 0)));
-            rt.block_on(arrived.notified());
+            rt.block_on(arrive(&arrived, "before_decision"));
             // Their hangup ends the call: the paused minute is refused at its decision.
             let node_id = state.node_id.lock().unwrap().clone().unwrap();
             state.call_consents.lock().unwrap().end(&node_id, None, CALL_ID);
@@ -23289,8 +23302,9 @@ fn end_does_not_dispatch_after_switch_during_token_acquisition() {
         // A failure below releases End, so the scope's join cannot hang on it.
         let _release = release_on_drop(&node.state.api_base, "end_wait_read", &go_on);
         let end = s.spawn(|| rt.block_on(do_op_end_call_when_node_ends(&node.state, CALL_ID, None)));
+        // Only a bound on End's arrival (no deadline here): a loaded machine gets the shared one.
         rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(2), read.notified()).await.expect("End's first read completed");
+            tokio::time::timeout(ARRIVE_WITHIN, read.notified()).await.expect("End's first read completed");
         });
         let credential = node.state.token.lock().unwrap();
         go_on.notify_one();
@@ -23348,6 +23362,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
     let bound = NodeBound::now(&node.state, OWN, Some(deadline)).unwrap();
     let (arrived, resume) = pause_points::arm(&node.state.api_base, "after_network_check");
     let result = std::thread::scope(|s| {
+        let _release = release_on_drop(&node.state.api_base, "after_network_check", &resume);
         let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
         rt.block_on(async {
             tokio::time::timeout(Duration::from_secs(1), arrived.notified()).await.expect("credential acquired");
@@ -24494,6 +24509,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
             let state = &node.state;
             let (arrived, release) = pause_points::arm(&state.api_base, "after_lock");
             let result = std::thread::scope(|s| {
+                let _release = release_on_drop(&state.api_base, "after_lock", &release);
                 let send = s.spawn(|| rt.block_on(async {
                     if kind == act::KIND_CALL_OFFER {
                         let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
@@ -24502,7 +24518,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
                         do_call_signal_bounded(state, A, kind, OFFER, quote.signal_msat + quote.signal_max_routing_fee_msat, None, None, None).await
                     }
                 }));
-                rt.block_on(arrived.notified());
+                rt.block_on(arrive(&arrived, "after_lock"));
                 *g1.grant.lock().unwrap() = call_window_grant(5 * 60);
                 release.notify_one();
                 send.join().unwrap()
@@ -24773,8 +24789,9 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let state = &node.state;
         let (arrived, release) = pause_points::arm(&state.api_base, "after_lock");
         let result = std::thread::scope(|s| {
+            let _release = release_on_drop(&state.api_base, "after_lock", &release);
             let send = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 1)));
-            rt.block_on(arrived.notified());
+            rt.block_on(arrive(&arrived, "after_lock"));
             do_spend_lock(state);
             release.notify_one();
             send.join().unwrap()
@@ -25135,7 +25152,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let state = &node.state;
         let (arrived, release) = pause_points::arm(&state.api_base, "end_wait_read");
         let (ended, ()) = tokio::join!(do_op_end_call_when_node_ends(state, CALL_ID, None), async {
-            arrived.notified().await;
+            arrive(&arrived, "end_wait_read").await;
             // While End waits, no minute goes; then the node ends the call at its paid time.
             assert!(do_call_block(state, A, CALL_ID, 1).await.is_err());
             over.store(true, std::sync::atomic::Ordering::SeqCst);
