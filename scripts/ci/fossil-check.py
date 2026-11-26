@@ -3,10 +3,16 @@
 
 import argparse
 import hashlib
+import hmac
 import os
 import re
+import secrets
 import subprocess
 import sys
+
+
+NAMES_ENV = "FOSSIL_PRIVATE_NAMES"
+REQUIRE_ENV = "FOSSIL_REQUIRE_PRIVATE_NAMES"
 
 
 # Reserved tokens and attribution phrases, normalized with casefold and spaces.
@@ -57,6 +63,43 @@ def fingerprint(name):
     return hashlib.sha256(name.casefold().encode()).hexdigest()
 
 
+def load_private_names():
+    """Return keyed fingerprints of the configured names, or None when not configured.
+
+    The names are removed from the environment so that no child process inherits
+    them, and only HMAC-SHA256 digests under a key drawn for this run are kept.
+    The key never leaves this process, so the digests cannot be compared with
+    anything outside it. Neither names nor digests are ever printed.
+    """
+    raw = os.environ.pop(NAMES_ENV, "")
+    names = [name.strip() for name in raw.splitlines() if name.strip()]
+    del raw
+    if not names:
+        return None, None
+    if not all(re.fullmatch(r"[a-zA-Z0-9_.-]+", name) for name in names):
+        raise ValueError
+    key = secrets.token_bytes(32)
+    digests = {keyed_fingerprint(key, name) for name in names}
+    del names
+    return key, digests
+
+
+def keyed_fingerprint(key, name):
+    return hmac.new(key, name.casefold().encode(), hashlib.sha256).digest()
+
+
+def private_names_required():
+    value = os.environ.get(REQUIRE_ENV, "true").strip().lower()
+    if value not in ("true", "false"):
+        raise ValueError
+    return value == "true"
+
+
+def notice(message):
+    prefix = "::notice title=Fossil Check::" if os.environ.get("GITHUB_ACTIONS") == "true" else ""
+    print(prefix + message)
+
+
 def is_example(value, path):
     return hashlib.sha256(value.encode()).hexdigest() in EXACT_EXAMPLES.get(path, ())
 
@@ -71,24 +114,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base")
     parser.add_argument("--head")
-    parser.add_argument("--hash-private-names", action="store_true",
-                        help="Read newline-delimited repository names from stdin and emit hashes.")
     args = parser.parse_args()
 
-    if args.hash_private_names:
-        names = [name.strip() for name in sys.stdin.read().splitlines() if name.strip()]
-        if not names or not all(re.fullmatch(r"[a-zA-Z0-9_.-]+", name) for name in names):
-            print("Provide one repository slug per line.", file=sys.stderr)
-            return 2
-        print("\n".join(sorted({fingerprint(name) for name in names})))
-        return 0
-
-    hashes = {line.strip().lower() for line in
-              os.environ.get("FOSSIL_PRIVATE_NAME_HASHES", "").splitlines() if line.strip()}
-    if not hashes or not all(re.fullmatch(r"[a-f0-9]{64}", value) for value in hashes):
-        print("Fossil check requires valid FOSSIL_PRIVATE_NAME_HASHES repository configuration.",
+    try:
+        key, private_digests = load_private_names()
+    except ValueError:
+        print(f"Fossil check requires {NAMES_ENV} to hold one repository slug per line.",
               file=sys.stderr)
         return 2
+    try:
+        required = private_names_required()
+    except ValueError:
+        print(f"Fossil check requires {REQUIRE_ENV} to be true or false.", file=sys.stderr)
+        return 2
+    if private_digests is None:
+        if required:
+            print(f"Fossil check requires the {NAMES_ENV} repository secret.", file=sys.stderr)
+            return 2
+        notice("Private repository names are not available to this run, for example on a "
+               "pull request from a fork. Checking the public patterns only.")
     if not all(sha and re.fullmatch(r"[0-9a-fA-F]{40}", sha) for sha in (args.base, args.head)):
         print("Fossil check requires full base and head commit SHAs.", file=sys.stderr)
         return 2
@@ -127,11 +171,12 @@ def main():
         # commit messages and identities are checked for content only.
         if attribution and not is_example(value, path) and has_attribution(value):
             found.append("internal attribution")
-        for token in re.findall(r"[a-z0-9_.-]+", value.casefold()):
+        for token in re.findall(r"[a-z0-9_.-]+", value.casefold()) if private_digests else ():
             # Prose punctuation and clone URLs must not hide a repository slug.
             trimmed = token.rstrip(".")
             candidates = {token, trimmed, trimmed.removesuffix(".git")}
-            if any(fingerprint(candidate) in hashes for candidate in candidates):
+            if any(keyed_fingerprint(key, candidate) in private_digests
+                   for candidate in candidates):
                 found.append("private repository name")
                 break
         return found

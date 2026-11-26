@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Exercise the public-record gate against real temporary Git histories."""
 
-import hashlib
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,7 +58,9 @@ class FossilCheckTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("GIT_", "FOSSIL_")) and k != "GITHUB_ACTIONS"}
+        self.env["FOSSIL_REQUIRE_PRIVATE_NAMES"] = "true"
         self.set_names(PRIVATE_NAME)
         self.git("init", "-q")
         self.write("notes.txt", SESSION + "\nold public text\n")
@@ -77,20 +80,18 @@ class FossilCheckTests(unittest.TestCase):
         path.write_text(content)
 
     def set_names(self, *names):
-        self.env["FOSSIL_PRIVATE_NAME_HASHES"] = "\n".join(
-            hashlib.sha256(name.strip().casefold().encode()).hexdigest() for name in names
-        )
+        self.env["FOSSIL_PRIVATE_NAMES"] = "\n".join(names)
 
     def commit(self, message="Update sample", author=None):
         self.git("add", "--all")
         extra = ["--author", author] if author else []
         self.git("commit", "-q", "--allow-empty", *extra, "-m", message)
 
-    def check(self, expected, base=None):
+    def check(self, expected, base=None, env=None):
         result = subprocess.run(
             [sys.executable, str(CHECKER), "--base", base or self.base,
              "--head", self.git("rev-parse", "HEAD")],
-            cwd=self.repo, env=self.env, text=True, capture_output=True,
+            cwd=self.repo, env=env or self.env, text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
@@ -193,14 +194,46 @@ class FossilCheckTests(unittest.TestCase):
             self.check(1)
             self.base = self.git("rev-parse", "HEAD")
 
-    def test_hash_generation_normalizes_names_without_echoing_them(self):
-        result = subprocess.run(
-            [sys.executable, str(CHECKER), "--hash-private-names"],
-            input=" \n" + PRIVATE_NAME.upper() + " \n", text=True, capture_output=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), self.env["FOSSIL_PRIVATE_NAME_HASHES"])
-        self.assertNotIn(PRIVATE_NAME.upper(), result.stdout + result.stderr)
+    def test_names_are_trimmed_and_case_folded(self):
+        self.set_names(" " + PRIVATE_NAME.upper() + " ", "", "second-fixture-name\r")
+        self.write("added.txt", PRIVATE_NAME + "\n")
+        self.commit()
+        result = self.check(1)
+        self.assertIn("private repository name", result.stderr)
+
+    def test_output_never_contains_names_or_digests(self):
+        self.set_names(PRIVATE_NAME, "second-fixture-name")
+        for content, expected in (("public text\n", 0),
+                                  (PRIVATE_NAME + "\n" + SESSION + "\n", 1)):
+            with self.subTest(expected=expected):
+                self.write("added.txt", content)
+                self.commit("Mention " + PRIVATE_NAME if expected else "Update sample")
+                output = self.check(expected).stdout
+                output += self.check(expected).stderr
+                self.assertNotIn(PRIVATE_NAME, output.casefold())
+                self.assertNotIn("second-fixture-name", output.casefold())
+                self.assertIsNone(re.search(r"[0-9a-f]{40,}", output.casefold()))
+                self.base = self.git("rev-parse", "HEAD")
+
+    def test_names_do_not_reach_child_processes(self):
+        bin_dir = self.repo.parent / (self.repo.name + "-bin")
+        bin_dir.mkdir()
+        record = bin_dir / "environment.txt"
+        wrapper = bin_dir / "git"
+        wrapper.write_text("#!/bin/sh\nenv >> \"$FIXTURE_RECORD\"\n"
+                           f'exec "{shutil.which("git")}" "$@"\n')
+        wrapper.chmod(0o755)
+        self.addCleanup(shutil.rmtree, bin_dir)
+        self.write("added.txt", "public text\n")
+        self.commit()
+        env = dict(self.env, FIXTURE_RECORD=str(record),
+                   PATH=f"{bin_dir}{os.pathsep}{self.env.get('PATH', '')}")
+        self.check(0, env=env)
+        recorded = record.read_text()
+        # Report booleans only: the recorded environment must not reach the test log.
+        self.assertTrue("FIXTURE_RECORD=" in recorded, "the wrapper did not run")
+        self.assertFalse("FOSSIL_PRIVATE_NAMES=" in recorded, "a child received the names")
+        self.assertFalse(PRIVATE_NAME in recorded, "a child received a name")
 
     def test_added_file_path_is_checked(self):
         self.write(PLANNING_PATH, "public text\n")
@@ -226,12 +259,40 @@ class FossilCheckTests(unittest.TestCase):
 
     def test_missing_private_name_configuration_fails_closed(self):
         for value in ("", " \n "):
-            self.env["FOSSIL_PRIVATE_NAME_HASHES"] = value
-            self.check(2)
-
-    def test_invalid_hash_configuration_fails_closed(self):
-        self.env["FOSSIL_PRIVATE_NAME_HASHES"] = "invalid"
+            with self.subTest(value=value):
+                self.env["FOSSIL_PRIVATE_NAMES"] = value
+                result = self.check(2)
+                self.assertIn("FOSSIL_PRIVATE_NAMES", result.stderr)
+        del self.env["FOSSIL_PRIVATE_NAMES"]
         self.check(2)
+        del self.env["FOSSIL_REQUIRE_PRIVATE_NAMES"]
+        self.check(2)
+
+    def test_invalid_name_configuration_fails_closed_without_echoing_it(self):
+        for value in ("not a slug", PRIVATE_NAME + "\nsecond/name"):
+            with self.subTest(value=value):
+                self.env["FOSSIL_PRIVATE_NAMES"] = value
+                result = self.check(2)
+                self.assertNotIn(PRIVATE_NAME, result.stdout + result.stderr)
+                self.assertNotIn("slug", result.stdout + result.stderr.replace("repository slug", ""))
+
+    def test_invalid_requirement_flag_fails_closed(self):
+        self.env["FOSSIL_REQUIRE_PRIVATE_NAMES"] = "maybe"
+        self.check(2)
+
+    def test_without_names_optional_runs_check_public_patterns_only(self):
+        del self.env["FOSSIL_PRIVATE_NAMES"]
+        self.env["FOSSIL_REQUIRE_PRIVATE_NAMES"] = "false"
+        self.env["GITHUB_ACTIONS"] = "true"
+        self.write("added.txt", PRIVATE_NAME + "\n")
+        self.commit()
+        result = self.check(0)
+        self.assertIn("::notice", result.stdout)
+        self.assertIn("public patterns only", result.stdout)
+        self.base = self.git("rev-parse", "HEAD")
+        self.write("added.txt", SESSION + "\n")
+        self.commit()
+        self.check(1)
 
     def test_invalid_or_unavailable_revision_fails_closed(self):
         self.check(2, base="not-a-commit")
