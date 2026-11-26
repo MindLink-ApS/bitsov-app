@@ -2,8 +2,9 @@
  * Node-routed call audio engine (M6 A1): the renderer half of the media path
  * app -> own node -> peer node -> peer app.
  *
- * Capture: the microphone stream (echo cancellation and noise suppression
- * requested by the engine's getUserMedia constraints) is cut into 20 ms
+ * Capture: the microphone stream (the call asks getUserMedia for plain
+ * `audio: true`; echo cancellation and noise suppression are not requested
+ * here, so they are whatever the webview defaults to) is cut into 20 ms
  * frames by an AudioWorklet, encoded, and handed to `transport.send` as one
  * payload per frame. The Rust host adds the wire `seq` and owns the socket.
  *
@@ -33,6 +34,7 @@ import { CAP_OPUS, CAP_PCMU, audioPayload, chooseCodec, decodeFrame, helloPayloa
 import { decodeMuLaw, encodeMuLaw, PCMU_RATE } from './g711';
 import { Framer, SequencedResampler, StreamResampler, frameSamples } from './pcm';
 import { JitterBuffer, type JitterStats } from './jitterBuffer';
+import { AudioStatsRecorder, micSettings, ROW_MS, type AudioStatRow, type HostQueueStats } from './callAudioStats';
 import { CAPTURE_PROCESSOR, PLAYOUT_PROCESSOR, type CaptureMessage, type PlayoutMessage, type PlayoutReport } from './callAudioShared';
 
 export const OPUS_RATE = 48_000;
@@ -53,7 +55,13 @@ export const OPUS_FALLBACK_FRAMES = 250;
  */
 export const SILENT_FRAMES = 500;
 
-export type MediaTransport = { send: (payload: Uint8Array) => void };
+export type MediaTransport = {
+  send: (payload: Uint8Array) => void;
+  /** Local read of the host's queue drop counts (running totals); null when it cannot say. */
+  queueStats?: () => Promise<HostQueueStats | null>;
+  /** Where this call's local audio statistics go (see `CallAudioDeps.onStats`). */
+  report?: (row: AudioStatRow) => void;
+};
 
 export type CallAudioDeps = {
   stream: MediaStream;
@@ -74,6 +82,14 @@ export type CallAudioDeps = {
    * (true), or sound again (false). Reported on change only.
    */
   onSilence?: (silent: boolean) => void;
+  /**
+   * One row of local audio statistics (numbers only) about every five
+   * seconds, and a last partial row at close. Defaults to the transport's
+   * `report`; without either, nothing is measured.
+   */
+  onStats?: (row: AudioStatRow) => void;
+  /** Test seam: a monotonic clock in milliseconds (defaults to `performance.now`). */
+  clock?: () => number;
 };
 
 /** A codec as the call report names it. */
@@ -151,6 +167,29 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
   /** Mu-law downlink, and Opus decoded at another rate: one stream per run of consecutive seqs. */
   const pcmuDownlink = new SequencedResampler();
   const opusDownlink = new SequencedResampler();
+  const clock = deps.clock ?? (() => performance.now());
+  /** Local statistics: only when there is a sink. They read frames the engine already holds. */
+  const sink = deps.onStats ?? deps.transport.report;
+  const rec = sink ? new AudioStatsRecorder(clock()) : null;
+  let rowTimer: ReturnType<typeof setInterval> | undefined;
+  let loopTimer: ReturnType<typeof setInterval> | undefined;
+  let rowBusy = false;
+  const mic = () => micSettings(deps.stream.getAudioTracks?.()[0]);
+  const emit = (row: AudioStatRow) => { try { sink?.(row); } catch { /* a sink must not touch the call */ } };
+  const bounded = <T,>(read: () => Promise<T | null>): Promise<T | null> => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), 500);
+    read().then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(null); });
+  });
+  const closeRow = async () => {
+    if (!rec || closed || rowBusy) return;
+    rowBusy = true;
+    try {
+      const [jitter, host] = await Promise.all([bounded(readStats), deps.transport.queueStats ? bounded(deps.transport.queueStats) : Promise.resolve(null)]);
+      if (!closed) emit(rec.close(clock(), { codec: sending, mic: mic(), jitter, host }));
+    } finally { rowBusy = false; }
+  };
+  /** Decoded audio on its way to playout (measured before the buffer is transferred). */
+  const play = (seq: number, pcm: Float32Array) => { rec?.played(pcm); playFrame(seq, pcm); };
 
   const fail = (message: string) => {
     if (closed || failed) return;
@@ -192,6 +231,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
   /** One captured 20 ms frame at the context rate. */
   const captured = (pcm: Float32Array) => {
     if (closed || !context) return;
+    rec?.captured(pcm);
     listen(pcm);
     const frame = muted ? new Float32Array(pcm.length) : pcm;
     sending = encoder ? chooseCodec(localCaps, peerCaps) : 'pcmu';
@@ -231,7 +271,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
           const pcm = new Float32Array(audio.numberOfFrames);
           audio.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
           const seq = Math.round(audio.timestamp / FRAME_US) >>> 0;
-          playFrame(seq, opusDownlink.push(seq, pcm, audio.sampleRate, rate));
+          play(seq, opusDownlink.push(seq, pcm, audio.sampleRate, rate));
         } finally {
           audio.close();
         }
@@ -353,6 +393,11 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     }
     if (closed) return;
     sayHello();
+    if (rec) {
+      rowTimer = setInterval(() => void closeRow(), ROW_MS);
+      rec.startTicking(clock());
+      loopTimer = setInterval(() => rec.tick(clock()), 20);
+    }
     helloTimer = setInterval(() => { if (peerCaps === null) sayHello(); else { clearInterval(helloTimer); helloTimer = undefined; } }, HELLO_INTERVAL_MS);
   })();
   ready.catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
@@ -365,6 +410,10 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
       if (!frame) return;
       const payload = parsePayload(frame.payload);
       if (!payload) return;
+      if (rec) {
+        rec.arrived(clock());
+        if (payload.type !== 'hello') rec.received(payload.codec === 'opus' ? 'opus' : 'pcmu');
+      }
       if (payload.type === 'hello') {
         const first = peerCaps === null;
         peerCaps = payload.caps;
@@ -376,7 +425,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
       receivedCodecs.add(codecName(payload.codec));
       if (payload.codec === 'pcmu') {
         if (!context) return;
-        playFrame(frame.seq, pcmuDownlink.push(frame.seq, decodeMuLaw(payload.data), PCMU_RATE, context.sampleRate));
+        play(frame.seq, pcmuDownlink.push(frame.seq, decodeMuLaw(payload.data), PCMU_RATE, context.sampleRate));
       } else {
         if (decoder) {
           try {
@@ -398,6 +447,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     setMuted: (next) => {
       if (next === muted) return;
       muted = next;
+      rec?.setMuted(next, clock());
       // Muting or unmuting starts a fresh observation: what the microphone
       // delivered before says nothing about what it delivers now.
       zeroFrames = 0;
@@ -414,6 +464,10 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
       closed = true;
       clearInterval(helloTimer);
       helloTimer = undefined;
+      clearInterval(rowTimer);
+      clearInterval(loopTimer);
+      // The last, partial row: no round trips here, so teardown takes no longer.
+      if (rec && clock() - rec.rowStartedAt() >= 500) emit(rec.close(clock(), { codec: sending, mic: mic(), jitter: null, host: null }, true));
       await ready.catch(() => undefined);
       for (const cleanup of cleanups.splice(0)) cleanup();
       encoder?.close();

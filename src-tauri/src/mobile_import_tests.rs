@@ -73,8 +73,8 @@ async fn noise_auth_reply_with(listener: &tokio::net::TcpListener, accept: bool)
 }
 
 fn app() -> tauri::App<tauri::test::MockRuntime> {
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    tauri::test::mock_builder().manage(NodeState::for_api(format!("http://127.0.0.1:{port}/api/v1")))
+    // A port the proxy can still bind later (see `proxy_api_base`).
+    tauri::test::mock_builder().manage(NodeState::for_api(super::remote_connect_tests::proxy_api_base()))
         .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap()
 }
 

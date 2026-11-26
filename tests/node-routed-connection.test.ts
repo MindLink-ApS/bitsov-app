@@ -3,6 +3,7 @@ import type { CallAudio, MediaTransport } from '../src/control/callAudio';
 import type { MediaBridge, MediaLink } from '../src/control/mediaBridge';
 import { frameBytes, isFrameMessage, parseLinkMessage, unavailableMediaBridge } from '../src/control/mediaBridge';
 import { createNodeRoutedConnection, isNodeRoutedSdp, nodeRoutedSdp, NODE_ROUTED_MARKER } from '../src/control/nodeRoutedConnection';
+import { AudioStatsRecorder, audioStats, micSettings } from '../src/control/callAudioStats';
 
 const ID = '0123456789abcdef0123456789abcdef';
 const PEER = 'a'.repeat(64);
@@ -51,6 +52,24 @@ function fakeAudio(mode: ReadyMode = 'ready') {
 const stream = () => ({ getTracks: () => [], getAudioTracks: () => [], getVideoTracks: () => [] }) as unknown as MediaStream;
 
 describe('node-routed connection (the engine’s RTCPeerConnection surface)', () => {
+  it('gives the audio engine a statistics sink filed under this call id, and the host queue read through the bridge', async () => {
+    const b = fakeBridge();
+    const queue = { uplinkDropped: 3, downlinkDropped: 1 };
+    b.bridge.stats = async () => queue;
+    const a = fakeAudio();
+    const id = 'fedcba9876543210fedcba9876543210';
+    const conn = createNodeRoutedConnection({ callId: () => id, peer: () => PEER, bridge: b.bridge, audio: a.audio });
+    conn.addTrack({ kind: 'audio' } as MediaStreamTrack, stream());
+    await conn.setLocalDescription(await conn.createOffer());
+    await conn.setRemoteDescription({ type: 'answer', sdp: nodeRoutedSdp('answer', id) });
+    const transport = a.made[0].transport;
+    expect(await transport.queueStats?.()).toEqual(queue);
+    const row = new AudioStatsRecorder(0).close(5_000, { codec: 'pcmu', mic: micSettings(null), jitter: null, host: null });
+    transport.report?.(row);
+    expect(audioStats.rows(id)).toEqual([row]);
+    expect(audioStats.rows(ID)).toEqual([]);
+  });
+
   it('describes itself with the marker and never gathers candidates', async () => {
     const sdp = nodeRoutedSdp('offer', ID);
     expect(isNodeRoutedSdp(sdp)).toBe(true);

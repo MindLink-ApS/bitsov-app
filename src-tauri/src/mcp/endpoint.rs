@@ -30,7 +30,7 @@ use super::identity::Identities;
 use super::pairing::{PairError, Pairing};
 use super::server::{ReadFailed, Reads, MAX_FRAME_BYTES};
 use super::session::{clean, AuditRow, Begun, Outcome, Registry, Sessions, MAX_CLIENT_NAME};
-use super::store::{self, r2_preset_allowed, FileIo, R2Preset, StoreError, StoredClient, MAX_CLIENTS, R2_PAIRING_OPEN};
+use super::store::{self, mcp_topic_allowed, r2_preset_allowed, FileIo, R2Preset, StoreError, StoredClient, MAX_CLIENTS, R2_PAIRING_OPEN};
 use crate::ai::{Preset, Topic};
 use crate::at_rest::Sealer;
 
@@ -248,8 +248,10 @@ impl ReadSource for Fixed<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeError {
     Pair(PairError),
-    /// A preset wider than R2 allows (`exact`).
+    /// A preset above counts (`rounded`, `exact`).
     PresetTooWide,
+    /// A topic no MCP client may have (`balance`, `payments`).
+    TopicNotAllowed,
     UnknownClient,
     /// Already [`MAX_CLIENTS`] clients: the owner removes one first.
     TooManyClients,
@@ -340,6 +342,9 @@ impl Host {
     /// [`Host::commit`], which saves it or undoes it, so it is not public.
     /// Refused when [`MAX_CLIENTS`] other clients are already kept.
     fn approve(&mut self, id: &str, topics: &[Topic], preset: Preset, now_ms: u64) -> Result<(), ChangeError> {
+        if !topics.iter().all(|topic| mcp_topic_allowed(*topic)) {
+            return Err(ChangeError::TopicNotAllowed);
+        }
         if !r2_preset_allowed(preset) {
             return Err(ChangeError::PresetTooWide);
         }
@@ -830,16 +835,15 @@ mod tests {
     }
 
     #[test]
-    fn every_stored_preset_reaches_the_read_path_as_counts_or_rounded() {
+    fn every_stored_preset_reaches_the_read_path_as_counts() {
         let mut host = Host::default();
         let (id, _) = paired(&mut host, &[Topic::Node]);
         let record = host.stored()[0].clone();
-        for (stored, read) in [(Preset::Counts, R2Preset::Counts), (Preset::Rounded, R2Preset::Rounded), (Preset::Exact, R2Preset::Counts)] {
-            // An exact record cannot be approved or loaded; forge one directly anyway.
+        for stored in [Preset::Counts, Preset::Rounded, Preset::Exact] {
+            // Wider records are narrowed on load; forge them directly anyway.
             let host = Host::from_stored(vec![StoredClient { preset: stored, ..record.clone() }]);
-            assert_eq!(host.preset(&id), read, "{stored:?}");
-            assert!(matches!(host.preset(&id).preset(), Preset::Counts | Preset::Rounded));
-            assert_eq!(host.registry.active(&id).is_some(), stored != Preset::Exact, "an exact record is never authorised");
+            assert_eq!(host.preset(&id), R2Preset::Counts, "{stored:?}");
+            assert_eq!(host.registry.active(&id).is_some(), stored == Preset::Counts, "only a counts record is authorised");
         }
         assert_eq!(Host::default().preset("mcp-unknown"), R2Preset::Counts);
     }
@@ -857,18 +861,36 @@ mod tests {
         host.open_pairing(0);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
         let id = asked["pair"]["id"].as_str().unwrap().to_owned();
-        host.commit(&file, Some(&sealer), |h| h.approve(&id, &[Topic::Node], Preset::Rounded, 1)).unwrap();
+        host.commit(&file, Some(&sealer), |h| h.approve(&id, &[Topic::Node], Preset::Counts, 1)).unwrap();
         let done = reply(&host.on_frame(&mut conn, &frame(json!({"pair_status": true})), 2, &Fake));
         let secret: [u8; 32] = hex::decode(done["secret"].as_str().unwrap()).unwrap().try_into().unwrap();
 
         // A restart: only the sealed file is left.
         let records = crate::mcp::store::load(&file, Some(&sealer)).unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!((records[0].id.as_str(), records[0].preset), (id.as_str(), Preset::Rounded));
+        assert_eq!((records[0].id.as_str(), records[0].preset), (id.as_str(), Preset::Counts));
         let mut host = Host::from_stored(records);
         let mut conn = ready(&mut host, &id, &secret);
         let out = call_read_node(&mut host, &mut conn, 20, &ByPreset);
-        assert!(out["result"]["content"].to_string().contains("Rounded"), "reads use this client's own preset: {out}");
+        assert!(out["result"]["content"].to_string().contains("Counts"), "reads use this client's own preset: {out}");
+    }
+
+    #[test]
+    fn approve_refuses_balance_payments_and_rounded_and_changes_nothing() {
+        let (file, sealer) = (MemFile::default(), TagSealer);
+        let mut host = Host::default();
+        let mut conn = Conn::Start;
+        host.open_pairing(0);
+        let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": "Desk", "nonce": hex::encode([3u8; 32])}})), 0, &Fake));
+        let id = asked["pair"]["id"].as_str().unwrap().to_owned();
+        for topic in [Topic::Balance, Topic::Payments] {
+            assert_eq!(host.commit_approve(&file, Some(&sealer), &id, &[Topic::Node, topic], Preset::Counts, 1), Err(ChangeError::TopicNotAllowed), "{topic:?}");
+        }
+        assert_eq!(host.commit_approve(&file, Some(&sealer), &id, &[Topic::Node], Preset::Rounded, 1), Err(ChangeError::PresetTooWide));
+        assert!(host.stored().is_empty() && file.bytes.borrow().is_none(), "nothing approved, nothing saved");
+        assert!(host.waiting_requests(1).iter().any(|w| w.id == id), "the request still waits");
+        host.commit_approve(&file, Some(&sealer), &id, &[Topic::Node, Topic::Channels], Preset::Counts, 1).unwrap();
+        assert_eq!(host.stored()[0].topics, [Topic::Node, Topic::Channels]);
     }
 
     #[test]
@@ -926,7 +948,7 @@ mod tests {
         host.open_pairing(at);
         let asked = reply(&host.on_frame(&mut conn, &frame(json!({"pair": {"name": name, "nonce": hex::encode([n; 32])}})), at, &Fake));
         let id = asked["pair"]["id"].as_str().unwrap().to_owned();
-        host.commit(file, Some(sealer), |h| h.approve(&id, &[Topic::Balance, Topic::Channels, Topic::Node, Topic::Inbox, Topic::Prices, Topic::Payments], Preset::Rounded, at))?;
+        host.commit(file, Some(sealer), |h| h.approve(&id, &[Topic::Channels, Topic::Node, Topic::Inbox, Topic::Prices], Preset::Counts, at))?;
         host.close_pairing(at);
         Ok(id)
     }
