@@ -583,6 +583,19 @@ describe('rooms in the shell', () => {
     expect($('[data-room-stream] [data-thread-loading]')).toBeNull();
   });
 
+  it('a technical read error in a room shows one plain line; the raw text is only behind Details', async () => {
+    const raw = 'room_thread_failed: GET http://127.0.0.1:9/api/v1/rooms 503 {"error":"node_busy"}';
+    stubHost({ room_thread: () => { throw { code: 'http', message: raw }; } });
+    await openShell();
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-room-stream] [data-thread-error]')).not.toBeNull());
+    const line = text('[data-room-stream] [data-thread-error] [data-soft-summary]');
+    expect(line).not.toMatch(/room_thread_failed|503|http:/);
+    expect(text('[data-room-stream] [data-thread-error] [data-soft-detail]')).toContain(raw);
+  });
+
   it('a failed re-read with messages on screen says so once, after the list, not on every message', async () => {
     const theirs = (i: number): Message => ({ id: `rr${i}`, kind: 0, sender: A, recipient: OWN, timestamp: 20_000 + i, plaintext: roomChatText(AB, i.toString(16).padStart(32, '0'), `hey ${i}`), payment_amount_msat: 2000 });
     let n = 0;

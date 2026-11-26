@@ -17,6 +17,7 @@ import {
 } from './room';
 import { createMessageEntrance } from './messageEntrance';
 import { DelayedSpinner } from './DelayedSpinner';
+import { SoftError } from './SoftError';
 import { StreamFrame } from './StreamFrame';
 import type { Delivery, Message, PriceQuote } from './types';
 
@@ -237,7 +238,7 @@ export function RoomThread(props: {
                 </div>
               </Match>
               <Match when={props.read === 'failed'}>
-                <p class="err-note" role="alert" data-thread-error>{props.error ?? t('roomReadError')}</p>
+                <div data-thread-error><SoftError message={props.error ?? t('roomReadError')} /></div>
               </Match>
               <Match when={props.read === 'pending'}>
                 <div class="empty-track" data-thread-loading><DelayedSpinner /></div>
@@ -311,7 +312,7 @@ export function RoomThread(props: {
           </For>
           {/* A failed re-read with messages on screen says so once, after them, as the direct chat does. */}
           <Show when={props.read === 'failed' && items().length > 0}>
-            <p class="err-note" role="alert" data-room-read-note>{props.error ?? t('roomReadError')}</p>
+            <div data-room-read-note><SoftError message={props.error ?? t('roomReadError')} /></div>
           </Show>
         </div>
       </div>

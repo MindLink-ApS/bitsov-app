@@ -647,7 +647,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
           )}
         </Show>
       </Show>
-      <Show when={error()}>{(e) => <p class="err-note" data-receive-error role="alert">{e()}</p>}</Show>
+      <Show when={error()}>{(e) => <div data-receive-error><SoftError message={e()} /></div>}</Show>
     </section>
   );
 }
@@ -773,7 +773,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
               <input data-send-memo placeholder={t('uiNoteOptional')} value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label={t('uiNote')} />
             </Show>
             <Show when={hint()}>{(h) => <p class="hint" data-send-hint>{h()}</p>}</Show>
-            <Show when={readError()}>{(e) => <p class="err-note" data-send-error role="alert">{e()}</p>}</Show>
+            <Show when={readError()}>{(e) => <div data-send-error><SoftError message={e()} /></div>}</Show>
             <Show when={read()}>
               {(inv) => (
                 <p class="hint" data-send-invoice={inv().amount_msat}>

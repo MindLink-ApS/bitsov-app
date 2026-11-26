@@ -7,6 +7,7 @@ import { usePairingActivity } from '../pairingActivity';
 import type { JoinView } from './AddDevice';
 import { normalizePairingLink, onboardingDiagnostic, type ConnectionError, type NodeStatus, type PairingView } from './pairing';
 import { PrimaryAction } from './PrimaryAction';
+import { DelayedSpinner } from '../control/DelayedSpinner';
 import { phoneCopy } from './phoneCopy';
 import './phoneOnboarding.css';
 
@@ -376,7 +377,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         <button type="button" class="quiet" disabled={busy()} onClick={() => void run(reset)}>{c().mismatch}</button>
       </Show>
       <Show when={screen() === 'start' || screen() === 'scanner'}><PrimaryAction disabledReason={busy() ? c().working : !props.scan ? c().unavailable : undefined} onClick={() => void scan()}>{c().scan}</PrimaryAction></Show>
-      <Show when={screen() === 'connecting'}><p class="phone-waiting" role="status"><span class="phone-spinner" aria-hidden="true" />{c().working}</p>
+      <Show when={screen() === 'connecting'}><p class="phone-waiting" role="status"><DelayedSpinner class="phone-spinner" decorative />{c().working}</p>
         {/* Connecting opens this app's protected pairing key; say why before iOS asks. */}
         <Show when={(props.platform ?? appPlatform()) === 'ios'}><p class="why" data-faceid-why>{c().faceIdWhy}</p></Show>
       </Show>

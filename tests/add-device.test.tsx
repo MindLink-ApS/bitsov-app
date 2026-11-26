@@ -250,6 +250,18 @@ it.each(['en', 'da'] as const)('keeps claim entry and validation free of shell c
   expect(root.textContent).not.toContain('konsensus ');
   expect(root.querySelector<HTMLInputElement>('[name="claim_code"]')!.value).toBe('');
 });
+it('a technical host error shows one plain line, with the raw text only behind Details', async () => {
+  const raw = 'device_pairing_failed: POST http://127.0.0.1:9/api/v1/devices 502 {"error":"upstream"}';
+  const root = mount(() => <AddDevice api={async () => { throw {message: raw}; }} />);
+  await flush();
+  const line = root.querySelector('[role="alert"]')!;
+  expect(line.textContent).not.toContain('device_pairing_failed');
+  expect(line.textContent).not.toContain('502');
+  expect(root.querySelector('[data-soft-detail]')!.textContent).toContain(raw);
+  expect(root.querySelector('[data-soft-detail]')!.hasAttribute('open')).toBe(false);
+  // The way forward stays.
+  expect([...root.querySelectorAll('button')].some(b => b.textContent?.includes('Try again'))).toBe(true);
+});
 it('does not render shell instructions returned by an older node', async () => {
   const root = mount(() => <AddDevice api={async () => { throw {message:'Run konsensus pair-ticket on your node.'}; }} />);
   await flush();

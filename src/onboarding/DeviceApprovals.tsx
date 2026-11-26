@@ -6,6 +6,7 @@ import type { DeviceView } from '../control/types';
 import { PendingApproval } from './LockedNode';
 import { usePairingActivity } from '../pairingActivity';
 import { onboardingDiagnostic } from './pairing';
+import { SoftError } from '../control/SoftError';
 
 /**
  * Touch ID (or phone biometric) approvals: one section with one action, used in
@@ -85,7 +86,7 @@ export function DeviceApprovals(props: {
             </div>
           </Match>
         </Switch>
-        <Show when={error()}><p class="err-note" role="alert">{onboardingDiagnostic(error()!, t('obDeviceSetupHelp'))}</p></Show>
+        <Show when={error()}><SoftError message={onboardingDiagnostic(error()!, t('obDeviceSetupHelp'))} /></Show>
       </section>
     </Show>
     </Show>

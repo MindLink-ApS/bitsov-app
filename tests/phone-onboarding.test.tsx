@@ -409,7 +409,10 @@ it('shows connecting progress without a dummy primary action', async () => {
   expect(document.querySelectorAll('button.primary')).toHaveLength(0);
   expect(document.querySelector('[role="status"]')?.textContent).toBe('Please wait…');
   // A progress indicator, not something that looks like a text field (and not the shell's status strip class).
-  expect(document.querySelector('[role="status"] .phone-spinner')?.getAttribute('aria-hidden')).toBe('true');
+  // It appears only after a moment, so a quick connect never flashes it; the text is there at once.
+  expect(document.querySelector('[role="status"] .phone-spinner')).toBeNull();
+  await vi.waitFor(() => expect(document.querySelector('[role="status"] .phone-spinner')?.getAttribute('aria-hidden')).toBe('true'), { timeout: 2000 });
+  expect(document.querySelector('[role="status"]')?.textContent).toBe('Please wait…');
   expect(document.querySelector('.phone-status')).toBeNull();
   expect(document.body.textContent).toContain('This usually takes less than half a minute.');
   expect(document.body.textContent).not.toContain('Keep your other device nearby');
