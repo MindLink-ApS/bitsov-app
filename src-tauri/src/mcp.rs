@@ -346,6 +346,8 @@ pub mod runner;
 pub mod runtime;
 /// Phase 1, slice A1.5a: the sealed, append-only audit log (not wired).
 pub mod audit_log;
+/// The phone-book view: masked handles for channel peers (read path only).
+pub mod handles;
 
 #[cfg(test)]
 mod tests;

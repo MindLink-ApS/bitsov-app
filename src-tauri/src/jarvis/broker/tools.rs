@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use super::route::{PeerKey, ReadRoute};
 use super::schema::{
-    Amount, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend, ChannelSummary,
+    Amount, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend, ChannelPeer, ChannelSummary,
     ChannelsReport, CopiedId, Direction, HealthReport, LightningBackend, Liveness, LocalPrices,
     MessageMetadata, PaymentEntry, PaymentsReport, PriceCategory, PricingMode, Report,
     SenderCount, SourceField, TargetFee, TrustLevel, UnavailableReason, Unit, WalletBalanceLabel,
@@ -109,6 +109,9 @@ struct BalanceWire {
 #[derive(Deserialize)]
 struct ChannelWire {
     channel_id: String,
+    /// Kept in memory for the MCP phone-book view only; never serialized.
+    #[serde(default)]
+    peer_pubkey: Option<String>,
     capacity_msat: u64,
     local_balance_msat: u64,
     remote_balance_msat: u64,
@@ -233,6 +236,7 @@ fn project_channels(list: Vec<ChannelWire>) -> Report<ChannelsReport> {
                 .short_channel_id
                 .as_deref()
                 .map(copy_short_channel_id),
+            peer: channel.peer_pubkey.as_deref().and_then(ChannelPeer::parse),
         });
     }
     Report::Ready {

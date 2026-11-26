@@ -13152,6 +13152,15 @@ struct McpNodeReads(AppHandle<tauri::Wry>);
 #[cfg(all(feature = "mcp-grant", desktop, not(feature = "mobile")))]
 impl bitsov_app::mcp::endpoint::ReadSource for McpNodeReads {
     fn reads_for(&self, preset: bitsov_app::mcp::store::R2Preset) -> Box<dyn bitsov_app::mcp::server::Reads + '_> {
+        self.reads_for_client(preset, None)
+    }
+
+    /// Channels as the phone book of this client's handles.
+    fn reads_for_client(
+        &self,
+        preset: bitsov_app::mcp::store::R2Preset,
+        handles: Option<bitsov_app::mcp::handles::Handles>,
+    ) -> Box<dyn bitsov_app::mcp::server::Reads + '_> {
         let app = self.0.clone();
         Box::new(bitsov_app::mcp::broker::BrokerReads::with_preset(
             move |topic, since_ms| {
@@ -13161,7 +13170,7 @@ impl bitsov_app::mcp::endpoint::ReadSource for McpNodeReads {
                     .unwrap_or(ai::TopicRead::Unavailable { topic, reason: ai::NoRead::NodeUnreachable })
             },
             preset,
-        ))
+        ).with_handles(handles))
     }
 }
 
