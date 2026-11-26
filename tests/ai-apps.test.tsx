@@ -123,7 +123,7 @@ describe('Settings → AI apps', () => {
     expect($('[data-ai-others]')).toBeNull();
   });
 
-  it('offers only node status, prices and message counts, counts only, and approve sends exactly that', async () => {
+  it('offers only node status, prices, connections and message counts (never balance or payments), counts only, and approve sends exactly that', async () => {
     const { api } = host({ enabled: true, pairing_open_s: 100, waiting: 1 }, { pending: [REQUEST] });
     await show(api);
     await vi.waitFor(() => expect($('[data-ai-request]')).not.toBeNull());
@@ -397,6 +397,45 @@ describe('Settings → AI apps', () => {
     finish();
     await vi.waitFor(() => expect(api.closePairing).toHaveBeenCalledTimes(2));
     expect(state.status.pairing_open_s).toBeNull();
+  });
+
+  it('a quick second click on Approve does not reach the host again', async () => {
+    const { api } = host({ enabled: true, pairing_open_s: 100, waiting: 1 }, { pending: [REQUEST] });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const status = api.status.getMockImplementation()!;
+    await show(api);
+    await vi.waitFor(() => expect($('[data-ai-request]')).not.toBeNull());
+    toggle('[data-ai-topic="node"]');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-ai-approve]')!.disabled).toBe(false));
+    // The read after the approval is slow: the button must stay off until it lands.
+    api.status.mockImplementation(async () => { await gate; return status(); });
+    click('[data-ai-approve]');
+    await vi.waitFor(() => expect(api.approve).toHaveBeenCalledOnce());
+    await new Promise(r => setTimeout(r, 20));
+    expect($<HTMLButtonElement>('[data-ai-approve]')?.disabled ?? true).toBe(true);
+    $<HTMLButtonElement>('[data-ai-approve]')?.click();
+    release();
+    await vi.waitFor(() => expect($('[data-ai-request]')).toBeNull());
+    expect(api.approve).toHaveBeenCalledOnce();
+  });
+
+  it('a window found open on arrival says it was left open, and can be stopped', async () => {
+    const { api } = host({ enabled: true, pairing_open_s: 80 });
+    await show(api);
+    expect($('[data-ai-note="err"]')!.textContent).toBe(appEn.mcpWindowLeftOpen);
+    expect($('[data-ai-window]')).not.toBeNull();
+    click('[data-ai-window-cancel]');
+    await vi.waitFor(() => expect($('[data-ai-window]')).toBeNull());
+    expect(api.closePairing).toHaveBeenCalledOnce();
+  });
+
+  it('a window this screen opens itself is not called left open', async () => {
+    const { api } = host({ enabled: true });
+    await show(api);
+    click('[data-ai-add]');
+    await vi.waitFor(() => expect($('[data-ai-window]')).not.toBeNull());
+    expect($('[data-ai-note="err"]')).toBeNull();
   });
 
   it('a close that fails on the way out is kept for diagnosis, not dropped', async () => {

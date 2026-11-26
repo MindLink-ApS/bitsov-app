@@ -38,7 +38,7 @@ const { sampleSource, SAMPLE_OWN_ID } = await import('../src/control/sample');
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
-afterEach(() => { dispose?.(); mount?.remove(); });
+afterEach(() => { dispose?.(); mount?.remove(); vi.clearAllMocks(); status.value = { ...status.value, pairing_open_s: null }; });
 const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
 
 it('closing Settings with a pairing window open closes the window and leaves the screen', async () => {
@@ -62,4 +62,21 @@ it('closing Settings with a pairing window open closes the window and leaves the
   $<HTMLButtonElement>('[data-tab="ai"]')!.click();
   await vi.waitFor(() => expect($('[data-ai-add]')).not.toBeNull());
   expect($('[data-ai-window]')).toBeNull();
+});
+
+it('switching to another Settings tab with a pairing window open closes the window', async () => {
+  mount = document.createElement('div');
+  document.body.appendChild(mount);
+  dispose = render(() => <ControlCenter source={sampleSource({ firstLiveMs: 1e9 })} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+  await vi.waitFor(() => expect($('[data-tab="ai"]')).not.toBeNull());
+  $<HTMLButtonElement>('[data-tab="ai"]')!.click();
+  await vi.waitFor(() => expect($('[data-ai-add]')).not.toBeNull());
+  $<HTMLButtonElement>('[data-ai-add]')!.click();
+  await vi.waitFor(() => expect($('[data-ai-window]')).not.toBeNull());
+  expect(fake.api.closePairing).not.toHaveBeenCalled();
+
+  $<HTMLButtonElement>('[data-tab="general"]')!.click();
+  await vi.waitFor(() => expect(fake.api.closePairing).toHaveBeenCalled());
+  expect($('[data-ai-apps]')).toBeNull();
+  expect(status.value.pairing_open_s).toBeNull();
 });

@@ -43,10 +43,17 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
     say(key, 'err', ...(code === 'too_many_clients' ? [MCP_MAX_CLIENTS] : []));
   };
 
+  // The first read on arrival: a pairing window open then was left open by
+  // a close that failed on the way out (the screen closes it when it goes).
+  let arrived = false;
   async function refresh() {
     try {
       const next = await props.api.status();
       setStatus(next);
+      if (!arrived) {
+        arrived = true;
+        if (next.pairing_open_s != null) say('mcpWindowLeftOpen');
+      }
       setReadAt(now());
       setTick(now());
       const usable = next.platform === 'ok' && next.store !== 'blocked';
@@ -75,8 +82,9 @@ export function AiApps(props: { api: AiAppsApi; now?: () => number }) {
     } catch (error) {
       fail(error, override);
     } finally {
-      setBusy(false);
-      await refresh();
+      // Read the host first: re-enabling on stale state lets a quick second
+      // click reach a request the host has already settled.
+      try { await refresh(); } finally { setBusy(false); }
     }
   }
 
