@@ -56,6 +56,7 @@ elif name == "npm":
     binary.write_text("app fixture")
     binary.chmod(0o755)
     shutil.copy2("src-tauri/bin/konsensus-" + triple, app / "Contents/MacOS/konsensus")
+    shutil.copy2("src-tauri/bin/bitsov-mcp-" + triple, app / "Contents/MacOS/bitsov-mcp")
     (app / "Contents/Resources/icon.icns").write_bytes(b"icns")
     (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"LSMinimumSystemVersion": "11.0"}))
     pathlib.Path("dist").mkdir(exist_ok=True)
@@ -81,6 +82,14 @@ elif name == "codesign":
         pathlib.Path("verified-app").touch()
 elif name == "sleep":
     pass
+elif name == "cargo":
+    # Only the MCP shim, built from this checkout for the package's target.
+    assert args[:5] == ["build", "--locked", "--release", "--manifest-path", "src-tauri/Cargo.toml"], args
+    assert args[5:8] == ["-p", "bitsov-mcp", "--target"] and len(args) == 9, args
+    built = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / args[8] / "release/bitsov-mcp"
+    built.parent.mkdir(parents=True, exist_ok=True)
+    built.write_bytes(b"fake shim " + args[8].encode())
+    built.chmod(0o755)
 elif name == "hdiutil":
     if args[0] == "create":
         assert args == ["create", "-srcfolder", str(app), "-volname", "BitSov", "-format", "UDZO", str(dmg)], args

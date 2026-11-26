@@ -2232,10 +2232,7 @@ mod tests {
         }
 
         // Nothing listening: the error names no URL, so the token cannot leak into it.
-        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let dead_port = dead.local_addr().unwrap().port();
-        drop(dead);
-        let url = ws_url(&format!("http://127.0.0.1:{dead_port}/api/v1"), "SECRET").unwrap();
+        let url = ws_url(crate::remote_access::test_ports::DEAD_API_BASE, "SECRET").unwrap();
         let err = run_ws_session(&url, None, &|_| {}).await.unwrap_err();
         assert!(!err.contains("SECRET") && !err.contains("ws://"), "{err}");
     }

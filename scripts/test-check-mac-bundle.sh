@@ -49,8 +49,11 @@ good_tree() {
   printf 'fake app\0/assistant.html\0/index.html\0/assets/index-abc123.js\0' > "$app/Contents/MacOS/bitsov-app"
   printf 'fake node\0bytes\0' > "$d/bin/konsensus-aarch64-apple-darwin"
   cp "$d/bin/konsensus-aarch64-apple-darwin" "$app/Contents/MacOS/konsensus"
+  printf 'fake shim\0bytes\0' > "$d/bin/bitsov-mcp-aarch64-apple-darwin"
+  cp "$d/bin/bitsov-mcp-aarch64-apple-darwin" "$app/Contents/MacOS/bitsov-mcp"
   chmod 0755 "$app/Contents/MacOS/bitsov-app" "$app/Contents/MacOS/konsensus" \
-    "$d/bin/konsensus-aarch64-apple-darwin"
+    "$d/bin/konsensus-aarch64-apple-darwin" "$app/Contents/MacOS/bitsov-mcp" \
+    "$d/bin/bitsov-mcp-aarch64-apple-darwin"
   printf 'icns' > "$app/Contents/Resources/icon.icns"
   plist 11.0 > "$app/Contents/Info.plist"
   printf '<!doctype html><title>BitSov</title>\n' > "$d/dist/index.html"
@@ -61,7 +64,7 @@ run_check() {
   local d="$1"
   shift
   bash "$CHECK" "$@" --app "$d/BitSov.app" --sidecar "$d/bin/konsensus-aarch64-apple-darwin" \
-    --dist "$d/dist" > "$d/result.log" 2>&1
+    --shim "$d/bin/bitsov-mcp-aarch64-apple-darwin" --dist "$d/dist" > "$d/result.log" 2>&1
 }
 
 # expect <pass|fail> <label> <expected output substring> <mutation...>
@@ -96,6 +99,14 @@ expect fail 'bundled sidecar differs from the verified one' 'FAIL  bundled sidec
   append BitSov.app/Contents/MacOS/konsensus x
 expect fail 'verified sidecar missing' 'FAIL  bundled sidecar matches the verified sidecar' \
   rm bin/konsensus-aarch64-apple-darwin
+expect fail 'bundled MCP shim missing' 'FAIL  bundled MCP shim is executable' \
+  rm BitSov.app/Contents/MacOS/bitsov-mcp
+expect fail 'bundled MCP shim not executable' 'FAIL  bundled MCP shim is executable' \
+  chmod 0644 BitSov.app/Contents/MacOS/bitsov-mcp
+expect fail 'bundled MCP shim differs from the one built' 'FAIL  bundled MCP shim matches the one built' \
+  append BitSov.app/Contents/MacOS/bitsov-mcp x
+expect fail 'built MCP shim missing' 'FAIL  bundled MCP shim matches the one built' \
+  rm bin/bitsov-mcp-aarch64-apple-darwin
 expect fail 'app executable missing' 'FAIL  app executable is executable' \
   rm BitSov.app/Contents/MacOS/bitsov-app
 expect fail 'app executable not executable' 'FAIL  app executable is executable' \

@@ -333,10 +333,14 @@ impl Host {
         Some(super::handles::Handles::new(key.clone(), &record.id, record.created_ms))
     }
 
+    /// A host for these records. A record above counts, or holding a topic
+    /// no MCP client may have (`balance`, `payments`), is kept but never
+    /// authorised: such a record cannot come from [`store::load`], which
+    /// narrows them, so whoever passes one gets no client from it.
     pub fn from_stored(records: Vec<StoredClient>) -> Self {
         let mut host = Host::default();
         for record in &records {
-            if !r2_preset_allowed(record.preset) {
+            if !r2_preset_allowed(record.preset) || !record.topics.iter().all(|topic| mcp_topic_allowed(*topic)) {
                 continue;
             }
             if host.identities.insert(&record.id, &record.public_key).is_ok() {
@@ -898,6 +902,21 @@ mod tests {
         let mut conn = ready(&mut host, &id, &secret);
         let out = call_read_node(&mut host, &mut conn, 20, &ByPreset);
         assert!(out["result"]["content"].to_string().contains("Counts"), "reads use this client's own preset: {out}");
+    }
+
+    #[test]
+    fn a_record_with_balance_or_payments_is_never_authorised() {
+        let mut host = Host::default();
+        let (id, _) = paired(&mut host, &[Topic::Node]);
+        let record = host.stored()[0].clone();
+        for topic in [Topic::Balance, Topic::Payments] {
+            // `store::load` narrows these away; forge one directly anyway.
+            let host = Host::from_stored(vec![StoredClient { topics: vec![Topic::Node, topic], ..record.clone() }]);
+            assert!(host.registry.active(&id).is_none(), "{topic:?}");
+            assert!(host.identities.public_key(&id).is_none(), "{topic:?}: no key either");
+        }
+        let host = Host::from_stored(vec![record]);
+        assert!(host.registry.active(&id).is_some(), "a record within scope is authorised");
     }
 
     #[test]

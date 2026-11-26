@@ -83,6 +83,17 @@ jobs:
           bash scripts/fetch-node-sidecar.sh
           npm run tauri -- icon src-tauri/icons/icon.png --output "$RUNNER_TEMP/preview-icons"
           cp "$RUNNER_TEMP/preview-icons/icon.ico" src-tauri/icons/icon.ico
+      # The MCP shim (bundle.externalBin bin/bitsov-mcp), built from this checkout.
+      # Without it Tauri refuses to build, so the installer always carries it.
+      - name: Build the MCP shim for the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          cargo build --locked --release --manifest-path src-tauri/Cargo.toml -p bitsov-mcp
+          mkdir -p src-tauri/bin
+          cp src-tauri/target/release/bitsov-mcp.exe "src-tauri/bin/bitsov-mcp-${TRIPLE}.exe"
+          test -s "src-tauri/bin/bitsov-mcp-${TRIPLE}.exe"
       - name: Build unsigned NSIS preview
         shell: bash
         env:
