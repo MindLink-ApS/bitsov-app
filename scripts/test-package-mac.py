@@ -49,6 +49,7 @@ elif name == "npm":
     binary.chmod(0o755)
     import shutil
     shutil.copy2("src-tauri/bin/konsensus-aarch64-apple-darwin", app / "Contents/MacOS/konsensus")
+    shutil.copy2("src-tauri/bin/bitsov-mcp-aarch64-apple-darwin", app / "Contents/MacOS/bitsov-mcp")
     (app / "Contents/Resources/icon.icns").write_bytes(b"icns")
     with (app / "Contents/Info.plist").open("wb") as f:
         plistlib.dump({"LSMinimumSystemVersion": "11.0", "CFBundleIdentifier": "org.example.client"}, f)
@@ -92,7 +93,7 @@ elif name == "plutil":
 elif name == "file":
     if args[0] == "-b":
         print("Mach-O 64-bit executable arm64" if pathlib.Path(args[-1]).name in
-              ("bitsov-app", "konsensus", "Example") else "data")
+              ("bitsov-app", "konsensus", "bitsov-mcp", "Example") else "data")
 elif name == "codesign":
     if "--sign" in args:
         assert "--force" in args and "--deep" not in args, args
@@ -120,6 +121,14 @@ elif name == "codesign":
         if os.environ.get("BITSOV_MAC_SIGNING_IDENTITY") != "-":
             assert (app / "Contents/embedded.provisionprofile").is_file()
         pathlib.Path("verified-app").touch()
+elif name == "cargo":
+    # Only the MCP shim, built from this checkout for the package's target.
+    assert args[:5] == ["build", "--locked", "--release", "--manifest-path", "src-tauri/Cargo.toml"], args
+    assert args[5:8] == ["-p", "bitsov-mcp", "--target"] and len(args) == 9, args
+    built = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / args[8] / "release/bitsov-mcp"
+    built.parent.mkdir(parents=True, exist_ok=True)
+    built.write_bytes(b"fake shim " + args[8].encode())
+    built.chmod(0o755)
 elif name == "security":
     assert args[:2] == ["cms", "-D"], args
     pathlib.Path(args[args.index("-o") + 1]).write_bytes(pathlib.Path(args[args.index("-i") + 1]).read_bytes())
@@ -198,7 +207,7 @@ class PackagingTests(unittest.TestCase):
                 cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             )
             events = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
-            self.assertTrue(all(e[0] in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun", "security")
+            self.assertTrue(all(e[0] in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun", "security", "cargo")
                                 for e in events), events)
             image = (root / DMG).read_text() if (root / DMG).exists() else None
             return result, events, image

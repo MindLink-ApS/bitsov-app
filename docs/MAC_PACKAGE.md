@@ -175,6 +175,12 @@ What the script does:
    SHA256SUMS from the pinned release. Neither the flag nor the environment
    variable bypasses verification. Unknown targets or mismatched hashes stop
    packaging with expected/actual sha256 diagnostics.
+1b. **MCP shim.** Except for the remote-only profile, deletes every
+   `src-tauri/bin/bitsov-mcp-*` and builds `bitsov-mcp` from this checkout
+   (`cargo build --locked --release -p bitsov-mcp --target <triple>`) into
+   `src-tauri/bin/bitsov-mcp-<triple>`. Tauri bundles it as the second
+   `externalBin`, at `Contents/MacOS/bitsov-mcp`: the path an AI app's
+   settings point to.
 2. **Build.** Runs `npm ci --ignore-scripts --no-audit --no-fund`. It deletes
    `src-tauri/target/release/bundle` so a stale bundle cannot be checked or
    uploaded. Then it runs
@@ -187,11 +193,11 @@ What the script does:
    Build output is retained in `src-tauri/target/package-mac.log`.
 3. **Pre-signing static checks.** Runs `scripts/check-mac-bundle.sh` (below),
    including a byte-for-byte comparison of the bundled node with the
-   authenticated source. This comparison must run **before** re-signing,
+   authenticated source, and of the bundled MCP shim with the one just built. This comparison must run **before** re-signing,
    which changes the bundled Mach-O bytes. The source in `src-tauri/bin/`
    stays untouched and remains verifiable against the release manifest.
 4. **Final signing.** Signs nested Mach-O files (including
-   `Contents/MacOS/konsensus` and framework binaries), then their containing
+   `Contents/MacOS/konsensus`, `Contents/MacOS/bitsov-mcp` and framework binaries), then their containing
    code bundles/frameworks, deepest first. Symlinks are not followed. Finally
    signs the outer app with `codesign --force --sign -`. The main executable
    is signed as part of the outer app. There are no bundle edits after this

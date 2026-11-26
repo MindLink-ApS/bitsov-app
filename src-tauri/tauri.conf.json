@@ -29,7 +29,8 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "bin/konsensus"
+      "bin/konsensus",
+      "bin/bitsov-mcp"
     ],
     "icon": [
       "icons/32x32.png",

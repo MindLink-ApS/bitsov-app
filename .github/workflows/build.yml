@@ -303,6 +303,7 @@ jobs:
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/bin
           : > "src-tauri/bin/konsensus-${TRIPLE}"
+          : > "src-tauri/bin/bitsov-mcp-${TRIPLE}"
 
       - name: Rust — cargo check (src-tauri)
         working-directory: src-tauri

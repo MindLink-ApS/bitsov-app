@@ -11,6 +11,8 @@
 #   --app      default <target-dir>/<triple>/release/bundle/macos/BitSov.app
 #   --sidecar  the fetched, signature-verified node; default
 #              src-tauri/bin/konsensus-<triple>
+#   --shim     the MCP shim built from this checkout; default
+#              src-tauri/bin/bitsov-mcp-<triple>
 #   --dist     the frontend dist the release build embedded; default dist
 #   --remote-only  require the remote test identity and absence of any node
 # Exit 0 and "MAC BUNDLE CHECK: PASS", or exit 1 and "MAC BUNDLE CHECK: FAIL".
@@ -24,6 +26,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fetch-node-sidecar.sh"
 
 APP="src-tauri/target/release/bundle/macos/BitSov.app"
 SIDECAR=""
+SHIM=""
 ARCH=""
 APP_EXPLICIT=0
 DIST="dist"
@@ -39,6 +42,7 @@ while [ $# -gt 0 ]; do
       ARCH="$2"; shift 2 ;;
     --app) APP="$2"; APP_EXPLICIT=1; shift 2 ;;
     --sidecar) SIDECAR="$2"; shift 2 ;;
+    --shim) SHIM="$2"; shift 2 ;;
     --dist) DIST="$2"; shift 2 ;;
     --remote-only) REMOTE_ONLY=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -51,6 +55,7 @@ case "$ARCH" in
   *) echo "--arch must be arm64 or x86_64" >&2; exit 2 ;;
 esac
 SIDECAR="${SIDECAR:-src-tauri/bin/konsensus-$TRIPLE}"
+SHIM="${SHIM:-src-tauri/bin/bitsov-mcp-$TRIPLE}"
 if [ "$APP_EXPLICIT" = 0 ]; then
   APP="${CARGO_TARGET_DIR:-src-tauri/target}/$TRIPLE/release/bundle/macos/BitSov.app"
 fi
@@ -96,6 +101,7 @@ plist_min_ok() {
 }
 
 sidecar_matches() { [ -f "$SIDECAR" ] && [ -f "$MACOS/konsensus" ] && cmp -s "$SIDECAR" "$MACOS/konsensus"; }
+shim_matches() { [ -f "$SHIM" ] && [ -f "$MACOS/bitsov-mcp" ] && cmp -s "$SHIM" "$MACOS/bitsov-mcp"; }
 native_executable() {
   local description
   description="$(file -b "$1")" || return 1
@@ -145,6 +151,9 @@ chk "app executable is native $ARCH" native_executable "$MACOS/bitsov-app"
 if [ "$REMOTE_ONLY" = 0 ]; then
   chk "bundled sidecar is native $ARCH" native_executable "$MACOS/konsensus"
   chk "bundled sidecar matches the verified sidecar ($SIDECAR)" sidecar_matches
+  chk "bundled MCP shim is executable" test -f "$MACOS/bitsov-mcp" -a -x "$MACOS/bitsov-mcp"
+  chk "bundled MCP shim is native $ARCH" native_executable "$MACOS/bitsov-mcp"
+  chk "bundled MCP shim matches the one built ($SHIM)" shim_matches
 fi
 chk "icon.icns is present" test -s "$APP/Contents/Resources/icon.icns"
 chk "Info.plist is well-formed" plist_lint
