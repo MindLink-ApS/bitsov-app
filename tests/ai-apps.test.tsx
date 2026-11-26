@@ -132,9 +132,9 @@ describe('Settings → AI apps', () => {
     expect($$('[data-ai-topic]').every(el => !(el as HTMLInputElement).checked)).toBe(true);
     expect($$('[data-ai-topic]').map(el => el.getAttribute('data-ai-topic'))).toEqual(['node', 'prices', 'channels', 'inbox']);
     for (const money of ['balance', 'payments']) expect($(`[data-ai-topic="${money}"]`)).toBeNull();
-    // Connections stay, and say plainly that they come as a number only.
+    // Connections stay, and say plainly that peers come under a code name, with no amounts.
     expect($('[data-ai-topic="channels"]')!.closest('label')!.textContent).toContain('Connections to other nodes');
-    expect($('[data-ai-topic-hint="channels"]')!.textContent!.trim()).toBe(appEn.mcpTopicChannelsHint);
+    expect($('[data-ai-topic-hint="channels"]')!.textContent!.trim()).toBe('Who you’re connected to (under a code name), never how much.');
     // No choice of detail at all: one plain line says what it sees.
     expect($$('[data-ai-request] input[type="radio"]')).toHaveLength(0);
     expect($('[data-ai-preset]')).toBeNull();
@@ -439,8 +439,8 @@ describe('Settings → AI apps', () => {
     expect($('[data-ai-warning] p')!.textContent).toBe(appDa.mcpHonest);
     expect(appDa.mcpHonest.startsWith('Det, denne AI-app læser, kan forlade denne computer, også til firmaet bag AI’en.')).toBe(true);
     expect(appDa.mcpHonest).toContain('aldrig din saldo eller dine betalinger');
-    expect($('[data-ai-counts-only]')!.textContent).toBe('Den ser kun tal: hvor mange, aldrig beløb, datoer eller id’er.');
-    expect($('[data-ai-topic-hint="channels"]')!.textContent!.trim()).toBe('Hvor mange, aldrig hvem eller hvor meget.');
+    expect($('[data-ai-counts-only]')!.textContent).toBe('Den ser hvor mange og kodenavne for dem, du er forbundet med: aldrig beløb, datoer eller rigtige id’er.');
+    expect($('[data-ai-topic-hint="channels"]')!.textContent!.trim()).toBe('Hvem du er forbundet med (under et kodenavn), aldrig hvor meget.');
   });
 });
 
