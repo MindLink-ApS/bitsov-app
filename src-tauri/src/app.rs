@@ -23544,10 +23544,22 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         }), armed, asked, back)
     }
 
+    /// Sets its flag when dropped: a test that fails while the fake node holds a
+    /// read still lets that read answer, so no server thread is left waiting.
+    struct SetOnDrop<'a>(&'a AtomicBool);
+
+    impl Drop for SetOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// Once the held read reached the node: another node is made active, then the
-    /// call's own again, and only then does the held read answer.
+    /// call's own again, and only then does the held read answer. The wait for the
+    /// read is bounded by End's own wait: a read can only come before End gives up.
     async fn switch_away_and_back(node: &Fake, asked: &AtomicBool, back: &AtomicBool) {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        let _answer = SetOnDrop(back);
+        tokio::time::timeout(END_WAIT_MAX, async {
             while !asked.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
         }).await.expect("the status read reached the node");
         *node.state.node_id.lock().unwrap() = Some(C.into());
@@ -23616,7 +23628,10 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
                 end
             },
             async {
-                tokio::time::timeout(Duration::from_secs(2), async {
+                // A failure below still lets the held reads answer.
+                let (_refuse, _answer) = (SetOnDrop(&switched), SetOnDrop(&restored));
+                // Bounded by End's own wait: its first read can only come before End gives up.
+                tokio::time::timeout(END_WAIT_MAX, async {
                     while attempts.load(Ordering::SeqCst) < 1 { tokio::time::sleep(Duration::from_millis(1)).await; }
                 }).await.expect("End's first read reached the node");
                 *node.state.node_id.lock().unwrap() = Some(C.into());
