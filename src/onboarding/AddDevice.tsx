@@ -1,4 +1,5 @@
 import { hostText } from '../control/hostCopy';
+import { SoftError } from '../control/SoftError';
 import { t } from '../i18n';
 import { isMobilePlatform } from '../platform';
 import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
@@ -108,7 +109,7 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
       <Match when={view()?.state === 'rejected'}><p role="status">{t('obNothingAdded')}</p></Match>
       <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">{t('obDeviceAddedKeepOwner')}</p></Match>
     </Switch>
-    <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:ticket() ? 'poll' : 'status'})}>{t('obTryAgain')}</button></Show>
+    <Show when={error()}><SoftError message={error()} /><button disabled={busy()} onClick={() => void run({action:ticket() ? 'poll' : 'status'})}>{t('obTryAgain')}</button></Show>
   </section>;
 }
 
@@ -161,6 +162,6 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
       </>}</Match>
       <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">{t('obDeviceAddedNoPassword')}</p></Match>
     </Switch>
-    <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:'status'})}>{t('obCheckAgain')}</button><Show when={!waiting()}><button disabled={busy()} onClick={() => void run({action:'cancel'})}>{t('obCancelPendingSetup')}</button></Show></Show>
+    <Show when={error()}><SoftError message={error()} /><button disabled={busy()} onClick={() => void run({action:'status'})}>{t('obCheckAgain')}</button><Show when={!waiting()}><button disabled={busy()} onClick={() => void run({action:'cancel'})}>{t('obCancelPendingSetup')}</button></Show></Show>
   </section>;
 }
