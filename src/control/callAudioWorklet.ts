@@ -11,7 +11,7 @@
  */
 import { JitterBuffer } from './jitterBuffer';
 import { frameSamples } from './pcm';
-import { CAPTURE_PROCESSOR, PLAYOUT_PROCESSOR, type CaptureMessage, type PlayoutMessage, type PlayoutReport } from './callAudioShared';
+import { CAPTURE_PROCESSOR, PLAYOUT_PROCESSOR, PeakLimiter, type CaptureMessage, type PlayoutMessage, type PlayoutReport } from './callAudioShared';
 
 // AudioWorkletGlobalScope: not in lib.dom, declared here for the type-check.
 declare const sampleRate: number;
@@ -71,6 +71,7 @@ class PlayoutProcessor extends AudioWorkletProcessor {
   private readonly next = new Float32Array(this.size);
   private readonly fade = Math.max(1, Math.min(this.size, Math.round(sampleRate * FADE_SECONDS)));
   private readonly ramp = new Float32Array(this.fade);
+  private readonly limiter = new PeakLimiter(sampleRate);
   private current: Float32Array = this.out;
   private offset = this.size;
   private last: Float32Array | null = null;
@@ -153,6 +154,8 @@ class PlayoutProcessor extends AudioWorkletProcessor {
       this.offset += take;
       written += take;
     }
+    // Nothing over -1 dBFS reaches the speakers: there is no other gain stage after this.
+    this.limiter.process(output);
     for (let channel = 1; channel < (outputs[0]?.length ?? 0); channel++) outputs[0][channel].set(output);
     return true;
   }

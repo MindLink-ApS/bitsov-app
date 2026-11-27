@@ -35,7 +35,7 @@ import { decodeMuLaw, encodeMuLaw, PCMU_RATE } from './g711';
 import { Framer, SequencedResampler, StreamResampler, frameSamples } from './pcm';
 import { JitterBuffer, type JitterStats } from './jitterBuffer';
 import { AudioStatsRecorder, micSettings, ROW_MS, type AudioStatRow, type HostQueueStats } from './callAudioStats';
-import { CAPTURE_PROCESSOR, PLAYOUT_PROCESSOR, type CaptureMessage, type PlayoutMessage, type PlayoutReport } from './callAudioShared';
+import { CAPTURE_PROCESSOR, PLAYOUT_PROCESSOR, PeakLimiter, type CaptureMessage, type PlayoutMessage, type PlayoutReport } from './callAudioShared';
 
 export const OPUS_RATE = 48_000;
 export const OPUS_BITRATE = 24_000;
@@ -220,6 +220,8 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
 
   let zeroFrames = 0;
   let silent = false;
+  /** Brings the microphone down to -1 dBFS before encoding; made with the context. */
+  let uplinkLimiter: PeakLimiter | null = null;
   /** Count exact-zero frames from the microphone; our own mute is no evidence either way. */
   const listen = (pcm: Float32Array) => {
     if (!deps.onSilence) return;
@@ -238,7 +240,11 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     if (closed || !context) return;
     rec?.captured(pcm);
     listen(pcm);
-    const frame = muted ? new Float32Array(pcm.length) : pcm;
+    // A microphone (or its gain control) driving past full scale is brought
+    // down to -1 dBFS before the encoder, which would clip it hard. Measured
+    // above (raw), sent limited.
+    if (!uplinkLimiter) uplinkLimiter = new PeakLimiter(context.sampleRate);
+    const frame = muted ? new Float32Array(pcm.length) : uplinkLimiter.process(pcm);
     sending = encoder ? chooseCodec(localCaps, peerCaps) : 'pcmu';
     if (sending === 'opus' && encoder) {
       try {
@@ -348,6 +354,8 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     sink.gain.value = 0;
     source.connect(processor).connect(sink).connect(ctx.destination);
     const jitter = new JitterBuffer<Float32Array>();
+    // The worklet's own playout limits its output; this path does the same.
+    const limiter = new PeakLimiter(ctx.sampleRate);
     let nextAt = 0;
     const frameSeconds = size / ctx.sampleRate;
     const tick = () => {
@@ -357,7 +365,9 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
         const pulled = jitter.pull();
         if (pulled.frame) {
           const buffer = ctx.createBuffer(1, size, ctx.sampleRate);
-          buffer.getChannelData(0).set(pulled.frame);
+          const channel = buffer.getChannelData(0);
+          channel.set(pulled.frame);
+          limiter.process(channel);
           const node = ctx.createBufferSource();
           node.buffer = buffer;
           node.connect(ctx.destination);
