@@ -348,6 +348,8 @@ pub mod runtime;
 pub mod audit_log;
 /// The phone-book view: masked handles for channel peers (read path only).
 pub mod handles;
+/// Where the bundled `bitsov-mcp` shim is, for an AI app's settings (not wired).
+pub mod shim_path;
 
 #[cfg(test)]
 mod tests;
