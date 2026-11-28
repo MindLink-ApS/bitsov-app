@@ -39,21 +39,24 @@ public repository. Use neutral examples; omit personal paths, infrastructure
 addresses, private repository references and assistant session links. Report
 security concerns through [SECURITY.md](SECURITY.md).
 
-The Fossil Check workflow scans added lines and changed paths. Maintainers
-store one SHA-256 hash per line in the Actions repository variable
-`FOSSIL_PRIVATE_NAME_HASHES`. To add a hash, run the helper locally:
+The Fossil Check workflow scans added lines, changed paths, and the commit
+messages and author and committer identities of the change. Commits must use a
+public email address: machine-local hosts (such as `.local`) and IP-literal
+addresses are rejected.
+
+Maintainers keep the private repository names in the secret
+`FOSSIL_PRIVATE_NAMES`, one slug per line, stored both as an Actions secret and
+as a Dependabot secret of this repository. Only the checking step receives the
+secret, Actions masks it in logs, and the script keeps only keyed digests under
+a key that exists for that run, and prints neither names nor digests. Pull
+requests from forks receive no secrets; for those the check runs the public
+patterns only and says so in a notice. On every other
+event a missing secret fails the check. Existing context and deletions are
+allowed so cleanup can proceed.
+
+To run the check locally without the private list:
 
 ```sh
-python3 scripts/ci/fossil-check.py --hash-private-names
+FOSSIL_REQUIRE_PRIVATE_NAMES=false python3 scripts/ci/fossil-check.py \
+  --base "$(git rev-parse origin/main)" --head "$(git rev-parse HEAD)"
 ```
-
-Enter one repository slug per line on standard input, then signal end-of-file
-(Ctrl-D on an empty line on macOS/Linux). The helper strips surrounding
-whitespace and case-folds each slug before hashing it. Append the emitted hashes
-to `FOSSIL_PRIVATE_NAME_HASHES` in the repository's Actions variables, preserving
-all existing hashes. Keep the input names out of repository variables, tracked
-files and shell history.
-
-Only hashes enter CI step environments, so private names do not appear in
-the step's environment log. Missing or invalid hash configuration fails the
-check. Existing context and deletions are allowed so cleanup can proceed.
