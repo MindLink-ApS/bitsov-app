@@ -2121,3 +2121,20 @@ html[data-platform='ios'] .call-confirm {
   bottom: calc(var(--keyboard-inset) + max(12px, var(--safe-area-bottom)));
   max-height: calc(var(--visible-height, 100dvh) - max(12px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
 }
+
+/* Settings → AI apps: plain, large targets (the 70-year-old bar). */
+.ai-apps { display: grid; gap: var(--s-2); }
+.ai-apps button, .ai-apps-switch, .ai-apps-choices label { min-height: 44px; }
+.ai-apps-switch { display: flex; align-items: center; gap: var(--s-2); font-weight: 600; }
+.ai-apps-switch input { width: 1.5rem; height: 1.5rem; }
+.ai-apps-request { display: grid; gap: var(--s-2); padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--r-control); }
+.ai-apps-words { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-3); margin: 0; padding-left: 1.5em; font-size: 1.75rem; font-weight: 600; line-height: 1.3; }
+.ai-apps-words li { white-space: nowrap; }
+.ai-apps-choices { display: grid; gap: var(--s-1); border: 0; padding: 0; margin: 0; }
+.ai-apps-choices label { display: flex; align-items: center; gap: var(--s-1); flex-wrap: wrap; }
+.ai-apps-choices input { width: 1.25rem; height: 1.25rem; }
+.ai-apps-warning { padding: var(--s-2); border-left: 4px solid var(--err); background: color-mix(in srgb, var(--err) 8%, transparent); }
+.ai-apps-warning > p { margin: 0; font-weight: 600; }
+.ai-apps-actions { gap: var(--s-2); flex-wrap: wrap; }
+.ai-apps-clients, .ai-apps-activity { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-2); }
+.ai-apps-activity { font-size: var(--t-sm); gap: var(--s-1); }
