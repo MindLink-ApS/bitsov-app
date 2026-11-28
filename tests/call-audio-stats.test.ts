@@ -64,15 +64,32 @@ describe('LevelMeter', () => {
     expect(m.take().samples).toBe(0);
   });
 
-  it('counts all-zero render quanta inside a frame, including the short last block', () => {
+  it('counts each 128 exact zeros in a row, wherever the run starts', () => {
     const m = new LevelMeter();
     const f = new Float32Array(960); // 7 full blocks of 128 and one of 64
-    f[3 * QUANTUM + 5] = 0.1; // block 3 is not zero
-    f[959] = 0.1; // the short last block is not zero
+    f[3 * QUANTUM + 5] = 0.1; // zeros 0..388 (3 runs of 128), then 390..958 (4)
+    f[959] = 0.1;
     m.push(f, true);
     const level = m.take();
     expect(level.quanta).toBe(8);
-    expect(level.zeroQuanta).toBe(6);
+    expect(level.zeroQuanta).toBe(7);
+  });
+
+  it('sees a microphone hand-off hole that does not line up with a frame, also across frame edges', () => {
+    // The capture worklet cuts 960-sample frames from 128-sample render
+    // quanta, so a quantum the microphone left empty sits at offset 0 or 64
+    // in a frame, or straddles two frames. Each is one hole.
+    const quanta = 1125; // 150 frames, 3 s
+    // Quanta 8..14 of every 15 start 64 samples into a 128-block of their frame.
+    const holes = new Set(Array.from({ length: 8 }, (_, m) => 15 * m + 8 + (m % 7)));
+    const stream = new Float32Array(quanta * QUANTUM);
+    for (let q = 0; q < quanta; q++) {
+      if (holes.has(q)) continue;
+      for (let i = 0; i < QUANTUM; i++) stream[q * QUANTUM + i] = 0.5 * Math.sin(2 * Math.PI * 437.3 * (q * QUANTUM + i) / 48_000) + 0.25;
+    }
+    const m = new LevelMeter();
+    for (let at = 0; at + 960 <= stream.length; at += 960) m.push(stream.subarray(at, at + 960), true);
+    expect(m.take().zeroQuanta).toBe(holes.size);
   });
 
   it('does not count quanta for playout levels', () => {

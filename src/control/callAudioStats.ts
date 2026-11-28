@@ -37,7 +37,13 @@ export type Level = {
 };
 
 export type CaptureLevel = Level & {
-  /** Render-quantum blocks that were exactly zero (counted within each 20 ms frame). */
+  /**
+   * Stretches of 128 exact-zero samples in a row (one render quantum's
+   * worth), wherever they fall: across a frame edge or a row edge too. A
+   * microphone hand-off that had nothing leaves exactly such a quantum, and a
+   * 20 ms frame (7.5 quanta) rarely lines up with it. Each further 128 zeros
+   * in the same run count again, so a silent stretch counts its length.
+   */
   zeroQuanta: number;
   quanta: number;
 };
@@ -113,11 +119,13 @@ export class LevelMeter {
   clipped = 0;
   zeroQuanta = 0;
   quanta = 0;
+  /** Exact zeros in a row so far, carried from frame to frame. */
+  private zeroRun = 0;
 
   /**
    * One frame. A single pass, no allocation. A sample that is not a finite
    * number (NaN, ±Infinity) is left out of the levels and the sample count;
-   * it still makes its block not silent.
+   * it also breaks a run of zeros.
    */
   push(pcm: Float32Array, countQuanta = false) {
     const n = pcm.length;
@@ -125,16 +133,14 @@ export class LevelMeter {
     let sumSq = 0;
     let clipped = 0;
     let counted = 0;
-    let blockSum = 0;
     let blockLen = 0;
     for (let i = 0; i < n; i++) {
       const v = pcm[i];
       if (!Number.isFinite(v)) {
         if (countQuanta) {
-          blockSum = 1;
+          this.zeroRun = 0;
           if (++blockLen === QUANTUM || i === n - 1) {
             this.quanta++;
-            blockSum = 0;
             blockLen = 0;
           }
         }
@@ -146,11 +152,13 @@ export class LevelMeter {
       if (a >= 1) clipped++;
       sumSq += v * v;
       if (countQuanta) {
-        blockSum += a;
+        if (v === 0) {
+          if (++this.zeroRun % QUANTUM === 0) this.zeroQuanta++;
+        } else {
+          this.zeroRun = 0;
+        }
         if (++blockLen === QUANTUM || i === n - 1) {
           this.quanta++;
-          if (blockSum === 0) this.zeroQuanta++;
-          blockSum = 0;
           blockLen = 0;
         }
       }
