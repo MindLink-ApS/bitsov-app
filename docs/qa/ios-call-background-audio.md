@@ -162,6 +162,19 @@ A passing UI label alone is insufficient: verify audible speech in **both**
 directions during the locked interval. Record failures by OS version and audio
 route before calling the device verification complete.
 
+## M6 node-routed audio
+
+M6 builds route call audio through the node (`docs/CALLS.md`), not WebKit's
+WebRTC media. The page cuts 20 ms microphone frames in an AudioWorklet and
+passes every frame over a Tauri channel to the host, which sends it through
+the loopback proxy and Noise tunnel; received frames take the reverse path.
+Locked-screen continuity therefore also depends on the web page's audio
+worklets, its IPC to the host and the host's tunnel staying scheduled while
+the app is in the background. The checks above apply unchanged; record for
+cases 2, 3 and 9 whether frames keep flowing in both directions (no growing
+silence or jitter-buffer underruns) and whether the call survives a 30-second
+lock without a reconnect.
+
 ## Follow-ups
 
 - Meetings: add a separately reviewed audio-session lifecycle and background
