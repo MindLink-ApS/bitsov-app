@@ -122,11 +122,16 @@ impl Recorded {
 }
 
 /// Compare the recorded shim path with the current one. The same path, or
-/// two spellings of the same file (case, `.` and `..`), is current.
+/// two spellings of the same file (case, `.` and `..`), is current. A
+/// recorded path that no longer resolves while the current one does is moved,
+/// even if it reads the same once `..` is folded (its folder is gone). Only
+/// when neither resolves are the two compared as written.
 pub fn compare_recorded(recorded: &Path, current: &Path) -> Recorded {
     let same = match (std::fs::canonicalize(recorded), std::fs::canonicalize(current)) {
         (Ok(a), Ok(b)) => a == b,
-        _ => normal(recorded) == normal(current),
+        (Err(_), Err(_)) => normal(recorded) == normal(current),
+        // Exactly one resolves: the settings point to something that is not there.
+        _ => false,
     };
     if same {
         Recorded::Current
@@ -253,6 +258,22 @@ mod tests {
         std::fs::rename(&renamed, moved.join("BitSov.app")).unwrap();
         let there = shim_beside(&moved.join("BitSov.app/Contents/MacOS/bitsov-app")).unwrap();
         assert!(matches!(compare_recorded(&shim, &there), Recorded::Moved { .. }));
+        // The recorded path runs through a folder that is gone: it no longer
+        // resolves, though folding `..` makes it read like today's path.
+        let (temp2, exe2) = app(Some(b"shim"));
+        let current = shim_beside(&exe2).unwrap();
+        let old = temp2.path().join("old");
+        std::fs::create_dir(&old).unwrap();
+        let through_old = old.join("..").join("BitSov.app/Contents/MacOS").join(SHIM_FILE);
+        assert_eq!(compare_recorded(&through_old, &current), Recorded::Current, "resolves while the folder is there");
+        std::fs::remove_dir(&old).unwrap();
+        assert_eq!(normal(&through_old), normal(&current), "reads the same once folded");
+        assert_eq!(
+            compare_recorded(&through_old, &current),
+            Recorded::Moved { from: through_old.clone(), to: current.clone() },
+            "a recorded path that no longer resolves is never current"
+        );
+        assert!(matches!(compare_recorded(&current, &through_old), Recorded::Moved { .. }), "either way round");
         // Neither exists: compared as written.
         assert_eq!(compare_recorded(Path::new("/gone/a/../b/bitsov-mcp"), Path::new("/gone/b/bitsov-mcp")), Recorded::Current);
         assert!(matches!(compare_recorded(Path::new("/gone/a/bitsov-mcp"), Path::new("/gone/b/bitsov-mcp")), Recorded::Moved { .. }));
